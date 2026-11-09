@@ -820,6 +820,8 @@ impl Kline {
             bail!("image must be exactly 256 KB");
         }
         self.set_write_delay(data_delay_ms);
+        // Enter programming mode before touching flash.
+        self.request(&frame_uprog_ein(), Duration::from_secs(3))?;
         self.erase_flash(0x00000, 0x00)?;
         thread::sleep(Duration::from_millis(100));
         let mut done = 0usize;
@@ -845,6 +847,8 @@ impl Kline {
             bail!("calibration image must be exactly 32 KB");
         }
         self.set_write_delay(data_delay_ms);
+        // Enter programming mode before touching flash.
+        self.request(&frame_uprog_ein(), Duration::from_secs(3))?;
         self.erase_flash(CAL_START as u32, 0x00)?;
         thread::sleep(Duration::from_millis(100));
         let mut done = 0usize;

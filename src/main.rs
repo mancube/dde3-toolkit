@@ -11,6 +11,7 @@
 //! for headless/bench use.
 
 mod app;
+mod bench;
 mod checksum;
 mod dtc;
 mod protocol;
@@ -18,6 +19,7 @@ mod sim;
 
 use anyhow::{Context, Result};
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::checksum::{correct, verify, IMAGE_SIZE};
@@ -38,6 +40,10 @@ fn print_usage() {
     eprintln!("  fault-clear                Clear fault memory (K-line BAP 12 09 07 0E 42 41 50 00)");
     eprintln!("  dtc                        Read DS2 fault memory with texts and freeze frames");
     eprintln!("  ds2-clear                  Clear DS2 fault memory (12 04 05)");
+    eprintln!("  bench                      Headless run: identify + optional read/write,");
+    eprintln!("                             progress and timing on stderr, useful exit status");
+    eprintln!("    [--info|--read|--read-cal|--write|--write-cal]");
+    eprintln!("    [--image <path>] [--out <path>]");
     eprintln!("  checksum <image.bin>       Verify and optionally correct flash checksums");
     eprintln!("  uprog-ein                  Enter programming mode (12 04 0D)");
     eprintln!("  diagnose-ende              Leave session / end diagnostics (12 04 9F)");
@@ -98,8 +104,10 @@ fn run() -> Result<()> {
     let mut port = "/dev/ttyUSB1".to_string();
     let mut baud: u32 = 9600;
     let mut data_delay_ms: u64 = 3;
-    let mut echo: bool = true;
+    let echo: bool = true;
     let mut sim: bool = false;
+    let mut bench_image: Option<String> = None;
+    let mut bench_out: Option<String> = None;
 
     let mut i = 2;
     while i < args.len() {
@@ -125,6 +133,22 @@ fn run() -> Result<()> {
                     .with_context(|| format!("invalid data delay: {}", args[i]))?;
             }
             "--sim" => sim = true,
+            "--image" => {
+                i += 1;
+                bench_image = Some(
+                    args.get(i)
+                        .cloned()
+                        .context("--image requires a value")?,
+                );
+            }
+            "--out" => {
+                i += 1;
+                bench_out = Some(
+                    args.get(i)
+                        .cloned()
+                        .context("--out requires a value")?,
+                );
+            }
             _ => {}
         }
         i += 1;
@@ -330,6 +354,29 @@ fn run() -> Result<()> {
             k.clear_faults_ds2()?;
             println!("DS2 fault memory cleared");
             Ok(())
+        }
+        "bench" => {
+            let mut mode = bench::Mode::Info;
+            for a in &args[2..] {
+                match a.as_str() {
+                    "--read" => mode = bench::Mode::Read,
+                    "--read-cal" => mode = bench::Mode::ReadCal,
+                    "--write" => mode = bench::Mode::Write,
+                    "--write-cal" => mode = bench::Mode::WriteCal,
+                    "--info" => mode = bench::Mode::Info,
+                    _ => {}
+                }
+            }
+            let args = bench::BenchArgs {
+                port,
+                image: bench_image.map(PathBuf::from),
+                out: bench_out.map(PathBuf::from),
+                mode,
+                baud,
+                data_delay: data_delay_ms,
+                sim,
+            };
+            bench::run(args)
         }
         "checksum" => {
             let image_path = args.get(2).context("checksum requires <image.bin>").cloned()?;
