@@ -1,0 +1,25 @@
+[package]
+name = "dde3-toolkit"
+version = "0.1.0"
+edition = "2021"
+description = "DDE3 (BMW EDC15 DDE3.0) K-line diagnostic tool - flash read/write, live data, protocol logging, fault clear"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+serialport = "4.10"
+hex = "0.4"
+thiserror = "1"
+crossbeam-channel = "0.5"
+eframe = { version = "0.31.1", default-features = false, features = [
+    "wayland",
+    "glow",
+    "default_fonts",
+] }
+rfd = "0.17"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
