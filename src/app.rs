@@ -218,6 +218,7 @@ pub struct App {
     dtcs: Vec<protocol::Dtc>,
     dtc_clear_armed: bool,
     battery_v: Option<f64>,
+    post_write_pending: bool,
     write_path: String,
     image: Option<Vec<u8>>,
     image_name: String,
@@ -270,6 +271,7 @@ impl App {
             dtcs: Vec::new(),
             dtc_clear_armed: false,
             battery_v: None,
+            post_write_pending: false,
             write_path: String::new(),
             image: None,
             image_name: String::new(),
@@ -376,8 +378,10 @@ impl App {
                     self.busy = false;
                     self.active_job = None;
                     self.progress = 1.0;
-                    self.progress_text = "Write complete; ECU may need ~30 s before answering again".into();
-                    self.status = "Write complete".into();
+                    self.progress_text =
+                        "Write and verify complete; power cycle the ECU before clearing faults".into();
+                    self.status = "Write complete — power cycle the ECU".into();
+                    self.post_write_pending = true;
                 }
                 Msg::DtcDone(dtcs) => {
                     self.busy = false;
@@ -670,12 +674,15 @@ impl App {
                 return;
             };
             let _ = tx.send(Msg::Status("Erasing and writing".into()));
+            snapshot_battery(k, &tx);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(done as f32 / total as f32, format!("Writing {done} / {total} bytes")));
             };
             k.set_silence(10);
             k.set_write_delay(3);
-            let result = k.write_full(&image, if fast { 125000 } else { 38400 }, if fast { 0 } else { 3 }, &mut progress);
+            // DDE3 K-line is fixed at 9600 8E1; `fast` only drops the
+            // inter-byte pause (unverified on real hardware).
+            let result = k.write_full(&image, 9600, if fast { 0 } else { 3 }, &mut progress);
             k.set_write_delay(3);
             let logs = k.take_logs();
             for l in logs {
@@ -718,12 +725,15 @@ impl App {
                 return;
             };
             let _ = tx.send(Msg::Status("Erasing and writing calibration".into()));
+            snapshot_battery(k, &tx);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(done as f32 / total as f32, format!("Writing calibration {done} / {total} bytes")));
             };
             k.set_silence(10);
             k.set_write_delay(3);
-            let result = k.write_calibration(&image, if fast { 125000 } else { 38400 }, if fast { 0 } else { 3 }, &mut progress);
+            // DDE3 K-line is fixed at 9600 8E1; `fast` only drops the
+            // inter-byte pause (unverified on real hardware).
+            let result = k.write_calibration(&image, 9600, if fast { 0 } else { 3 }, &mut progress);
             k.set_write_delay(3);
             let logs = k.take_logs();
             for l in logs {
@@ -866,6 +876,47 @@ impl App {
                     }
                     report_error(&tx, "fault clear failed", &e);
                 }
+            }
+        });
+    }
+
+    /// Fault-memory clear after a successful write: the ECU reboots after
+    /// `FLASH_SCHREIBEN_ENDE`, so the user power-cycles first, then we wait
+    /// 5 s, clear the DS2 fault memory and re-read it.
+    fn start_post_write_clear(&mut self) {
+        if self.busy {
+            self.error = Some("Another operation is still running".into());
+            return;
+        }
+        if !self.connected {
+            self.error = Some("Connect to the ECU first".into());
+            return;
+        }
+        self.stop_live();
+        self.dtc_clear_armed = false;
+        self.active_job = Some(Job::DtcClear);
+        self.start(move |link, tx| {
+            let _ = tx.send(Msg::Status("Waiting 5 s after power cycle".into()));
+            thread::sleep(Duration::from_secs(5));
+            let mut guard = lock_or_recover(&link);
+            let Some(k) = guard.as_mut() else {
+                let _ = tx.send(Msg::Error("link closed".into()));
+                return;
+            };
+            let mut result = k.clear_faults_ds2();
+            if result.is_err() && k.recover_link_for(Duration::from_secs(5)) {
+                result = k.clear_faults_ds2();
+            }
+            match result {
+                Ok(()) => {
+                    let dtcs = k.read_dtcs().unwrap_or_default();
+                    let logs = k.take_logs();
+                    for l in logs {
+                        let _ = tx.send(Msg::Log(l));
+                    }
+                    let _ = tx.send(Msg::DtcDone(dtcs));
+                }
+                Err(e) => report_error(&tx, "post-write fault clear failed", &e),
             }
         });
     }
@@ -1592,7 +1643,7 @@ impl App {
                     ui.label(RichText::new("Full write erases program and calibration. Partial write erases calibration only. Checksums are corrected automatically before writing. Do not interrupt power.").size(12.0).color(TEXT));
                 });
             ui.add_space(8.0);
-            ui.checkbox(&mut self.fast_write, "Fast write (125000 baud, 10 ms silence, no inter-byte pause)");
+            ui.checkbox(&mut self.fast_write, "Fast write (no inter-byte pause; DDE3 stays at 9600 baud)");
             ui.label(RichText::new("Fast mode uses the read-path baud and removes the 3 ms per-byte pacing. Bench-test before relying on it.").size(11.0).color(MUTED));
             ui.add_space(10.0);
             ui.checkbox(&mut self.backup_ok, "I have a verified full backup of this ECU");
@@ -1991,6 +2042,56 @@ impl eframe::App for App {
         self.top_bar(ctx);
         self.side_nav(ctx);
         self.central(ctx);
+        self.post_write_modal(ctx);
+    }
+}
+
+impl App {
+    /// Shown once after a successful write: the ECU must be power-cycled
+    /// before its (rebuilt) fault memory can be cleared.
+    fn post_write_modal(&mut self, ctx: &egui::Context) {
+        if !self.post_write_pending {
+            return;
+        }
+        let mut confirm = false;
+        let mut skip = false;
+        egui::Modal::new(egui::Id::new("post_write_clear")).show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.heading("Power cycle the ECU");
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "The write is complete. Switch the ignition/ECU power off and on, wait for the ECU to boot, then press Confirm. The tool waits 5 s and clears the fault memory.",
+                )
+                .size(12.0)
+                .color(TEXT),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_sized(
+                        Vec2::new(190.0, 32.0),
+                        egui::Button::new(RichText::new("Confirm power cycle").color(BG)).fill(ACCENT),
+                    )
+                    .clicked()
+                {
+                    confirm = true;
+                }
+                if ui
+                    .add_sized(Vec2::new(120.0, 32.0), egui::Button::new("Skip"))
+                    .clicked()
+                {
+                    skip = true;
+                }
+            });
+        });
+        if confirm {
+            self.post_write_pending = false;
+            self.start_post_write_clear();
+        } else if skip {
+            self.post_write_pending = false;
+            self.status = "Write complete (fault memory not cleared)".into();
+        }
     }
 }
 
@@ -2172,6 +2273,17 @@ fn live_card(ui: &mut Ui, var: &LiveVar, value: f64, history: &[f32], width: f32
 
 fn default_path(name: &str) -> String {
     std::env::var("HOME").map(|h| format!("{h}/{name}")).unwrap_or_else(|_| name.to_string())
+}
+
+/// Pre-write battery snapshot (ADF id 0x0F65, DDE3 scale 0.02037243 / LSB).
+fn snapshot_battery(k: &mut Kline, tx: &Sender<Msg>) {
+    if let Ok(values) = k.live_values(&[(0x0F, 0x65)], true) {
+        if let Some(raw) = values.first() {
+            let v = *raw as f64 * 0.02037243;
+            let _ = tx.send(Msg::Log(format!("BATTERY pre-write {v:.2} V (raw {raw})")));
+            let _ = tx.send(Msg::Battery(v));
+        }
+    }
 }
 
 fn lock_or_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
