@@ -22,7 +22,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::checksum::{correct, verify, IMAGE_SIZE};
+use crate::checksum::{correct, verify, CAL_LEN, IMAGE_SIZE};
 use crate::protocol::Kline;
 
 fn print_usage() {
@@ -37,7 +37,9 @@ fn print_usage() {
     eprintln!("  write <image.bin>          Erase + write full 256 KB flash image");
     eprintln!("  write-cal <cal.bin>        Erase + write calibration area only");
     eprintln!("  seed-key <Z>               Send seed/key init (12 08 90 ... 05 <Z>)");
-    eprintln!("  fault-clear                Clear fault memory (K-line BAP 12 09 07 0E 42 41 50 00)");
+    eprintln!(
+        "  fault-clear                Clear fault memory (K-line BAP 12 09 07 0E 42 41 50 00)"
+    );
     eprintln!("  dtc                        Read DS2 fault memory with texts and freeze frames");
     eprintln!("  ds2-clear                  Clear DS2 fault memory (12 04 05)");
     eprintln!("  bench                      Headless run: identify + optional read/write,");
@@ -71,10 +73,14 @@ fn parse_hex_u32(s: &str) -> Result<u32> {
 }
 
 fn read_image(path: &str, expected: usize) -> Result<Vec<u8>> {
-    let data = std::fs::read(path)
-        .with_context(|| format!("cannot read image file {path}"))?;
+    let data = std::fs::read(path).with_context(|| format!("cannot read image file {path}"))?;
     if data.len() != expected {
-        anyhow::bail!("image {path} is {} bytes, expected {} ({})", data.len(), expected, path);
+        anyhow::bail!(
+            "image {path} is {} bytes, expected {} ({})",
+            data.len(),
+            expected,
+            path
+        );
     }
     Ok(data)
 }
@@ -135,19 +141,11 @@ fn run() -> Result<()> {
             "--sim" => sim = true,
             "--image" => {
                 i += 1;
-                bench_image = Some(
-                    args.get(i)
-                        .cloned()
-                        .context("--image requires a value")?,
-                );
+                bench_image = Some(args.get(i).cloned().context("--image requires a value")?);
             }
             "--out" => {
                 i += 1;
-                bench_out = Some(
-                    args.get(i)
-                        .cloned()
-                        .context("--out requires a value")?,
-                );
+                bench_out = Some(args.get(i).cloned().context("--out requires a value")?);
             }
             _ => {}
         }
@@ -183,24 +181,32 @@ fn run() -> Result<()> {
                 // data from [3] (decompiled FLASH_LESEN: SB at S1[2],
                 // data copied from S1[3]).
                 if r.first() != Some(&0x92) || r.get(2) != Some(&0xA0) {
-                    anyhow::bail!("unexpected flash read reply at 0x{addr:06X}: {}", protocol::hex(&r));
+                    anyhow::bail!(
+                        "unexpected flash read reply at 0x{addr:06X}: {}",
+                        protocol::hex(&r)
+                    );
                 }
                 let data_start = 3;
                 if r.len() < data_start + count as usize {
-                    anyhow::bail!("short flash read reply at 0x{addr:06X}: {}", protocol::hex(&r));
+                    anyhow::bail!(
+                        "short flash read reply at 0x{addr:06X}: {}",
+                        protocol::hex(&r)
+                    );
                 }
                 image.extend_from_slice(&r[data_start..data_start + count as usize]);
                 addr += count as u32;
                 done += count as usize;
                 println!("read 0x{addr:06X} / 0x{:06X} ({} bytes)", IMAGE_SIZE, done);
             }
-            std::fs::write(&out, &image)
-                .with_context(|| format!("cannot write {out}"))?;
+            std::fs::write(&out, &image).with_context(|| format!("cannot write {out}"))?;
             println!("wrote {} bytes to {out}", image.len());
             Ok(())
         }
         "read-cal" => {
-            let out = args.get(2).context("read-cal requires <out.bin>").cloned()?;
+            let out = args
+                .get(2)
+                .context("read-cal requires <out.bin>")
+                .cloned()?;
             let mut k = Kline::open(&port, baud, echo)?;
             k.set_data_delay(data_delay_ms);
             if sim {
@@ -215,17 +221,22 @@ fn run() -> Result<()> {
                 let req = crate::protocol::frame_flash_read(addr, count);
                 let r = k.request(&req, Duration::from_secs(5))?;
                 if r.first() != Some(&0x92) || r.get(2) != Some(&0xA0) {
-                    anyhow::bail!("unexpected flash read reply at 0x{addr:06X}: {}", protocol::hex(&r));
+                    anyhow::bail!(
+                        "unexpected flash read reply at 0x{addr:06X}: {}",
+                        protocol::hex(&r)
+                    );
                 }
                 let data_start = 3;
                 if r.len() < data_start + count as usize {
-                    anyhow::bail!("short flash read reply at 0x{addr:06X}: {}", protocol::hex(&r));
+                    anyhow::bail!(
+                        "short flash read reply at 0x{addr:06X}: {}",
+                        protocol::hex(&r)
+                    );
                 }
                 image.extend_from_slice(&r[data_start..data_start + count as usize]);
                 addr += count as u32;
             }
-            std::fs::write(&out, &image)
-                .with_context(|| format!("cannot write {out}"))?;
+            std::fs::write(&out, &image).with_context(|| format!("cannot write {out}"))?;
             println!("wrote {} bytes to {out}", image.len());
             Ok(())
         }
@@ -270,7 +281,10 @@ fn run() -> Result<()> {
             Ok(())
         }
         "write-cal" => {
-            let cal_path = args.get(2).context("write-cal requires <cal.bin>").cloned()?;
+            let cal_path = args
+                .get(2)
+                .context("write-cal requires <cal.bin>")
+                .cloned()?;
             let cal = read_image(&cal_path, 0x8000)?;
             confirm_write()?;
             let mut k = Kline::open(&port, baud, echo)?;
@@ -379,31 +393,43 @@ fn run() -> Result<()> {
             bench::run(args)
         }
         "checksum" => {
-            let image_path = args.get(2).context("checksum requires <image.bin>").cloned()?;
-            let image = read_image(&image_path, IMAGE_SIZE)?;
+            let image_path = args
+                .get(2)
+                .context("checksum requires <image.bin>")
+                .cloned()?;
+            let image = std::fs::read(&image_path)
+                .with_context(|| format!("cannot read image file {image_path}"))?;
+            if !(image.len() == IMAGE_SIZE || image.len() == CAL_LEN) {
+                anyhow::bail!("image {image_path} is {} bytes; expected 32768 (32 KB calibration) or 262144 (256 KB full)", image.len());
+            }
             let results = verify(&image);
+            if results.is_empty() {
+                anyhow::bail!("no EDC15M TDI V3.1 checksum block found in {image_path}");
+            }
             for r in &results {
                 println!(
-                    "checksum {:<16} {:08X} {}",
+                    "checksum {:<12} 0x{:05X} stored {:08X} computed {:08X} {}",
                     r.name,
-                    r.value,
+                    r.pos,
+                    r.stored,
+                    r.computed,
                     if r.ok { "OK" } else { "BAD" }
                 );
             }
             let all_ok = results.iter().all(|r| r.ok);
             if !all_ok {
-                eprintln!("WARNING: DDE3 checksum algorithm is UNVERIFIED — do not flash corrected images without hardware validation");
                 let fixed = correct(&image);
                 std::fs::write(&image_path, &fixed)
                     .with_context(|| format!("cannot write corrected image {image_path}"))?;
-                println!("checksums corrected and written to {image_path}");
+                println!("checksums corrected and written back to {image_path}");
+                println!("re-verify with `checksum` before flashing");
             } else {
                 println!("all checksums OK");
             }
             if all_ok {
                 Ok(())
             } else {
-                anyhow::bail!("checksums were bad and have been corrected (UNVERIFIED algorithm)");
+                anyhow::bail!("checksums were bad and have been corrected in place");
             }
         }
         "uprog-ein" => {
@@ -422,7 +448,10 @@ fn run() -> Result<()> {
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
             }
-            let _ = k.request(&crate::protocol::frame_diagnose_ende(), Duration::from_secs(3))?;
+            let _ = k.request(
+                &crate::protocol::frame_diagnose_ende(),
+                Duration::from_secs(3),
+            )?;
             println!("DIAGNOSE_ENDE sent");
             Ok(())
         }
@@ -439,9 +468,20 @@ fn main() {
     // GUI when there are no arguments, or when a GUI-only flag is present
     // (CLI commands are command-first: `dde3-toolkit <command> [options]`).
     const GUI_FLAGS: &[&str] = &[
-        "--gui", "--demo", "--autoconnect", "--auto-live", "--auto-read",
-        "--auto-cal", "--auto-log", "--auto-write-cal", "--auto-write",
-        "--fast-write", "--show-vars", "--tab", "--width", "--height",
+        "--gui",
+        "--demo",
+        "--autoconnect",
+        "--auto-live",
+        "--auto-read",
+        "--auto-cal",
+        "--auto-log",
+        "--auto-write-cal",
+        "--auto-write",
+        "--fast-write",
+        "--show-vars",
+        "--tab",
+        "--width",
+        "--height",
     ];
     if args.len() == 1 || args.iter().any(|a| GUI_FLAGS.contains(&a.as_str())) {
         let demo = args.iter().any(|a| a == "--demo");
@@ -496,11 +536,24 @@ fn main() {
         let _ = eframe::run_native(
             "DDE3 Toolkit",
             native_options,
-            Box::new(move |cc| Ok(Box::new(app::App::new(
-                cc, demo, tab, autoconnect, auto_live, auto_read, auto_cal,
-                auto_log, show_vars, port, image, auto_write_cal, auto_write,
-                fast_write,
-            )))),
+            Box::new(move |cc| {
+                Ok(Box::new(app::App::new(
+                    cc,
+                    demo,
+                    tab,
+                    autoconnect,
+                    auto_live,
+                    auto_read,
+                    auto_cal,
+                    auto_log,
+                    show_vars,
+                    port,
+                    image,
+                    auto_write_cal,
+                    auto_write,
+                    fast_write,
+                )))
+            }),
         );
         return;
     }

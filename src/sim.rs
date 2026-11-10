@@ -88,8 +88,8 @@ impl SimEcu {
                 let mut r = Self::status(p, len_echo, SB_OK);
                 let cs = crate::checksum::verify(&self.flash)
                     .into_iter()
-                    .find(|b| b.name == "application")
-                    .map(|b| b.value)
+                    .find(|b| b.name == "calibration")
+                    .map(|b| b.stored)
                     .unwrap_or(0);
                 r.extend_from_slice(&cs.to_be_bytes());
                 r

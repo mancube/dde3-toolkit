@@ -6,6 +6,11 @@ protocol, which was reverse-engineered from `10DDE30.prg` and
 `DDE30DS0.prg` (WinkFP bytecode) with a custom Python VM
 (`tools/prg_vm.py`). See `HANDOVER.md` for the full narrative.
 
+> **Naming: EDC15M and DDE3 are the same ECU.** Bosch EDC15M is the chip /
+> family name; "DDE 3.0" is the hardware name the bench tools use. The
+> reference Python checksum tool (`edc15m-checksum-tool/`) works on the exact
+> reads this toolkit produces — "EDC15M" in the docs means this ECU.
+
 ## Features
 
 - **Flash read** — full 256 KB or the 32 KB calibration region (0x38000–0x3FFFF)

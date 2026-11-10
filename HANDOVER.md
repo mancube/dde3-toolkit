@@ -1,9 +1,12 @@
 # DDE3 Toolkit — Handover Document
 
 > For the agent taking over. Read this fully before starting.
-> **Read §18 (2026-11-11 status) first — fault read/clear is solved, DTC tab and
-> bench runner added, and the toolkit is now its own git repo.**
-> Then §0b (session-4 status, where the plan was re-scoped).
+> **Read §19 first — session 8: the checksum false-BAD bug is fixed,
+> `checksum.rs` is re-ported line-for-line from the Python tool with
+> byte-for-byte parity, and EDC15M == DDE3 (same ECU) is documented.**
+> Then §18 (2026-11-11 status — fault read/clear solved, DTC tab, bench
+> runner, git repo), then §0b (session-4 status, where the plan was
+> re-scoped).
 >
 > ⚠️ §0–§13 were **reconstructed on 2026-11-09** after an editing accident
 > truncated this file. The reconstruction uses the session-3/4 summary plus
@@ -102,13 +105,28 @@ Key external sources (see §8): `10DDE30.prg`, `decompiled.txt`,
 0x0115bf  STATUS_SYNC_MODE
 ```
 
-## 5. Checksums (TDI V3.1 model, from edc15m-checksum-tool)
+## 5. Checksums (TDI V3.1, ported from edc15m-checksum-tool)
 
-- Flash image checksum computed over the image with the TDI V3.1 algorithm;
-  dde4-toolkit's `checksum.rs` (244 lines) is the working reference — same
-  family, adapted to DDE3 base/size (DDE3 flash read base 0x00000, 256 KB).
+- **EDC15M and DDE3 are the same ECU** — Bosch EDC15M is the chip/family
+  name, DDE 3.0 the hardware name. The Python tool in
+  `edc15m-checksum-tool/edc15m_checksum.py` works on the exact reads this
+  toolkit produces; `src/checksum.rs` is a line-for-line port of it.
+- Bosch **TDI V3.1**: 32-bit little-endian checksum over a block range,
+  seeded 16-bit rolling algorithm (h/g with rol 11/9, −h, ⊕g). Checksums are
+  **discovered by content** (2-byte block id at `0xB7A` + slot scan), not
+  from a fixed offset table:
+  - 256 KB full: calibration slot `0x3FBFC` covers `[0x38B80, 0x3FC00)`,
+    seeds `8631 EFCD 8631 DF9B`; code slot `0x13FFC` covers `[0x10000, 0x14000)`,
+    seeds `0000 0000 8631 DF9B` (only while the field is non-blank).
+  - 32 KB partial read: calibration slot `0x7BFC` covers `[0x0B80, 0x7C00)` —
+    the partial read is the last 32 KB of the full image, so the same
+    checksum sits `0x38000` earlier.
+- Verified byte-for-byte against the Python tool on real reads (good reads
+  verify OK; corrupted reads produce identical `.fixed` files).
 - In-band status: STATUS_CODIER_CHECKSUMME job → `12 04 0A` frame (ECU-side
-  result), analogous to DDE4's `31 01` post-program verify.
+  result), analogous to DDE4's `31 01` post-program verify. A real-ECU
+  reply has not been captured yet — confirm on hardware before flashing
+  corrected images.
 
 ## 6. STATUS BYTE TABLE (JOBRESULT, from jobresult.txt)
 
@@ -338,7 +356,7 @@ padding/trailing-byte rule on a real capture).
 | `Cargo.toml` | — | manifest (serialport, anyhow, hex, eframe/egui, rfd, crossbeam-channel) |
 | `src/main.rs` | ~330 | CLI subcommands + `--gui` default launching egui window |
 | `src/protocol.rs` | ~700 | frame codec (`B8 12 F1 LEN payload XOR`), `FrameParser`, `Kline` serial connection, all 12 fixed frames + 4 parameterized builders + read_full/read_range/write_full/write_calibration/live_values, `JobStatus` enum from JOBRESULT table |
-| `src/checksum.rs` | ~200 | **VERIFIED** TDI V3.1 hash/verify/correct ported from `edc15m_checksum.py` — blocks: application 0x00000-0x37FFF comp 0x37FFC, calibration 0x38000-0x3FFFF comp 0x3FFFC) |
+| `src/checksum.rs` | ~300 | **VERIFIED** TDI V3.1 hash/verify/correct ported line-for-line from `edc15m_checksum.py` — content-based discovery (id at 0xB7A + slot scan): calibration 0x3FBFC / 0x7BFC, code 0x13FFC; byte-for-byte parity with the Python tool on real reads |
 | `src/app.rs` | ~1950 | egui GUI: Overview, Read flash, Write flash, Checksums, Live data, Value logger, Protocol log tabs |
 | `README.md` | — | build/run instructions, protocol constants, frame catalog, safety notes |
 
@@ -361,7 +379,7 @@ write <img>    Erase + write full flash (WRITE confirmation required)
 write-cal <img> Erase + write calibration area only
 seed-key <Z>   12 08 90 42 4D 57 05 <Z>
 fault-clear    12 09 07 0E 42 41 50 00 ("BAP")
-checksum <img> Verify/correct TDI V3.1 checksums (UNVERIFIED)
+checksum <img> Verify/correct TDI V3.1 checksums (32 KB or 256 KB; auto-corrects in place, write path needs hardware confirmation)
 uprog-ein      12 04 0D enter programming mode
 diagnose-ende  12 04 9F leave session
 ```
@@ -568,3 +586,39 @@ on real hardware.
    (done — both pass 9600 now; the old 38400/125000 "fast" args were dde4
    leftovers silently ignored by the protocol; "fast write" now only drops
    the inter-byte pause).
+
+## 19. Session 8: checksum false-BAD fixed, checksum.rs re-ported, EDC15M==DDE3 documented
+
+User report: the Checksum tab flagged blocks as BAD on images whose
+checksums were actually correct. Root cause had three layers:
+
+1. **Carried-over dde4-style fixed table.** The first `checksum.rs` port kept
+   a `BLOCKS` table (`application` 0x37FFC, `calibration` 0x3FFFC, …) with a
+   `TARGET` value because the GUI indexed results by that table. The real
+   EDC15M/DDE3 flash uses the TDI V3.1 layout with *discovered* positions
+   (calibration `0x3FBFC` in full / `0x7BFC` in partial reads, code
+   `0x13FFC`), so the table never matched reality.
+2. **Marker-path key bug (the actual false-negative).** `find_marker` read
+   the id as `[buf[m+0x3FFA], buf[m+0x3FFC]]` — a non-contiguous pair — while
+   the Python reference reads `buf[m+0x3FFA : m+0x3FFC]`. On real reads the
+   key never matched, `find_checksums` returned `[]`, the CLI printed a
+   vacuous "all checksums OK", and the GUI (empty results → `unwrap_or`)
+   showed every block BAD. Fixed to the contiguous `0x3FFA/0x3FFB` pair;
+   the Python tool was already correct and needed no change.
+3. **GUI rewired to discovery.** The Checksum tab no longer uses any fixed
+   table: it renders `checksum::verify()` results (Block / Pos / Stored /
+   Computed / Status / Stored-edit / Apply / Fix), with a proper
+   "no block found" state for blank or foreign images. `sim.rs`'s checksum
+   readout and the CLI were updated to the same API. `bench.rs` write
+   path corrects all discovered blocks.
+
+New/changed tests (29 passing): LCG + both selftest regression vectors,
+marker-path full image (code + calibration discovered), padded 32 KB
+partial read (only calibration at 0x3FBFC), blank image → no blocks.
+Byte-for-byte parity with `edc15m_checksum.py` verified on real 256 KB and
+32 KB reads, including corrupted-byte round trips (Rust `.bin` == Python
+`.fixed.bin`).
+
+**Naming (user directive):** EDC15M and DDE3 are the same ECU. Noted in the
+`dde3-toolkit` README, the `edc15m-checksum-tool` README, and §5 — so the
+mixup never happens again.

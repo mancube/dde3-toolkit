@@ -22,7 +22,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 
 use crate::checksum::{self, CAL_LEN, CAL_START};
-use crate::protocol::{ident_valid, hex, Kline, IMAGE_SIZE};
+use crate::protocol::{hex, ident_valid, Kline, IMAGE_SIZE};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -109,7 +109,9 @@ pub fn run(args: BenchArgs) -> Result<()> {
                     }
                 };
                 match args.mode {
-                    Mode::Write => k.write_full(&image, args.baud, args.data_delay, &mut progress)?,
+                    Mode::Write => {
+                        k.write_full(&image, args.baud, args.data_delay, &mut progress)?
+                    }
                     Mode::WriteCal => {
                         k.write_calibration(&image, args.baud, args.data_delay, &mut progress)?
                     }
@@ -147,8 +149,8 @@ fn prepare_image(raw: &[u8], mode: Mode) -> Result<Vec<u8>> {
             }
             let fixed = checksum::correct(raw);
             let bad: Vec<_> = checksum::verify(&fixed)
-                .into_iter()
-                .filter(|r| checksum::CORRECTABLE.contains(&r.name) && !r.ok)
+                .iter()
+                .filter(|r| !r.ok)
                 .map(|r| r.name)
                 .collect();
             if !bad.is_empty() {
@@ -164,17 +166,17 @@ fn prepare_image(raw: &[u8], mode: Mode) -> Result<Vec<u8>> {
             }
             // Bare 32 KB calibration slice: pad into a full image so the
             // block-id (marker-less) checksum path can find the block, then
-            // correct just the calibration block.
+            // correct it.
             CAL_LEN => {
                 let mut full = vec![0xFFu8; IMAGE_SIZE];
                 full[CAL_START..CAL_START + CAL_LEN].copy_from_slice(raw);
-                let fixed = checksum::correct_block(&full, "calibration")
-                    .context("cannot correct the calibration checksum")?;
+                if checksum::verify(&full).is_empty() {
+                    bail!("no EDC15M TDI V3.1 checksum block found in calibration image");
+                }
+                let fixed = checksum::correct(&full);
                 Ok(fixed[CAL_START..CAL_START + CAL_LEN].to_vec())
             }
-            other => bail!(
-                "calibration write needs 256 KB or 32 KB, got {other} bytes"
-            ),
+            other => bail!("calibration write needs 256 KB or 32 KB, got {other} bytes"),
         },
         _ => unreachable!(),
     }
@@ -198,8 +200,8 @@ mod tests {
         let fixed = prepare_image(&img, Mode::Write).expect("correction succeeds");
         assert_eq!(fixed.len(), IMAGE_SIZE);
         let bad: Vec<_> = checksum::verify(&fixed)
-            .into_iter()
-            .filter(|r| checksum::CORRECTABLE.contains(&r.name) && !r.ok)
+            .iter()
+            .filter(|r| !r.ok)
             .map(|r| r.name)
             .collect();
         assert!(bad.is_empty(), "corrected image must verify: {bad:?}");

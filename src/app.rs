@@ -18,11 +18,11 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use eframe::egui::{
-    self, Align, Color32, FontId, Frame, Layout, Margin, RichText, ScrollArea, Stroke,
-    TextStyle, Ui, Vec2,
+    self, Align, Color32, FontId, Frame, Layout, Margin, RichText, ScrollArea, Stroke, TextStyle,
+    Ui, Vec2,
 };
 
-use crate::checksum::{self, BlockResult, CAL_LEN, CAL_START, IMAGE_SIZE};
+use crate::checksum::{self, CAL_LEN, CAL_START, IMAGE_SIZE};
 use crate::protocol::{self, hex, Kline};
 
 const BG: Color32 = Color32::from_rgb(10, 14, 18);
@@ -126,31 +126,207 @@ struct LiveVar {
 
 const LIVE_VARS: &[LiveVar] = &[
     // Engine
-    LiveVar { name: "Engine speed", unit: "rpm", id: 0x0F10, factor: 1.0, offset: 0.0, group: "Engine", default_on: true },
-    LiveVar { name: "Engine speed (sec)", unit: "rpm", id: 0x0F11, factor: 1.0, offset: 0.0, group: "Engine", default_on: false },
-    LiveVar { name: "Idle speed setpoint", unit: "rpm", id: 0x0E02, factor: 1.0, offset: 0.0, group: "Engine", default_on: false },
-    LiveVar { name: "Coolant", unit: "°C", id: 0x0F00, factor: 0.1, offset: -273.14, group: "Engine", default_on: true },
-    LiveVar { name: "Pump temperature", unit: "°C", id: 0x0E11, factor: 0.1, offset: -273.14, group: "Engine", default_on: false },
-    LiveVar { name: "Battery", unit: "V", id: 0x0F65, factor: 0.02037243, offset: 0.0, group: "Engine", default_on: true },
-    LiveVar { name: "Pedal (filtered)", unit: "%", id: 0x0F83, factor: 0.01, offset: 0.0, group: "Engine", default_on: true },
-    LiveVar { name: "Pedal (unfiltered)", unit: "%", id: 0x0F60, factor: 0.01, offset: 0.0, group: "Engine", default_on: false },
+    LiveVar {
+        name: "Engine speed",
+        unit: "rpm",
+        id: 0x0F10,
+        factor: 1.0,
+        offset: 0.0,
+        group: "Engine",
+        default_on: true,
+    },
+    LiveVar {
+        name: "Engine speed (sec)",
+        unit: "rpm",
+        id: 0x0F11,
+        factor: 1.0,
+        offset: 0.0,
+        group: "Engine",
+        default_on: false,
+    },
+    LiveVar {
+        name: "Idle speed setpoint",
+        unit: "rpm",
+        id: 0x0E02,
+        factor: 1.0,
+        offset: 0.0,
+        group: "Engine",
+        default_on: false,
+    },
+    LiveVar {
+        name: "Coolant",
+        unit: "°C",
+        id: 0x0F00,
+        factor: 0.1,
+        offset: -273.14,
+        group: "Engine",
+        default_on: true,
+    },
+    LiveVar {
+        name: "Pump temperature",
+        unit: "°C",
+        id: 0x0E11,
+        factor: 0.1,
+        offset: -273.14,
+        group: "Engine",
+        default_on: false,
+    },
+    LiveVar {
+        name: "Battery",
+        unit: "V",
+        id: 0x0F65,
+        factor: 0.02037243,
+        offset: 0.0,
+        group: "Engine",
+        default_on: true,
+    },
+    LiveVar {
+        name: "Pedal (filtered)",
+        unit: "%",
+        id: 0x0F83,
+        factor: 0.01,
+        offset: 0.0,
+        group: "Engine",
+        default_on: true,
+    },
+    LiveVar {
+        name: "Pedal (unfiltered)",
+        unit: "%",
+        id: 0x0F60,
+        factor: 0.01,
+        offset: 0.0,
+        group: "Engine",
+        default_on: false,
+    },
     // Air & boost
-    LiveVar { name: "Boost actual", unit: "hPa", id: 0x0F40, factor: 1.0, offset: 0.0, group: "Air & boost", default_on: true },
-    LiveVar { name: "Boost setpoint", unit: "hPa", id: 0x0F34, factor: 1.0, offset: 0.0, group: "Air & boost", default_on: false },
-    LiveVar { name: "Boost corrected", unit: "hPa", id: 0x0F33, factor: 1.0, offset: 0.0, group: "Air & boost", default_on: false },
-    LiveVar { name: "Atmospheric pressure", unit: "hPa", id: 0x0F63, factor: 1.0, offset: 0.0, group: "Air & boost", default_on: false },
-    LiveVar { name: "Air mass actual", unit: "mg/Hub", id: 0x0F30, factor: 0.1, offset: 0.0, group: "Air & boost", default_on: false },
-    LiveVar { name: "MAF actual", unit: "%", id: 0x0F61, factor: 0.01, offset: 0.0, group: "Air & boost", default_on: false },
-    LiveVar { name: "EGR duty", unit: "%", id: 0x0E80, factor: 0.01, offset: 0.0, group: "Air & boost", default_on: false },
-    LiveVar { name: "VNT duty", unit: "%", id: 0x0E81, factor: 0.01, offset: 0.0, group: "Air & boost", default_on: false },
+    LiveVar {
+        name: "Boost actual",
+        unit: "hPa",
+        id: 0x0F40,
+        factor: 1.0,
+        offset: 0.0,
+        group: "Air & boost",
+        default_on: true,
+    },
+    LiveVar {
+        name: "Boost setpoint",
+        unit: "hPa",
+        id: 0x0F34,
+        factor: 1.0,
+        offset: 0.0,
+        group: "Air & boost",
+        default_on: false,
+    },
+    LiveVar {
+        name: "Boost corrected",
+        unit: "hPa",
+        id: 0x0F33,
+        factor: 1.0,
+        offset: 0.0,
+        group: "Air & boost",
+        default_on: false,
+    },
+    LiveVar {
+        name: "Atmospheric pressure",
+        unit: "hPa",
+        id: 0x0F63,
+        factor: 1.0,
+        offset: 0.0,
+        group: "Air & boost",
+        default_on: false,
+    },
+    LiveVar {
+        name: "Air mass actual",
+        unit: "mg/Hub",
+        id: 0x0F30,
+        factor: 0.1,
+        offset: 0.0,
+        group: "Air & boost",
+        default_on: false,
+    },
+    LiveVar {
+        name: "MAF actual",
+        unit: "%",
+        id: 0x0F61,
+        factor: 0.01,
+        offset: 0.0,
+        group: "Air & boost",
+        default_on: false,
+    },
+    LiveVar {
+        name: "EGR duty",
+        unit: "%",
+        id: 0x0E80,
+        factor: 0.01,
+        offset: 0.0,
+        group: "Air & boost",
+        default_on: false,
+    },
+    LiveVar {
+        name: "VNT duty",
+        unit: "%",
+        id: 0x0E81,
+        factor: 0.01,
+        offset: 0.0,
+        group: "Air & boost",
+        default_on: false,
+    },
     // Fuel & rail
-    LiveVar { name: "Rail pressure", unit: "bar", id: 0x1F5D, factor: 0.09995521484, offset: 0.0, group: "Fuel & rail", default_on: true },
-    LiveVar { name: "Injection quantity", unit: "mm³", id: 0x0F80, factor: 0.01, offset: 0.0, group: "Fuel & rail", default_on: true },
-    LiveVar { name: "Driver request", unit: "mm³", id: 0x0F8B, factor: 0.01, offset: 0.0, group: "Fuel & rail", default_on: false },
-    LiveVar { name: "Limit quantity", unit: "mm³", id: 0x0F8A, factor: 0.01, offset: 0.0, group: "Fuel & rail", default_on: false },
+    LiveVar {
+        name: "Rail pressure",
+        unit: "bar",
+        id: 0x1F5D,
+        factor: 0.09995521484,
+        offset: 0.0,
+        group: "Fuel & rail",
+        default_on: true,
+    },
+    LiveVar {
+        name: "Injection quantity",
+        unit: "mm³",
+        id: 0x0F80,
+        factor: 0.01,
+        offset: 0.0,
+        group: "Fuel & rail",
+        default_on: true,
+    },
+    LiveVar {
+        name: "Driver request",
+        unit: "mm³",
+        id: 0x0F8B,
+        factor: 0.01,
+        offset: 0.0,
+        group: "Fuel & rail",
+        default_on: false,
+    },
+    LiveVar {
+        name: "Limit quantity",
+        unit: "mm³",
+        id: 0x0F8A,
+        factor: 0.01,
+        offset: 0.0,
+        group: "Fuel & rail",
+        default_on: false,
+    },
     // Status
-    LiveVar { name: "MIL", unit: "-", id: 0xDF02, factor: 1.0, offset: 0.0, group: "Status", default_on: false },
-    LiveVar { name: "Diagnosis lamp", unit: "-", id: 0xDF00, factor: 1.0, offset: 0.0, group: "Status", default_on: false },
+    LiveVar {
+        name: "MIL",
+        unit: "-",
+        id: 0xDF02,
+        factor: 1.0,
+        offset: 0.0,
+        group: "Status",
+        default_on: false,
+    },
+    LiveVar {
+        name: "Diagnosis lamp",
+        unit: "-",
+        id: 0xDF00,
+        factor: 1.0,
+        offset: 0.0,
+        group: "Status",
+        default_on: false,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -236,7 +412,7 @@ pub struct App {
     image: Option<Vec<u8>>,
     image_name: String,
     image_is_partial: bool,
-    checks: Vec<BlockResult>,
+    checks: Vec<checksum::Checksum>,
     comp_edit: Vec<String>,
     progress: f32,
     progress_text: String,
@@ -374,9 +550,24 @@ impl App {
         self.image_is_partial = false;
         self.write_path = "demo_dde3.bin".into();
         self.dtcs = vec![
-            protocol::Dtc { ort: 0x26, art: 0x02, uw: vec![437, 659], shadow: Vec::new() },
-            protocol::Dtc { ort: 0x05, art: 0x01, uw: vec![1371, 1593], shadow: Vec::new() },
-            protocol::Dtc { ort: 0x36, art: 0x04, uw: vec![837, 1059], shadow: Vec::new() },
+            protocol::Dtc {
+                ort: 0x26,
+                art: 0x02,
+                uw: vec![437, 659],
+                shadow: Vec::new(),
+            },
+            protocol::Dtc {
+                ort: 0x05,
+                art: 0x01,
+                uw: vec![1371, 1593],
+                shadow: Vec::new(),
+            },
+            protocol::Dtc {
+                ort: 0x36,
+                art: 0x04,
+                uw: vec![837, 1059],
+                shadow: Vec::new(),
+            },
         ];
         self.battery_v = Some(13.9);
         self.sync_comp_edits();
@@ -486,7 +677,8 @@ impl App {
                     self.active_job = None;
                     self.progress = 1.0;
                     self.progress_text =
-                        "Write and verify complete; power cycle the ECU before clearing faults".into();
+                        "Write and verify complete; power cycle the ECU before clearing faults"
+                            .into();
                     self.status = "Write complete — power cycle the ECU".into();
                     self.post_write_pending = true;
                 }
@@ -523,7 +715,11 @@ impl App {
                     self.live_last = now;
                     if dt > 0.0 {
                         let hz = 1.0 / dt;
-                        self.live_rate = if self.live_rate == 0.0 { hz } else { self.live_rate * 0.8 + hz * 0.2 };
+                        self.live_rate = if self.live_rate == 0.0 {
+                            hz
+                        } else {
+                            self.live_rate * 0.8 + hz * 0.2
+                        };
                     }
                     for (id, raw) in vals {
                         if let Some(i) = LIVE_VARS.iter().position(|v| v.id == id) {
@@ -566,7 +762,9 @@ impl App {
             let panic_tx = tx.clone();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(link, tx)));
             if result.is_err() {
-                let _ = panic_tx.send(Msg::Error("internal error in worker thread; operation aborted".into()));
+                let _ = panic_tx.send(Msg::Error(
+                    "internal error in worker thread; operation aborted".into(),
+                ));
             }
         });
     }
@@ -596,14 +794,20 @@ impl App {
                                     "WARNING: ident looks erased/corrupt; the application may be incomplete".into(),
                                 ));
                             }
-                            let software = k.read_app(0x7BFB0, 10).map(|b| ascii(&b)).unwrap_or_else(|_| "unknown".into());
+                            let software = k
+                                .read_app(0x7BFB0, 10)
+                                .map(|b| ascii(&b))
+                                .unwrap_or_else(|_| "unknown".into());
                             snapshot_battery(&mut k, &tx);
                             let logs = k.take_logs();
                             *guard = Some(k);
                             for l in logs {
                                 let _ = tx.send(Msg::Log(l));
                             }
-                            let _ = tx.send(Msg::Connected(EcuInfo { hardware: "DDE3.0".into(), software }));
+                            let _ = tx.send(Msg::Connected(EcuInfo {
+                                hardware: "DDE3.0".into(),
+                                software,
+                            }));
                         }
                         Err(e) => {
                             let logs = k.take_logs();
@@ -623,7 +827,8 @@ impl App {
 
     fn disconnect(&mut self) {
         if self.busy {
-            self.error = Some("Wait for the current operation to finish before disconnecting".into());
+            self.error =
+                Some("Wait for the current operation to finish before disconnecting".into());
             return;
         }
         self.stop_live();
@@ -666,7 +871,10 @@ impl App {
             snapshot_battery(k, &tx);
             k.set_silence(10);
             let mut progress = |done: usize, total: usize| {
-                let _ = tx.send(Msg::Progress(done as f32 / total as f32, format!("Reading {done} / {total} bytes")));
+                let _ = tx.send(Msg::Progress(
+                    done as f32 / total as f32,
+                    format!("Reading {done} / {total} bytes"),
+                ));
             };
             let mut result = k.read_full(&mut progress);
             if let Err(e) = &result {
@@ -719,7 +927,10 @@ impl App {
             snapshot_battery(k, &tx);
             k.set_silence(10);
             let mut progress = |done: usize, total: usize| {
-                let _ = tx.send(Msg::Progress(done as f32 / total as f32, format!("Reading calibration {done} / {total} bytes")));
+                let _ = tx.send(Msg::Progress(
+                    done as f32 / total as f32,
+                    format!("Reading calibration {done} / {total} bytes"),
+                ));
             };
             let mut result = k.read_range(CAL_START, CAL_LEN, &mut progress);
             if let Err(e) = &result {
@@ -786,7 +997,10 @@ impl App {
             let _ = tx.send(Msg::Status("Erasing and writing".into()));
             snapshot_battery(k, &tx);
             let mut progress = |done: usize, total: usize| {
-                let _ = tx.send(Msg::Progress(done as f32 / total as f32, format!("Writing {done} / {total} bytes")));
+                let _ = tx.send(Msg::Progress(
+                    done as f32 / total as f32,
+                    format!("Writing {done} / {total} bytes"),
+                ));
             };
             k.set_silence(10);
             k.set_write_delay(3);
@@ -837,7 +1051,10 @@ impl App {
             let _ = tx.send(Msg::Status("Erasing and writing calibration".into()));
             snapshot_battery(k, &tx);
             let mut progress = |done: usize, total: usize| {
-                let _ = tx.send(Msg::Progress(done as f32 / total as f32, format!("Writing calibration {done} / {total} bytes")));
+                let _ = tx.send(Msg::Progress(
+                    done as f32 / total as f32,
+                    format!("Writing calibration {done} / {total} bytes"),
+                ));
             };
             k.set_silence(10);
             k.set_write_delay(3);
@@ -1070,19 +1287,33 @@ impl App {
             self.error = Some("Connect to the ECU first".into());
             return;
         }
-        let ids: Vec<u16> = LIVE_VARS.iter().zip(self.live_enabled.iter()).filter(|(_, on)| **on).map(|(v, _)| v.id).collect();
+        let ids: Vec<u16> = LIVE_VARS
+            .iter()
+            .zip(self.live_enabled.iter())
+            .filter(|(_, on)| **on)
+            .map(|(v, _)| v.id)
+            .collect();
         if ids.is_empty() {
             self.error = Some("Select at least one live variable".into());
             return;
         }
-        let Some(path) = rfd::FileDialog::new().set_file_name("dde3_log.csv").add_filter("CSV", &["csv"]).save_file() else {
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name("dde3_log.csv")
+            .add_filter("CSV", &["csv"])
+            .save_file()
+        else {
             return;
         };
         self.start_logging_to(path);
     }
 
     fn start_logging_to(&mut self, path: PathBuf) {
-        let ids: Vec<u16> = LIVE_VARS.iter().zip(self.live_enabled.iter()).filter(|(_, on)| **on).map(|(v, _)| v.id).collect();
+        let ids: Vec<u16> = LIVE_VARS
+            .iter()
+            .zip(self.live_enabled.iter())
+            .filter(|(_, on)| **on)
+            .map(|(v, _)| v.id)
+            .collect();
         if ids.is_empty() {
             self.error = Some("Select at least one live variable".into());
             return;
@@ -1134,7 +1365,12 @@ impl App {
         if !self.connected || self.busy || self.live_running {
             return;
         }
-        let ids: Vec<u16> = LIVE_VARS.iter().zip(self.live_enabled.iter()).filter(|(_, on)| **on).map(|(v, _)| v.id).collect();
+        let ids: Vec<u16> = LIVE_VARS
+            .iter()
+            .zip(self.live_enabled.iter())
+            .filter(|(_, on)| **on)
+            .map(|(v, _)| v.id)
+            .collect();
         if ids.is_empty() {
             self.error = Some("Select at least one live variable".into());
             return;
@@ -1159,7 +1395,10 @@ impl App {
                             // The Kline::live_values uses service 0x0B (MW).
                             let single = ids.len() <= 10;
                             for chunk in ids.chunks(10) {
-                                let addrs: Vec<(u8, u8)> = chunk.iter().map(|id| ((*id >> 8) as u8, *id as u8)).collect();
+                                let addrs: Vec<(u8, u8)> = chunk
+                                    .iter()
+                                    .map(|id| ((*id >> 8) as u8, *id as u8))
+                                    .collect();
                                 let redefine = !single || !defined;
                                 match k.live_values(&addrs, redefine) {
                                     Ok(vals) => {
@@ -1257,7 +1496,12 @@ impl App {
                 self.sync_comp_edits();
             }
             Ok(data) => {
-                self.error = Some(format!("Image is {} bytes; expected {} (full) or {} (calibration)", data.len(), IMAGE_SIZE, CAL_LEN));
+                self.error = Some(format!(
+                    "Image is {} bytes; expected {} (full) or {} (calibration)",
+                    data.len(),
+                    IMAGE_SIZE,
+                    CAL_LEN
+                ));
             }
             Err(e) => self.error = Some(format!("Cannot read {}: {e}", path.display())),
         }
@@ -1266,30 +1510,31 @@ impl App {
     fn sync_comp_edits(&mut self) {
         let partial = self.image_is_partial;
         let image = &self.image;
-        let edits: Vec<String> = checksum::BLOCKS.iter().map(|blk| {
-            let bytes = match image {
-                Some(img) if !partial => {
-                    if blk.comp + 4 <= img.len() {
-                        Some(&img[blk.comp..blk.comp + 4])
-                    } else {
-                        None
-                    }
+        let edits: Vec<String> = self
+            .checks
+            .iter()
+            .map(|c| {
+                let Some(img) = image else {
+                    return String::new();
+                };
+                let off = if partial {
+                    c.pos.saturating_sub(CAL_START)
+                } else {
+                    c.pos
+                };
+                if off + 4 <= img.len() {
+                    format!(
+                        "{:02X}{:02X}{:02X}{:02X}",
+                        img[off],
+                        img[off + 1],
+                        img[off + 2],
+                        img[off + 3]
+                    )
+                } else {
+                    String::new()
                 }
-                Some(img) if blk.name == "calibration" => {
-                    let off = blk.comp.saturating_sub(CAL_START);
-                    if off + 4 <= img.len() {
-                        Some(&img[off..off + 4])
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-            match bytes {
-                Some(c) => format!("{:02X}{:02X}{:02X}{:02X}", c[0], c[1], c[2], c[3]),
-                None => String::new(),
-            }
-        }).collect();
+            })
+            .collect();
         self.comp_edit = edits;
     }
 
@@ -1304,111 +1549,123 @@ impl App {
         self.sync_comp_edits();
     }
 
-    fn visible_checks(&self) -> Vec<BlockResult> {
-        if self.image_is_partial {
-            self.checks.iter().filter(|c| c.name == "calibration").cloned().collect()
-        } else {
-            self.checks.clone()
-        }
+    /// Checksums to display for the loaded image — always exactly the blocks
+    /// discovered by `find_checksums` (a 32 KB read yields the calibration
+    /// block only, a 256 KB read yields calibration + code when present).
+    fn visible_checks(&self) -> Vec<checksum::Checksum> {
+        self.checks.clone()
     }
 
     fn checks_ok(&self) -> bool {
-        self.visible_checks().iter().all(|c| c.ok)
+        self.checks.iter().all(|c| c.ok)
+    }
+
+    /// File offset of a discovered checksum inside the *loaded* image (a
+    /// 32 KB image holds the calibration block 0x38000 earlier than the
+    /// padded view used for verification).
+    fn file_offset_of(&self, pos: usize) -> usize {
+        if self.image_is_partial {
+            pos.saturating_sub(CAL_START)
+        } else {
+            pos
+        }
     }
 
     fn apply_comp_edit(&mut self, idx: usize) {
         let partial = self.image_is_partial;
-        let Some(blk) = checksum::BLOCKS.get(idx) else {
+        let Some(cs) = self.checks.get(idx).copied() else {
             return;
         };
-        let raw: String = self.comp_edit.get(idx).map(|s| s.chars().filter(|c| c.is_ascii_hexdigit()).collect()).unwrap_or_default();
+        let raw: String = self
+            .comp_edit
+            .get(idx)
+            .map(|s| s.chars().filter(|c| c.is_ascii_hexdigit()).collect())
+            .unwrap_or_default();
         if raw.len() != 8 {
-            self.error = Some("Compensation must be 8 hex digits".into());
+            self.error = Some("Checksum edit must be 8 hex digits".into());
             return;
         }
         let mut bytes = [0u8; 4];
         for (i, byte) in bytes.iter_mut().enumerate() {
             *byte = u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16).unwrap_or(0);
         }
-        let Some(img) = self.image.as_mut() else {
+        let Some(mut img) = self.image.clone() else {
             return;
         };
         let off = if partial {
-            if blk.name != "calibration" {
-                self.error = Some("Only the calibration block is present in a 32 KB image".into());
-                return;
-            }
-            blk.comp.saturating_sub(CAL_START)
+            cs.pos.saturating_sub(CAL_START)
         } else {
-            blk.comp
+            cs.pos
         };
         if off + 4 > img.len() {
-            self.error = Some("Compensation offset is outside the image".into());
+            self.error = Some("Checksum offset is outside the image".into());
             return;
         }
         img[off..off + 4].copy_from_slice(&bytes);
-        if partial {
-            let full = pad_calibration(img);
-            self.checks = checksum::verify(&full);
-        } else {
-            self.checks = checksum::verify(img);
-        }
+        self.image = Some(img);
+        self.refresh_checks();
         self.error = None;
-        self.status = format!("Applied manual compensation to {}", blk.name);
+        self.status = format!(
+            "Applied manual {} checksum {:08X}",
+            cs.name,
+            u32::from_le_bytes(bytes)
+        );
     }
 
     fn correct_block_checksum(&mut self, idx: usize) {
         let partial = self.image_is_partial;
-        let Some(blk) = checksum::BLOCKS.get(idx) else {
+        let Some(cs) = self.checks.get(idx).copied() else {
             return;
         };
-        let Some(img) = self.image.as_ref() else {
+        let Some(img) = self.image.clone() else {
             return;
         };
-        if partial {
-            if blk.name != "calibration" {
-                self.error = Some("Only the calibration block is present in a 32 KB image".into());
-                return;
-            }
-            let full = pad_calibration(img);
-            if let Some(fixed) = checksum::correct_block(&full, blk.name) {
-                self.image = Some(fixed[CAL_START..CAL_START + CAL_LEN].to_vec());
+        let fixed = if partial {
+            let full = pad_calibration(&img);
+            checksum::correct_at(&full, cs.pos).map(|f| f[CAL_START..CAL_START + CAL_LEN].to_vec())
+        } else {
+            checksum::correct_at(&img, cs.pos)
+        };
+        match fixed {
+            Some(f) => {
+                self.image = Some(f);
                 self.refresh_checks();
-                self.status = format!("Corrected {}", blk.name);
+                self.status = format!("Corrected {} checksum", cs.name);
             }
-        } else if let Some(fixed) = checksum::correct_block(img, blk.name) {
-            self.image = Some(fixed);
-            self.refresh_checks();
-            self.status = format!("Corrected {}", blk.name);
+            None => self.error = Some(format!("No {} checksum found in the image", cs.name)),
         }
     }
 
     fn correct_all_checksums(&mut self) {
         let partial = self.image_is_partial;
-        let Some(img) = self.image.as_ref() else {
+        let Some(img) = self.image.clone() else {
             return;
         };
-        if partial {
-            let full = pad_calibration(img);
-            if let Some(fixed) = checksum::correct_block(&full, "calibration") {
-                self.image = Some(fixed[CAL_START..CAL_START + CAL_LEN].to_vec());
-                self.refresh_checks();
-                self.status = "Corrected calibration checksum".into();
-            }
+        let fixed = if partial {
+            let full = pad_calibration(&img);
+            checksum::correct(&full)[CAL_START..CAL_START + CAL_LEN].to_vec()
         } else {
-            let fixed = checksum::correct(img);
-            self.image = Some(fixed);
-            self.refresh_checks();
-            self.status = "Corrected all writable checksums".into();
-        }
+            checksum::correct(&img)
+        };
+        self.image = Some(fixed);
+        self.refresh_checks();
+        self.status = "Corrected all checksums".into();
     }
 
     fn save_image(&mut self) {
         let Some(img) = self.image.as_ref() else {
             return;
         };
-        let name = if self.image_is_partial { "dde3_cal_corrected.bin" } else { "dde3_corrected.bin" };
-        let Some(path) = rfd::FileDialog::new().set_file_name(name).add_filter("BIN", &["bin"]).save_file() else {
+        let name = if self.image_is_partial {
+            "dde3_cal_corrected.bin"
+        } else {
+            "dde3_corrected.bin"
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(name)
+            .add_filter("BIN", &["bin"])
+            .save_file()
+        else {
             return;
         };
         match std::fs::write(&path, img) {
@@ -1428,10 +1685,11 @@ impl App {
                 return None;
             }
             let full = pad_calibration(&image);
-            let Some(fixed) = checksum::correct_block(&full, "calibration") else {
-                self.error = Some("Cannot correct the calibration checksum".into());
+            if checksum::verify(&full).is_empty() {
+                self.error = Some("No EDC15M TDI V3.1 checksum block found in the image".into());
                 return None;
-            };
+            }
+            let fixed = checksum::correct(&full);
             let corrected = fixed[CAL_START..CAL_START + CAL_LEN].to_vec();
             let changed = corrected != image;
             self.image = Some(corrected.clone());
@@ -1463,34 +1721,71 @@ impl App {
 
     fn top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top")
-            .frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(18, 12)).stroke(Stroke::new(1.0, BORDER)))
+            .frame(
+                Frame::new()
+                    .fill(PANEL)
+                    .inner_margin(Margin::symmetric(18, 12))
+                    .stroke(Stroke::new(1.0, BORDER)),
+            )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("DDE3").font(FontId::proportional(24.0)).strong().color(TEXT));
-                        ui.label(RichText::new("Toolkit · flash & diagnostics").size(12.0).color(MUTED));
+                        ui.label(
+                            RichText::new("DDE3")
+                                .font(FontId::proportional(24.0))
+                                .strong()
+                                .color(TEXT),
+                        );
+                        ui.label(
+                            RichText::new("Toolkit · flash & diagnostics")
+                                .size(12.0)
+                                .color(MUTED),
+                        );
                     });
                     ui.add_space(26.0);
                     ui.separator();
                     ui.add_space(10.0);
                     ui.label(RichText::new("Port").size(12.0).color(MUTED));
                     egui::ComboBox::from_id_salt("port")
-                        .selected_text(if self.port.is_empty() { "no port" } else { &self.port })
+                        .selected_text(if self.port.is_empty() {
+                            "no port"
+                        } else {
+                            &self.port
+                        })
                         .width(170.0)
                         .show_ui(ui, |ui| {
                             for p in &self.ports {
                                 ui.selectable_value(&mut self.port, p.clone(), p);
                             }
                         });
-                    if ui.add(egui::Button::new("⟳").frame(false)).on_hover_text("Refresh serial ports").clicked() {
+                    if ui
+                        .add(egui::Button::new("⟳").frame(false))
+                        .on_hover_text("Refresh serial ports")
+                        .clicked()
+                    {
                         self.refresh_ports();
                     }
                     ui.checkbox(&mut self.echo, "Echo");
                     if self.connected {
-                        if centered_button_enabled(ui, !self.busy, Vec2::new(100.0, 30.0), egui::Button::new(RichText::new("Disconnect").color(DANGER)).fill(CARD_ALT)).clicked() {
+                        if centered_button_enabled(
+                            ui,
+                            !self.busy,
+                            Vec2::new(100.0, 30.0),
+                            egui::Button::new(RichText::new("Disconnect").color(DANGER))
+                                .fill(CARD_ALT),
+                        )
+                        .clicked()
+                        {
                             self.disconnect();
                         }
-                    } else if centered_button_enabled(ui, !self.busy && !self.port.is_empty(), Vec2::new(100.0, 30.0), egui::Button::new(RichText::new("Connect").color(BG)).fill(ACCENT)).clicked() {
+                    } else if centered_button_enabled(
+                        ui,
+                        !self.busy && !self.port.is_empty(),
+                        Vec2::new(100.0, 30.0),
+                        egui::Button::new(RichText::new("Connect").color(BG)).fill(ACCENT),
+                    )
+                    .clicked()
+                    {
                         self.connect();
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1514,15 +1809,38 @@ impl App {
     fn side_nav(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("nav")
             .exact_width(196.0)
-            .frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(12, 14)))
+            .frame(
+                Frame::new()
+                    .fill(PANEL)
+                    .inner_margin(Margin::symmetric(12, 14)),
+            )
             .show(ctx, |ui| {
                 ui.add_space(4.0);
-                for tab in [Tab::Overview, Tab::Read, Tab::Write, Tab::Checksum, Tab::Dtc, Tab::Live, Tab::Logger, Tab::Log] {
+                for tab in [
+                    Tab::Overview,
+                    Tab::Read,
+                    Tab::Write,
+                    Tab::Checksum,
+                    Tab::Dtc,
+                    Tab::Live,
+                    Tab::Logger,
+                    Tab::Log,
+                ] {
                     let selected = self.tab == tab;
-                    let text = RichText::new(format!("{}   {}", tab.glyph(), tab.label())).size(14.0).color(if selected { TEXT } else { MUTED });
+                    let text = RichText::new(format!("{}   {}", tab.glyph(), tab.label()))
+                        .size(14.0)
+                        .color(if selected { TEXT } else { MUTED });
                     let button = egui::Button::new(text)
-                        .fill(if selected { CARD_ALT } else { Color32::TRANSPARENT })
-                        .stroke(if selected { Stroke::new(1.0, BORDER) } else { Stroke::NONE })
+                        .fill(if selected {
+                            CARD_ALT
+                        } else {
+                            Color32::TRANSPARENT
+                        })
+                        .stroke(if selected {
+                            Stroke::new(1.0, BORDER)
+                        } else {
+                            Stroke::NONE
+                        })
                         .min_size(Vec2::new(172.0, 38.0));
                     if ui.add(button).clicked() {
                         self.tab = tab;
@@ -1538,8 +1856,16 @@ impl App {
                     ui.label(RichText::new("EDC15 / DDE3.0").size(11.0).color(MUTED));
                     ui.separator();
                     if let Some(ecu) = &self.ecu {
-                        ui.label(RichText::new(format!("SW {}", ecu.software)).size(12.0).color(ACCENT));
-                        ui.label(RichText::new(format!("HW {}", ecu.hardware)).size(10.0).color(MUTED));
+                        ui.label(
+                            RichText::new(format!("SW {}", ecu.software))
+                                .size(12.0)
+                                .color(ACCENT),
+                        );
+                        ui.label(
+                            RichText::new(format!("HW {}", ecu.hardware))
+                                .size(10.0)
+                                .color(MUTED),
+                        );
                     }
                 });
             });
@@ -1547,7 +1873,11 @@ impl App {
 
     fn central(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(24, 18)))
+            .frame(
+                Frame::new()
+                    .fill(BG)
+                    .inner_margin(Margin::symmetric(24, 18)),
+            )
             .show(ctx, |ui| {
                 if let Some(err) = self.error.clone() {
                     Frame::new()
@@ -1587,7 +1917,11 @@ impl App {
     }
 
     fn overview(&mut self, ui: &mut Ui) {
-        heading(ui, "Overview", "ECU state, quick actions and safety status.");
+        heading(
+            ui,
+            "Overview",
+            "ECU state, quick actions and safety status.",
+        );
         ui.add_space(8.0);
         let width = ui.available_width();
         card(ui, width, |ui| {
@@ -1613,44 +1947,82 @@ impl App {
     fn ecu_card(&mut self, ui: &mut Ui) {
         section_title(ui, "ECU");
         if let Some(ecu) = &self.ecu {
-            egui::Grid::new("ecu-info").num_columns(2).spacing([12.0, 5.0]).show(ui, |ui| {
-                ui.label(RichText::new("Software").size(11.0).color(MUTED));
-                ui.label(RichText::new(&ecu.software).size(12.0).color(TEXT));
-                ui.end_row();
-                ui.label(RichText::new("Hardware").size(11.0).color(MUTED));
-                ui.label(RichText::new(&ecu.hardware).size(12.0).color(TEXT));
-                ui.end_row();
-                ui.label(RichText::new("Link").size(11.0).color(MUTED));
-                ui.label(RichText::new("K-line · 9600 8E1").size(12.0).color(TEXT));
-                ui.end_row();
-                ui.label(RichText::new("Port").size(11.0).color(MUTED));
-                ui.label(RichText::new(&self.port).size(12.0).color(TEXT));
-                ui.end_row();
-            });
+            egui::Grid::new("ecu-info")
+                .num_columns(2)
+                .spacing([12.0, 5.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Software").size(11.0).color(MUTED));
+                    ui.label(RichText::new(&ecu.software).size(12.0).color(TEXT));
+                    ui.end_row();
+                    ui.label(RichText::new("Hardware").size(11.0).color(MUTED));
+                    ui.label(RichText::new(&ecu.hardware).size(12.0).color(TEXT));
+                    ui.end_row();
+                    ui.label(RichText::new("Link").size(11.0).color(MUTED));
+                    ui.label(RichText::new("K-line · 9600 8E1").size(12.0).color(TEXT));
+                    ui.end_row();
+                    ui.label(RichText::new("Port").size(11.0).color(MUTED));
+                    ui.label(RichText::new(&self.port).size(12.0).color(TEXT));
+                    ui.end_row();
+                });
         } else {
             ui.label(RichText::new("Not connected").color(MUTED));
             ui.add_space(8.0);
-            ui.label(RichText::new("Select a port and press Connect. The ECU must be powered.").size(12.0).color(MUTED));
+            ui.label(
+                RichText::new("Select a port and press Connect. The ECU must be powered.")
+                    .size(12.0)
+                    .color(MUTED),
+            );
         }
     }
 
     fn quick_card(&mut self, ui: &mut Ui) {
         section_title(ui, "Quick actions");
         ui.horizontal_wrapped(|ui| {
-            if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new(RichText::new("Read full flash").color(BG)).fill(ACCENT)).clicked() {
+            if centered_button_enabled(
+                ui,
+                self.connected && !self.busy,
+                Vec2::new(180.0, 34.0),
+                egui::Button::new(RichText::new("Read full flash").color(BG)).fill(ACCENT),
+            )
+            .clicked()
+            {
                 self.tab = Tab::Read;
                 self.start_read();
             }
-            if centered_button_enabled(ui, !self.busy, Vec2::new(180.0, 34.0), egui::Button::new("Load image…")).clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("ECU image", &["bin"]).pick_file() {
+            if centered_button_enabled(
+                ui,
+                !self.busy,
+                Vec2::new(180.0, 34.0),
+                egui::Button::new("Load image…"),
+            )
+            .clicked()
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("ECU image", &["bin"])
+                    .pick_file()
+                {
                     self.load_image(path);
                 }
             }
-            if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new("Live data")).clicked() {
+            if centered_button_enabled(
+                ui,
+                self.connected && !self.busy,
+                Vec2::new(180.0, 34.0),
+                egui::Button::new("Live data"),
+            )
+            .clicked()
+            {
                 self.tab = Tab::Live;
                 self.start_live();
             }
-            if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new("Fault codes")).clicked() {
+            if centered_button_enabled(
+                ui,
+                self.connected && !self.busy,
+                Vec2::new(180.0, 34.0),
+                egui::Button::new("Fault codes"),
+            )
+            .clicked()
+            {
                 self.tab = Tab::Dtc;
                 self.start_dtc_read();
             }
@@ -1666,15 +2038,28 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Save to").color(MUTED));
                 ui.add(egui::TextEdit::singleline(&mut self.read_path).desired_width(420.0));
-                if centered_button(ui, Vec2::new(90.0, 28.0), egui::Button::new("Browse…")).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().set_file_name("dde3_full.bin").add_filter("BIN", &["bin"]).save_file() {
+                if centered_button(ui, Vec2::new(90.0, 28.0), egui::Button::new("Browse…"))
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_file_name("dde3_full.bin")
+                        .add_filter("BIN", &["bin"])
+                        .save_file()
+                    {
                         self.read_path = path.display().to_string();
                     }
                 }
             });
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new(RichText::new("Read full flash").color(BG)).fill(ACCENT)).clicked() {
+                if centered_button_enabled(
+                    ui,
+                    self.connected && !self.busy,
+                    Vec2::new(180.0, 34.0),
+                    egui::Button::new(RichText::new("Read full flash").color(BG)).fill(ACCENT),
+                )
+                .clicked()
+                {
                     self.start_read();
                 }
                 if self.active_job == Some(Job::Full) {
@@ -1683,35 +2068,64 @@ impl App {
             });
             if self.active_job == Some(Job::Full) {
                 ui.add_space(8.0);
-                ui.add(egui::ProgressBar::new(self.progress).show_percentage().animate(true));
+                ui.add(
+                    egui::ProgressBar::new(self.progress)
+                        .show_percentage()
+                        .animate(true),
+                );
             }
         });
         ui.add_space(14.0);
         card(ui, ui.available_width(), |ui| {
             section_title(ui, "Calibration read (32 KB @ 0x38000)");
-            ui.label(RichText::new("Reads file 0x38000-0x3FFFF without touching the boot area.").size(11.0).color(MUTED));
+            ui.label(
+                RichText::new("Reads file 0x38000-0x3FFFF without touching the boot area.")
+                    .size(11.0)
+                    .color(MUTED),
+            );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Save to").color(MUTED));
                 ui.add(egui::TextEdit::singleline(&mut self.cal_path).desired_width(380.0));
-                if centered_button(ui, Vec2::new(90.0, 28.0), egui::Button::new("Browse…")).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().set_file_name("dde3_cal.bin").add_filter("BIN", &["bin"]).save_file() {
+                if centered_button(ui, Vec2::new(90.0, 28.0), egui::Button::new("Browse…"))
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_file_name("dde3_cal.bin")
+                        .add_filter("BIN", &["bin"])
+                        .save_file()
+                    {
                         self.cal_path = path.display().to_string();
                     }
                 }
             });
             ui.add_space(8.0);
-            if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new(RichText::new("Read calibration").color(BG)).fill(ACCENT)).clicked() {
+            if centered_button_enabled(
+                ui,
+                self.connected && !self.busy,
+                Vec2::new(180.0, 34.0),
+                egui::Button::new(RichText::new("Read calibration").color(BG)).fill(ACCENT),
+            )
+            .clicked()
+            {
                 self.start_read_cal();
             }
             if self.active_job == Some(Job::Cal) {
                 ui.add_space(8.0);
-                ui.add(egui::ProgressBar::new(self.progress).show_percentage().animate(true));
+                ui.add(
+                    egui::ProgressBar::new(self.progress)
+                        .show_percentage()
+                        .animate(true),
+                );
                 ui.label(RichText::new(&self.progress_text).size(11.0).color(MUTED));
             }
             if let Some((path, size)) = &self.cal_info {
                 ui.add_space(4.0);
-                ui.label(RichText::new(format!("Last calibration: {path} ({size} bytes)")).size(11.0).color(OK));
+                ui.label(
+                    RichText::new(format!("Last calibration: {path} ({size} bytes)"))
+                        .size(11.0)
+                        .color(OK),
+                );
             }
         });
         ui.add_space(14.0);
@@ -1722,7 +2136,11 @@ impl App {
     }
 
     fn write_tab(&mut self, ui: &mut Ui) {
-        heading(ui, "Write flash", "Erase and program flash, or calibration only.");
+        heading(
+            ui,
+            "Write flash",
+            "Erase and program flash, or calibration only.",
+        );
         ui.add_space(8.0);
         battery_pill(ui, self.battery_v);
         ui.add_space(4.0);
@@ -1730,9 +2148,17 @@ impl App {
         card(ui, ui.available_width(), |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Image").color(MUTED));
-                ui.add(egui::TextEdit::singleline(&mut self.image_name).desired_width(420.0).hint_text("select a 256 KB or 32 KB .bin"));
-                if centered_button(ui, Vec2::new(90.0, 28.0), egui::Button::new("Open…")).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("ECU image", &["bin"]).pick_file() {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.image_name)
+                        .desired_width(420.0)
+                        .hint_text("select a 256 KB or 32 KB .bin"),
+                );
+                if centered_button(ui, Vec2::new(90.0, 28.0), egui::Button::new("Open…")).clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("ECU image", &["bin"])
+                        .pick_file()
+                    {
                         self.load_image(path);
                     }
                 }
@@ -1740,9 +2166,29 @@ impl App {
             if let Some(img) = &self.image {
                 ui.add_space(6.0);
                 let ok = self.checks_ok();
-                let kind = if partial { "calibration image" } else { "full image" };
-                ui.label(RichText::new(format!("{} bytes · {} · {}", img.len(), kind, if ok { "checksum OK" } else { "checksum BAD (corrected automatically on write)" })).size(12.0).color(if ok { MUTED } else { WARN }));
-                if !ok && centered_button(ui, Vec2::new(130.0, 30.0), egui::Button::new("Review")).clicked() {
+                let kind = if partial {
+                    "calibration image"
+                } else {
+                    "full image"
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "{} bytes · {} · {}",
+                        img.len(),
+                        kind,
+                        if ok {
+                            "checksum OK"
+                        } else {
+                            "checksum BAD (corrected automatically on write)"
+                        }
+                    ))
+                    .size(12.0)
+                    .color(if ok { MUTED } else { WARN }),
+                );
+                if !ok
+                    && centered_button(ui, Vec2::new(130.0, 30.0), egui::Button::new("Review"))
+                        .clicked()
+                {
                     self.tab = Tab::Checksum;
                 }
             }
@@ -1757,10 +2203,16 @@ impl App {
                     ui.label(RichText::new("Full write erases program and calibration. Partial write erases calibration only. Checksums are corrected automatically before writing. Do not interrupt power.").size(12.0).color(TEXT));
                 });
             ui.add_space(8.0);
-            ui.checkbox(&mut self.fast_write, "Fast write (no inter-byte pause; DDE3 stays at 9600 baud)");
+            ui.checkbox(
+                &mut self.fast_write,
+                "Fast write (no inter-byte pause; DDE3 stays at 9600 baud)",
+            );
             ui.label(RichText::new("Fast mode uses the read-path baud and removes the 3 ms per-byte pacing. Bench-test before relying on it.").size(11.0).color(MUTED));
             ui.add_space(10.0);
-            ui.checkbox(&mut self.backup_ok, "I have a verified full backup of this ECU");
+            ui.checkbox(
+                &mut self.backup_ok,
+                "I have a verified full backup of this ECU",
+            );
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Type WRITE to confirm").color(MUTED));
                 ui.add(egui::TextEdit::singleline(&mut self.write_confirm).desired_width(120.0));
@@ -1768,18 +2220,45 @@ impl App {
             ui.add_space(8.0);
             let ready = self.backup_ok && self.write_confirm == "WRITE" && self.image.is_some();
             ui.horizontal_wrapped(|ui| {
-                if centered_button_enabled(ui, ready && !partial && self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new(RichText::new("Erase and write").color(BG)).fill(WARN)).clicked() {
+                if centered_button_enabled(
+                    ui,
+                    ready && !partial && self.connected && !self.busy,
+                    Vec2::new(180.0, 34.0),
+                    egui::Button::new(RichText::new("Erase and write").color(BG)).fill(WARN),
+                )
+                .clicked()
+                {
                     self.start_write();
                 }
-                if centered_button_enabled(ui, ready && self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new(RichText::new("Write calibration only").color(BG)).fill(ACCENT)).clicked() {
+                if centered_button_enabled(
+                    ui,
+                    ready && self.connected && !self.busy,
+                    Vec2::new(180.0, 34.0),
+                    egui::Button::new(RichText::new("Write calibration only").color(BG))
+                        .fill(ACCENT),
+                )
+                .clicked()
+                {
                     self.start_write_cal();
                 }
             });
             ui.add_space(6.0);
-            ui.label(RichText::new(if partial { "Calibration image loaded: only file 0x38000-0x3FFFF will be written." } else { "Partial write programs file 0x38000-0x3FFFF only." }).size(11.0).color(MUTED));
+            ui.label(
+                RichText::new(if partial {
+                    "Calibration image loaded: only file 0x38000-0x3FFFF will be written."
+                } else {
+                    "Partial write programs file 0x38000-0x3FFFF only."
+                })
+                .size(11.0)
+                .color(MUTED),
+            );
             if matches!(self.active_job, Some(Job::Write | Job::WriteCal)) {
                 ui.add_space(8.0);
-                ui.add(egui::ProgressBar::new(self.progress).show_percentage().animate(true));
+                ui.add(
+                    egui::ProgressBar::new(self.progress)
+                        .show_percentage()
+                        .animate(true),
+                );
                 ui.label(RichText::new(&self.progress_text).size(12.0).color(MUTED));
             }
         });
@@ -1791,70 +2270,135 @@ impl App {
     }
 
     fn checksum_tab(&mut self, ui: &mut Ui) {
-        heading(ui, "Checksums", "Verify or correct the 4-byte compensation word at the end of each block.");
+        heading(ui, "Checksums", "Bosch TDI V3.1 block checksums — EDC15M is the DDE3 (same ECU). Algorithm ported from the verified edc15m-checksum-tool.");
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            if centered_button_enabled(ui, self.image.is_some() && !self.busy, Vec2::new(140.0, 30.0), egui::Button::new("Correct all")).clicked() {
+            if centered_button_enabled(
+                ui,
+                self.image.is_some() && !self.busy,
+                Vec2::new(140.0, 30.0),
+                egui::Button::new("Correct all"),
+            )
+            .clicked()
+            {
                 self.correct_all_checksums();
             }
-            if centered_button_enabled(ui, self.image.is_some() && !self.busy, Vec2::new(140.0, 30.0), egui::Button::new("Save image…")).clicked() {
+            if centered_button_enabled(
+                ui,
+                self.image.is_some() && !self.busy,
+                Vec2::new(140.0, 30.0),
+                egui::Button::new("Save image…"),
+            )
+            .clicked()
+            {
                 self.save_image();
             }
-            if centered_button_enabled(ui, !self.busy, Vec2::new(140.0, 30.0), egui::Button::new("Open image…")).clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("ECU image", &["bin"]).pick_file() {
+            if centered_button_enabled(
+                ui,
+                !self.busy,
+                Vec2::new(140.0, 30.0),
+                egui::Button::new("Open image…"),
+            )
+            .clicked()
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("ECU image", &["bin"])
+                    .pick_file()
+                {
                     self.load_image(path);
                 }
             }
-            ui.label(RichText::new(format!("target {:08X}", checksum::TARGET)).size(11.0).color(MUTED));
+            ui.label(
+                RichText::new("TDI V3.1 · 2-byte block id at 0xB7A")
+                    .size(11.0)
+                    .color(MUTED),
+            );
         });
         ui.add_space(12.0);
         if self.image.is_none() {
             card(ui, ui.available_width(), |ui| {
                 section_title(ui, "No image");
-                ui.label(RichText::new("Load a 256 KB full image or a 32 KB calibration image.").color(MUTED));
+                ui.label(
+                    RichText::new("Load a 256 KB full image or a 32 KB calibration image.")
+                        .color(MUTED),
+                );
             });
             return;
         }
         let mut apply_idx = None;
         let mut fix_idx = None;
-        let indices: Vec<usize> = if self.image_is_partial {
-            vec![calibration_index()]
-        } else {
-            (0..checksum::BLOCKS.len()).collect()
-        };
+        let none = self.checks.is_empty();
         card(ui, ui.available_width(), |ui| {
-            section_title(ui, "Blocks");
-            egui::Grid::new("checksum-blocks").num_columns(6).spacing([14.0, 6.0]).striped(true).show(ui, |ui| {
-                for h in ["Block", "Value", "Status", "Comp", "Bytes", "Action"] {
-                    ui.label(RichText::new(h).size(11.0).color(MUTED));
-                }
-                ui.end_row();
-                for i in indices {
-                    let blk = &checksum::BLOCKS[i];
-                    let check = self.checks.get(i);
-                    let ok = check.map(|c| c.ok).unwrap_or(false);
-                    let value = check.map(|c| c.value).unwrap_or(0);
-                    ui.label(RichText::new(blk.name).size(12.0).color(TEXT));
-                    ui.label(RichText::new(format!("{value:08X}")).font(FontId::monospace(11.0)).color(MUTED));
-                    ui.label(RichText::new(if ok { "OK" } else { "BAD" }).size(11.0).color(if ok { OK } else { DANGER }));
-                    ui.label(RichText::new(format!("0x{:05X}", blk.comp)).font(FontId::monospace(10.0)).color(MUTED));
-                    if i < self.comp_edit.len() {
-                        ui.add(egui::TextEdit::singleline(&mut self.comp_edit[i]).desired_width(92.0));
-                    } else {
-                        ui.label("");
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.small_button("Apply").clicked() {
-                            apply_idx = Some(i);
+            section_title(ui, "Checksums");
+            if none {
+                ui.label(RichText::new("No EDC15M TDI V3.1 checksum block found in this image. The block is located by its 2-byte id at 0xB7A; a blank or foreign image has none.").color(MUTED));
+            } else {
+                egui::Grid::new("checksum-blocks")
+                    .num_columns(8)
+                    .spacing([14.0, 6.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for h in [
+                            "Block",
+                            "Pos",
+                            "Stored",
+                            "Computed",
+                            "Status",
+                            "Stored (edit)",
+                            "Apply",
+                            "Fix",
+                        ] {
+                            ui.label(RichText::new(h).size(11.0).color(MUTED));
                         }
-                        let correctable = checksum::CORRECTABLE.contains(&blk.name);
-                        if centered_button_enabled(ui, correctable, Vec2::new(48.0, 22.0), egui::Button::new("Fix")).clicked() {
-                            fix_idx = Some(i);
+                        ui.end_row();
+                        for (i, c) in self.checks.iter().enumerate() {
+                            let pos = self.file_offset_of(c.pos);
+                            ui.label(RichText::new(c.name).size(12.0).color(TEXT));
+                            ui.label(
+                                RichText::new(format!("0x{pos:05X}"))
+                                    .font(FontId::monospace(11.0))
+                                    .color(MUTED),
+                            );
+                            ui.label(
+                                RichText::new(format!("{:#010X}", c.stored))
+                                    .font(FontId::monospace(11.0))
+                                    .color(MUTED),
+                            );
+                            ui.label(
+                                RichText::new(format!("{:#010X}", c.computed))
+                                    .font(FontId::monospace(11.0))
+                                    .color(MUTED),
+                            );
+                            ui.label(
+                                RichText::new(if c.ok { "OK" } else { "BAD" })
+                                    .size(11.0)
+                                    .color(if c.ok { OK } else { DANGER }),
+                            );
+                            if i < self.comp_edit.len() {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.comp_edit[i])
+                                        .desired_width(92.0),
+                                );
+                            } else {
+                                ui.label("");
+                            }
+                            if ui.small_button("Apply").clicked() {
+                                apply_idx = Some(i);
+                            }
+                            if centered_button_enabled(
+                                ui,
+                                true,
+                                Vec2::new(48.0, 22.0),
+                                egui::Button::new("Fix"),
+                            )
+                            .clicked()
+                            {
+                                fix_idx = Some(i);
+                            }
+                            ui.end_row();
                         }
                     });
-                    ui.end_row();
-                }
-            });
+            }
         });
         if let Some(i) = apply_idx {
             self.apply_comp_edit(i);
@@ -1863,40 +2407,89 @@ impl App {
             self.correct_block_checksum(i);
         }
         ui.add_space(10.0);
-        ui.label(RichText::new(if self.image_is_partial { "A 32 KB calibration image contains only the calibration block." } else { "Apply writes the edited 4-byte word into the image. Fix solves one block. Correct all solves all correctable blocks." }).size(11.0).color(MUTED));
+        ui.label(RichText::new(if self.image_is_partial {
+            "A 32 KB calibration image carries one checksum at file offset 0x7BFC. The code block (0x13FFC) only exists in 256 KB reads."
+        } else {
+            "Pos is the file offset of the 4-byte checksum. Stored (edit) writes the typed word into the image; Fix recomputes one block; Correct all fixes every discovered block."
+        }).size(11.0).color(MUTED));
         ui.add_space(10.0);
-        ui.label(RichText::new("⚠️ The DDE3 TDI V3.1 block layout and target value are UNVERIFIED. Do not flash a corrected image without hardware validation.").size(10.0).color(WARN));
+        ui.label(RichText::new("⚠️ The TDI V3.1 algorithm is verified against edc15m-checksum-tool (regression vectors + real E46 reads). The flash-write path is still experimental — keep a verified backup.").size(10.0).color(WARN));
     }
 
     fn dtc_tab(&mut self, ui: &mut Ui) {
-        heading(ui, "Fault codes", "DS2 fault memory — FS_LESEN / FS_SHADOW_LESEN / FS_LOESCHEN (DDE30DS0.prg).");
+        heading(
+            ui,
+            "Fault codes",
+            "DS2 fault memory — FS_LESEN / FS_SHADOW_LESEN / FS_LOESCHEN (DDE30DS0.prg).",
+        );
         ui.add_space(8.0);
         card(ui, ui.available_width(), |ui| {
             ui.horizontal_wrapped(|ui| {
-                if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(150.0, 34.0), egui::Button::new(RichText::new("Read faults").color(BG)).fill(ACCENT)).clicked() {
+                if centered_button_enabled(
+                    ui,
+                    self.connected && !self.busy,
+                    Vec2::new(150.0, 34.0),
+                    egui::Button::new(RichText::new("Read faults").color(BG)).fill(ACCENT),
+                )
+                .clicked()
+                {
                     self.start_dtc_read();
                 }
                 if self.dtc_clear_armed {
-                    if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(150.0, 34.0), egui::Button::new(RichText::new("Confirm clear").color(BG)).fill(DANGER)).clicked() {
+                    if centered_button_enabled(
+                        ui,
+                        self.connected && !self.busy,
+                        Vec2::new(150.0, 34.0),
+                        egui::Button::new(RichText::new("Confirm clear").color(BG)).fill(DANGER),
+                    )
+                    .clicked()
+                    {
                         self.start_dtc_clear();
                     }
                     if ui.small_button("cancel").clicked() {
                         self.dtc_clear_armed = false;
                     }
-                    ui.label(RichText::new("next click erases the fault memory").size(11.0).color(DANGER));
-                } else if centered_button_enabled(ui, self.connected && !self.busy && !self.dtcs.is_empty(), Vec2::new(150.0, 34.0), egui::Button::new("Clear faults").fill(CARD_ALT)).clicked() {
+                    ui.label(
+                        RichText::new("next click erases the fault memory")
+                            .size(11.0)
+                            .color(DANGER),
+                    );
+                } else if centered_button_enabled(
+                    ui,
+                    self.connected && !self.busy && !self.dtcs.is_empty(),
+                    Vec2::new(150.0, 34.0),
+                    egui::Button::new("Clear faults").fill(CARD_ALT),
+                )
+                .clicked()
+                {
                     self.dtc_clear_armed = true;
                 }
-                if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(120.0, 34.0), egui::Button::new("Battery ⚡")).clicked() {
+                if centered_button_enabled(
+                    ui,
+                    self.connected && !self.busy,
+                    Vec2::new(120.0, 34.0),
+                    egui::Button::new("Battery ⚡"),
+                )
+                .clicked()
+                {
                     self.start_battery();
                 }
                 if let Some(v) = self.battery_v {
-                    ui.label(RichText::new(format!("Battery {v:.2} V")).size(13.0).strong().color(if v < 10.5 { WARN } else { OK }));
+                    ui.label(
+                        RichText::new(format!("Battery {v:.2} V"))
+                            .size(13.0)
+                            .strong()
+                            .color(if v < 10.5 { WARN } else { OK }),
+                    );
                 }
             });
             if self.active_job == Some(Job::Dtc) || self.active_job == Some(Job::DtcClear) {
                 ui.add_space(8.0);
-                ui.add(egui::ProgressBar::new(self.progress).show_percentage().animate(true));
+                ui.add(
+                    egui::ProgressBar::new(self.progress)
+                        .show_percentage()
+                        .animate(true),
+                );
                 ui.label(RichText::new(&self.progress_text).size(11.0).color(MUTED));
             }
         });
@@ -1904,46 +2497,105 @@ impl App {
         if self.dtcs.is_empty() {
             card(ui, ui.available_width(), |ui| {
                 section_title(ui, "Fault memory");
-                ui.label(RichText::new(if self.active_job == Some(Job::Dtc) { "Reading…" } else { "No fault codes stored yet — press Read faults." }).color(MUTED));
+                ui.label(
+                    RichText::new(if self.active_job == Some(Job::Dtc) {
+                        "Reading…"
+                    } else {
+                        "No fault codes stored yet — press Read faults."
+                    })
+                    .color(MUTED),
+                );
             });
             return;
         }
         for (i, d) in self.dtcs.iter().enumerate() {
             card(ui, ui.available_width(), |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("#{}", i + 1)).size(13.0).strong().color(ACCENT));
-                    ui.label(RichText::new(format!("ORT 0x{:02X}  {}", d.ort, crate::dtc::ort_text(d.ort))).size(14.0).strong().color(TEXT));
+                    ui.label(
+                        RichText::new(format!("#{}", i + 1))
+                            .size(13.0)
+                            .strong()
+                            .color(ACCENT),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "ORT 0x{:02X}  {}",
+                            d.ort,
+                            crate::dtc::ort_text(d.ort)
+                        ))
+                        .size(14.0)
+                        .strong()
+                        .color(TEXT),
+                    );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(format!("ART 0x{:02X}", d.art)).font(FontId::monospace(11.0)).color(MUTED));
+                        ui.label(
+                            RichText::new(format!("ART 0x{:02X}", d.art))
+                                .font(FontId::monospace(11.0))
+                                .color(MUTED),
+                        );
                     });
                 });
                 ui.add_space(6.0);
-                ui.label(RichText::new(format!("Fault: {}", crate::dtc::fart_text(d.art))).size(13.0).color(WARN));
+                ui.label(
+                    RichText::new(format!("Fault: {}", crate::dtc::fart_text(d.art)))
+                        .size(13.0)
+                        .color(WARN),
+                );
                 let (u1, u2) = crate::dtc::ort_uw_ids(d.ort);
                 if !d.uw.is_empty() {
                     ui.add_space(6.0);
-                    egui::Grid::new(format!("dtc-uw-{}", i)).num_columns(2).spacing([14.0, 4.0]).show(ui, |ui| {
-                        for (j, raw) in d.uw.iter().enumerate() {
-                            let id = if j == 0 { u1 } else { u2 };
-                            match crate::dtc::uw_info(id) {
-                                Some(u) => {
-                                    ui.label(RichText::new(u.name.trim()).size(12.0).color(MUTED));
-                                    ui.label(RichText::new(format!("{:.2} {} (raw {})", crate::dtc::uw_value(id, *raw), u.unit, raw)).font(FontId::monospace(12.0)).color(ACCENT));
+                    egui::Grid::new(format!("dtc-uw-{}", i))
+                        .num_columns(2)
+                        .spacing([14.0, 4.0])
+                        .show(ui, |ui| {
+                            for (j, raw) in d.uw.iter().enumerate() {
+                                let id = if j == 0 { u1 } else { u2 };
+                                match crate::dtc::uw_info(id) {
+                                    Some(u) => {
+                                        ui.label(
+                                            RichText::new(u.name.trim()).size(12.0).color(MUTED),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{:.2} {} (raw {})",
+                                                crate::dtc::uw_value(id, *raw),
+                                                u.unit,
+                                                raw
+                                            ))
+                                            .font(FontId::monospace(12.0))
+                                            .color(ACCENT),
+                                        );
+                                    }
+                                    None => {
+                                        ui.label(
+                                            RichText::new(format!("UW{}", j + 1))
+                                                .size(12.0)
+                                                .color(MUTED),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("0x{raw:04X}"))
+                                                .font(FontId::monospace(12.0))
+                                                .color(ACCENT),
+                                        );
+                                    }
                                 }
-                                None => {
-                                    ui.label(RichText::new(format!("UW{}", j + 1)).size(12.0).color(MUTED));
-                                    ui.label(RichText::new(format!("0x{raw:04X}")).font(FontId::monospace(12.0)).color(ACCENT));
-                                }
+                                ui.end_row();
                             }
-                            ui.end_row();
-                        }
-                    });
+                        });
                 }
                 if !d.shadow.is_empty() {
-                    egui::CollapsingHeader::new(RichText::new(format!("Freeze frame ({} values)", d.shadow.len())).size(12.0).color(MUTED))
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            egui::Grid::new(format!("dtc-fs-{}", i)).num_columns(3).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
+                    egui::CollapsingHeader::new(
+                        RichText::new(format!("Freeze frame ({} values)", d.shadow.len()))
+                            .size(12.0)
+                            .color(MUTED),
+                    )
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        egui::Grid::new(format!("dtc-fs-{}", i))
+                            .num_columns(3)
+                            .spacing([16.0, 4.0])
+                            .striped(true)
+                            .show(ui, |ui| {
                                 ui.label(RichText::new("Measurement").size(11.0).color(MUTED));
                                 ui.label(RichText::new("Value").size(11.0).color(MUTED));
                                 ui.label(RichText::new("Raw").size(11.0).color(MUTED));
@@ -1951,20 +2603,38 @@ impl App {
                                 for (j, raw) in d.shadow.iter().enumerate() {
                                     let fallback = format!("[{j}]");
                                     let (id, name, unit) = match crate::dtc::UMWELT.get(j) {
-                                        Some(r) if r.0 != 0x00 && r.0 != 0xFF => (r.0, r.1.trim(), r.2.trim()),
+                                        Some(r) if r.0 != 0x00 && r.0 != 0xFF => {
+                                            (r.0, r.1.trim(), r.2.trim())
+                                        }
                                         _ => (0, fallback.as_str(), ""),
                                     };
                                     ui.label(RichText::new(name).size(12.0).color(MUTED));
                                     if id != 0 {
-                                        ui.label(RichText::new(format!("{:.2} {}", crate::dtc::uw_value(id, *raw), unit)).font(FontId::monospace(12.0)).color(TEXT));
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{:.2} {}",
+                                                crate::dtc::uw_value(id, *raw),
+                                                unit
+                                            ))
+                                            .font(FontId::monospace(12.0))
+                                            .color(TEXT),
+                                        );
                                     } else {
-                                        ui.label(RichText::new(format!("{raw}")).font(FontId::monospace(12.0)).color(MUTED));
+                                        ui.label(
+                                            RichText::new(format!("{raw}"))
+                                                .font(FontId::monospace(12.0))
+                                                .color(MUTED),
+                                        );
                                     }
-                                    ui.label(RichText::new(format!("{raw}")).font(FontId::monospace(12.0)).color(MUTED));
+                                    ui.label(
+                                        RichText::new(format!("{raw}"))
+                                            .font(FontId::monospace(12.0))
+                                            .color(MUTED),
+                                    );
                                     ui.end_row();
                                 }
                             });
-                        });
+                    });
                 }
             });
             ui.add_space(10.0);
@@ -1977,37 +2647,53 @@ impl App {
         }
         let mut open = self.show_var_picker;
         let mut changed = false;
-        egui::Window::new("Live variables").open(&mut open).resizable(true).default_width(460.0).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.small_button("All").clicked() {
-                    for v in self.live_enabled.iter_mut() { *v = true; }
-                    changed = true;
-                }
-                if ui.small_button("None").clicked() {
-                    for v in self.live_enabled.iter_mut() { *v = false; }
-                    changed = true;
-                }
-                ui.label(RichText::new("max 10 IDs per request").size(11.0).color(MUTED));
-            });
-            ui.add_space(6.0);
-            let mut groups: Vec<&'static str> = Vec::new();
-            for v in LIVE_VARS {
-                if !groups.contains(&v.group) {
-                    groups.push(v.group);
-                }
-            }
-            ScrollArea::vertical().max_height(430.0).show(ui, |ui| {
-                for g in groups {
-                    egui::CollapsingHeader::new(g).default_open(false).show(ui, |ui| {
-                        for (i, v) in LIVE_VARS.iter().enumerate() {
-                            if v.group == g && ui.checkbox(&mut self.live_enabled[i], v.name).changed() {
-                                changed = true;
-                            }
+        egui::Window::new("Live variables")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.small_button("All").clicked() {
+                        for v in self.live_enabled.iter_mut() {
+                            *v = true;
                         }
-                    });
+                        changed = true;
+                    }
+                    if ui.small_button("None").clicked() {
+                        for v in self.live_enabled.iter_mut() {
+                            *v = false;
+                        }
+                        changed = true;
+                    }
+                    ui.label(
+                        RichText::new("max 10 IDs per request")
+                            .size(11.0)
+                            .color(MUTED),
+                    );
+                });
+                ui.add_space(6.0);
+                let mut groups: Vec<&'static str> = Vec::new();
+                for v in LIVE_VARS {
+                    if !groups.contains(&v.group) {
+                        groups.push(v.group);
+                    }
                 }
+                ScrollArea::vertical().max_height(430.0).show(ui, |ui| {
+                    for g in groups {
+                        egui::CollapsingHeader::new(g)
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for (i, v) in LIVE_VARS.iter().enumerate() {
+                                    if v.group == g
+                                        && ui.checkbox(&mut self.live_enabled[i], v.name).changed()
+                                    {
+                                        changed = true;
+                                    }
+                                }
+                            });
+                    }
+                });
             });
-        });
         self.show_var_picker = open;
         if changed {
             if self.logging {
@@ -2024,74 +2710,175 @@ impl App {
     }
 
     fn live_tab(&mut self, ui: &mut Ui) {
-        heading(ui, "Live data", "Polled via MW_SELECT_LESEN (`12 05 0B 10 <id bytes>`) — service 0x0B.");
+        heading(
+            ui,
+            "Live data",
+            "Polled via MW_SELECT_LESEN (`12 05 0B 10 <id bytes>`) — service 0x0B.",
+        );
         ui.add_space(8.0);
         let enabled_count = self.live_enabled.iter().filter(|v| **v).count();
         ui.horizontal_wrapped(|ui| {
             if self.live_running {
-                if centered_button(ui, Vec2::new(130.0, 30.0), egui::Button::new(RichText::new("Stop").color(DANGER)).fill(CARD_ALT)).clicked() {
+                if centered_button(
+                    ui,
+                    Vec2::new(130.0, 30.0),
+                    egui::Button::new(RichText::new("Stop").color(DANGER)).fill(CARD_ALT),
+                )
+                .clicked()
+                {
                     self.stop_live();
                 }
-            } else if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(130.0, 30.0), egui::Button::new(RichText::new("Start").color(BG)).fill(ACCENT)).clicked() {
+            } else if centered_button_enabled(
+                ui,
+                self.connected && !self.busy,
+                Vec2::new(130.0, 30.0),
+                egui::Button::new(RichText::new("Start").color(BG)).fill(ACCENT),
+            )
+            .clicked()
+            {
                 self.start_live();
             }
-            if centered_button(ui, Vec2::new(130.0, 30.0), egui::Button::new(format!("Variables ({enabled_count})"))).clicked() {
+            if centered_button(
+                ui,
+                Vec2::new(130.0, 30.0),
+                egui::Button::new(format!("Variables ({enabled_count})")),
+            )
+            .clicked()
+            {
                 self.show_var_picker = !self.show_var_picker;
             }
-            if centered_button(ui, Vec2::new(130.0, 30.0), egui::Button::new("Graph").selected(self.show_graph)).clicked() {
+            if centered_button(
+                ui,
+                Vec2::new(130.0, 30.0),
+                egui::Button::new("Graph").selected(self.show_graph),
+            )
+            .clicked()
+            {
                 self.show_graph = !self.show_graph;
             }
-            ui.label(RichText::new(if self.live_running { format!("polling at {:.1} Hz", self.live_rate) } else { "idle".to_string() }).size(12.0).color(MUTED));
+            ui.label(
+                RichText::new(if self.live_running {
+                    format!("polling at {:.1} Hz", self.live_rate)
+                } else {
+                    "idle".to_string()
+                })
+                .size(12.0)
+                .color(MUTED),
+            );
             if enabled_count > 10 {
-                ui.label(RichText::new("more than 10 selected: polled in groups").size(11.0).color(WARN));
+                ui.label(
+                    RichText::new("more than 10 selected: polled in groups")
+                        .size(11.0)
+                        .color(WARN),
+                );
             }
         });
         ui.add_space(12.0);
         if self.show_graph {
-            graph_card(ui, &self.live_enabled, &self.live_values, &self.live_history, &mut self.graph_var);
+            graph_card(
+                ui,
+                &self.live_enabled,
+                &self.live_values,
+                &self.live_history,
+                &mut self.graph_var,
+            );
             ui.add_space(12.0);
         }
-        let active: Vec<usize> = (0..LIVE_VARS.len()).filter(|i| self.live_enabled[*i]).collect();
+        let active: Vec<usize> = (0..LIVE_VARS.len())
+            .filter(|i| self.live_enabled[*i])
+            .collect();
         if active.is_empty() {
             ui.label(RichText::new("No variables selected.").color(MUTED));
             return;
         }
         let avail = ui.available_width();
-        let cols = if avail > 1250.0 { 3 } else if avail > 820.0 { 2 } else { 1 };
+        let cols = if avail > 1250.0 {
+            3
+        } else if avail > 820.0 {
+            2
+        } else {
+            1
+        };
         let width = (avail - 12.0 * (cols - 1) as f32) / cols as f32;
-        egui::Grid::new("live-grid").num_columns(cols).spacing([12.0, 12.0]).show(ui, |ui| {
-            for (n, i) in active.iter().enumerate() {
-                live_card(ui, &LIVE_VARS[*i], self.live_values[*i], &self.live_history[*i], width);
-                if (n + 1) % cols == 0 {
-                    ui.end_row();
+        egui::Grid::new("live-grid")
+            .num_columns(cols)
+            .spacing([12.0, 12.0])
+            .show(ui, |ui| {
+                for (n, i) in active.iter().enumerate() {
+                    live_card(
+                        ui,
+                        &LIVE_VARS[*i],
+                        self.live_values[*i],
+                        &self.live_history[*i],
+                        width,
+                    );
+                    if (n + 1) % cols == 0 {
+                        ui.end_row();
+                    }
                 }
-            }
-        });
+            });
     }
 
     fn logger_tab(&mut self, ui: &mut Ui) {
-        heading(ui, "Value logger", "Poll the selected measurement IDs and write a timestamped CSV.");
+        heading(
+            ui,
+            "Value logger",
+            "Poll the selected measurement IDs and write a timestamped CSV.",
+        );
         ui.add_space(8.0);
-        let enabled: Vec<usize> = (0..LIVE_VARS.len()).filter(|i| self.live_enabled[*i]).collect();
+        let enabled: Vec<usize> = (0..LIVE_VARS.len())
+            .filter(|i| self.live_enabled[*i])
+            .collect();
         ui.horizontal_wrapped(|ui| {
             if self.logging {
-                if centered_button(ui, Vec2::new(160.0, 34.0), egui::Button::new(RichText::new("Stop logging").color(DANGER)).fill(CARD_ALT)).clicked() {
+                if centered_button(
+                    ui,
+                    Vec2::new(160.0, 34.0),
+                    egui::Button::new(RichText::new("Stop logging").color(DANGER)).fill(CARD_ALT),
+                )
+                .clicked()
+                {
                     self.stop_logging();
                 }
-            } else if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(160.0, 34.0), egui::Button::new(RichText::new("Start logging").color(BG)).fill(ACCENT)).clicked() {
+            } else if centered_button_enabled(
+                ui,
+                self.connected && !self.busy,
+                Vec2::new(160.0, 34.0),
+                egui::Button::new(RichText::new("Start logging").color(BG)).fill(ACCENT),
+            )
+            .clicked()
+            {
                 self.start_logging();
             }
-            if centered_button(ui, Vec2::new(160.0, 34.0), egui::Button::new(format!("Variables ({})", enabled.len()))).clicked() {
+            if centered_button(
+                ui,
+                Vec2::new(160.0, 34.0),
+                egui::Button::new(format!("Variables ({})", enabled.len())),
+            )
+            .clicked()
+            {
                 self.show_var_picker = !self.show_var_picker;
             }
-            ui.label(RichText::new(format!("{:.1} Hz · {} rows", self.live_rate, self.log_rows)).size(12.0).color(MUTED));
+            ui.label(
+                RichText::new(format!("{:.1} Hz · {} rows", self.live_rate, self.log_rows))
+                    .size(12.0)
+                    .color(MUTED),
+            );
         });
         ui.add_space(6.0);
         if !self.log_path.is_empty() {
-            ui.label(RichText::new(format!("File: {}", self.log_path)).size(11.0).color(MUTED));
+            ui.label(
+                RichText::new(format!("File: {}", self.log_path))
+                    .size(11.0)
+                    .color(MUTED),
+            );
         }
         if self.logging {
-            ui.label(RichText::new("Logging is active. Stop to flush and close the CSV.").size(11.0).color(WARN));
+            ui.label(
+                RichText::new("Logging is active. Stop to flush and close the CSV.")
+                    .size(11.0)
+                    .color(WARN),
+            );
         }
         ui.add_space(12.0);
         card(ui, ui.available_width(), |ui| {
@@ -2101,24 +2888,36 @@ impl App {
                 return;
             }
             ScrollArea::vertical().max_height(430.0).show(ui, |ui| {
-                egui::Grid::new("logger-values").num_columns(3).striped(true).spacing([18.0, 5.0]).show(ui, |ui| {
-                    ui.label(RichText::new("Variable").size(11.0).color(MUTED));
-                    ui.label(RichText::new("Value").size(11.0).color(MUTED));
-                    ui.label(RichText::new("Unit").size(11.0).color(MUTED));
-                    ui.end_row();
-                    for &i in &enabled {
-                        ui.label(RichText::new(LIVE_VARS[i].name).size(12.0).color(TEXT));
-                        ui.label(RichText::new(format!("{:.2}", self.live_values[i])).font(FontId::monospace(12.0)).color(ACCENT));
-                        ui.label(RichText::new(LIVE_VARS[i].unit).size(11.0).color(MUTED));
+                egui::Grid::new("logger-values")
+                    .num_columns(3)
+                    .striped(true)
+                    .spacing([18.0, 5.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Variable").size(11.0).color(MUTED));
+                        ui.label(RichText::new("Value").size(11.0).color(MUTED));
+                        ui.label(RichText::new("Unit").size(11.0).color(MUTED));
                         ui.end_row();
-                    }
-                });
+                        for &i in &enabled {
+                            ui.label(RichText::new(LIVE_VARS[i].name).size(12.0).color(TEXT));
+                            ui.label(
+                                RichText::new(format!("{:.2}", self.live_values[i]))
+                                    .font(FontId::monospace(12.0))
+                                    .color(ACCENT),
+                            );
+                            ui.label(RichText::new(LIVE_VARS[i].unit).size(11.0).color(MUTED));
+                            ui.end_row();
+                        }
+                    });
             });
         });
     }
 
     fn log_tab(&mut self, ui: &mut Ui) {
-        heading(ui, "Protocol log", "Raw TX/RX telegrams and operation messages.");
+        heading(
+            ui,
+            "Protocol log",
+            "Raw TX/RX telegrams and operation messages.",
+        );
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if centered_button(ui, Vec2::new(80.0, 28.0), egui::Button::new("Copy")).clicked() {
@@ -2127,7 +2926,11 @@ impl App {
             if centered_button(ui, Vec2::new(80.0, 28.0), egui::Button::new("Clear")).clicked() {
                 self.logs.clear();
             }
-            ui.label(RichText::new(format!("{} lines", self.logs.len())).size(12.0).color(MUTED));
+            ui.label(
+                RichText::new(format!("{} lines", self.logs.len()))
+                    .size(12.0)
+                    .color(MUTED),
+            );
         });
         ui.add_space(8.0);
         let log_height = (ui.available_height() - 12.0).max(240.0);
@@ -2138,11 +2941,23 @@ impl App {
             .inner_margin(10)
             .show(ui, |ui| {
                 ui.set_min_height(log_height);
-                ScrollArea::vertical().stick_to_bottom(true).max_height(log_height).auto_shrink([false, false]).show(ui, |ui| {
-                    for line in &self.logs {
-                        ui.label(RichText::new(line).font(FontId::monospace(11.0)).color(if line.starts_with("ERROR") { DANGER } else if line.starts_with("TX") { ACCENT } else { TEXT }));
-                    }
-                });
+                ScrollArea::vertical()
+                    .stick_to_bottom(true)
+                    .max_height(log_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for line in &self.logs {
+                            ui.label(RichText::new(line).font(FontId::monospace(11.0)).color(
+                                if line.starts_with("ERROR") {
+                                    DANGER
+                                } else if line.starts_with("TX") {
+                                    ACCENT
+                                } else {
+                                    TEXT
+                                },
+                            ));
+                        }
+                    });
             });
     }
 }
@@ -2239,7 +3054,8 @@ fn centered_button_enabled(
 ) -> egui::Response {
     let layout = Layout::left_to_right(Align::Center).with_main_align(Align::Center);
     ui.allocate_ui_with_layout(size, layout, |ui| {
-        ui.add_enabled_ui(enabled, |ui| ui.add_sized(size, button)).inner
+        ui.add_enabled_ui(enabled, |ui| ui.add_sized(size, button))
+            .inner
     })
     .inner
 }
@@ -2265,15 +3081,28 @@ fn style(ctx: &egui::Context) {
     style.visuals.hyperlink_color = ACCENT;
     style.spacing.item_spacing = Vec2::new(10.0, 8.0);
     style.spacing.button_padding = Vec2::new(12.0, 7.0);
-    style.text_styles.insert(TextStyle::Heading, FontId::proportional(24.0));
-    style.text_styles.insert(TextStyle::Body, FontId::proportional(14.0));
-    style.text_styles.insert(TextStyle::Button, FontId::proportional(13.0));
-    style.text_styles.insert(TextStyle::Small, FontId::proportional(11.0));
+    style
+        .text_styles
+        .insert(TextStyle::Heading, FontId::proportional(24.0));
+    style
+        .text_styles
+        .insert(TextStyle::Body, FontId::proportional(14.0));
+    style
+        .text_styles
+        .insert(TextStyle::Button, FontId::proportional(13.0));
+    style
+        .text_styles
+        .insert(TextStyle::Small, FontId::proportional(11.0));
     ctx.set_style(style);
 }
 
 fn heading(ui: &mut Ui, title: &str, subtitle: &str) {
-    ui.label(RichText::new(title).font(FontId::proportional(26.0)).strong().color(TEXT));
+    ui.label(
+        RichText::new(title)
+            .font(FontId::proportional(26.0))
+            .strong()
+            .color(TEXT),
+    );
     ui.label(RichText::new(subtitle).size(12.0).color(MUTED));
 }
 
@@ -2309,7 +3138,12 @@ fn battery_pill(ui: &mut Ui, voltage: Option<f64>) {
 
 fn pill(ui: &mut Ui, text: &str, color: Color32) {
     Frame::new()
-        .fill(Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 22))
+        .fill(Color32::from_rgba_unmultiplied(
+            color.r(),
+            color.g(),
+            color.b(),
+            22,
+        ))
         .stroke(Stroke::new(1.0, color.gamma_multiply(0.5)))
         .corner_radius(20)
         .inner_margin(Margin::symmetric(10, 4))
@@ -2318,21 +3152,37 @@ fn pill(ui: &mut Ui, text: &str, color: Color32) {
         });
 }
 
-fn checksum_card(ui: &mut Ui, checks: &[BlockResult]) {
+fn checksum_card(ui: &mut Ui, checks: &[checksum::Checksum]) {
     card(ui, ui.available_width(), |ui| {
         section_title(ui, "Flash checksum");
-        egui::Grid::new("checks").num_columns(3).spacing([16.0, 6.0]).show(ui, |ui| {
-            ui.label(RichText::new("Block").size(11.0).color(MUTED));
-            ui.label(RichText::new("Value").size(11.0).color(MUTED));
-            ui.label(RichText::new("Status").size(11.0).color(MUTED));
-            ui.end_row();
-            for c in checks {
-                ui.label(RichText::new(c.name).size(12.0).color(TEXT));
-                ui.label(RichText::new(format!("{:08X}", c.value)).font(FontId::monospace(12.0)).color(MUTED));
-                ui.label(RichText::new(if c.ok { "OK" } else { "BAD" }).size(12.0).color(if c.ok { OK } else { DANGER }));
+        egui::Grid::new("checks")
+            .num_columns(3)
+            .spacing([16.0, 6.0])
+            .show(ui, |ui| {
+                ui.label(RichText::new("Block").size(11.0).color(MUTED));
+                ui.label(RichText::new("Checksum").size(11.0).color(MUTED));
+                ui.label(RichText::new("Status").size(11.0).color(MUTED));
                 ui.end_row();
-            }
-        });
+                for c in checks {
+                    ui.label(RichText::new(c.name).size(12.0).color(TEXT));
+                    let value = if c.ok {
+                        format!("{:#010X}", c.computed)
+                    } else {
+                        format!("{:#010X} → {:#010X}", c.stored, c.computed)
+                    };
+                    ui.label(
+                        RichText::new(value)
+                            .font(FontId::monospace(12.0))
+                            .color(MUTED),
+                    );
+                    ui.label(
+                        RichText::new(if c.ok { "OK" } else { "BAD" })
+                            .size(12.0)
+                            .color(if c.ok { OK } else { DANGER }),
+                    );
+                    ui.end_row();
+                }
+            });
     });
 }
 
@@ -2365,36 +3215,81 @@ fn graph_card(
                     }
                 });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(format!("{:.1} {}", values[*selected], LIVE_VARS[*selected].unit)).size(18.0).strong().color(ACCENT));
+                ui.label(
+                    RichText::new(format!(
+                        "{:.1} {}",
+                        values[*selected], LIVE_VARS[*selected].unit
+                    ))
+                    .size(18.0)
+                    .strong()
+                    .color(ACCENT),
+                );
             });
         });
         let h = &histories[*selected];
         let height = 230.0;
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), height),
+            egui::Sense::hover(),
+        );
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 6.0, Color32::from_rgb(10, 15, 19));
         for k in 0..=4 {
             let y = rect.top() + rect.height() * k as f32 / 4.0;
-            painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], Stroke::new(1.0, Color32::from_rgb(27, 37, 45)));
+            painter.line_segment(
+                [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                Stroke::new(1.0, Color32::from_rgb(27, 37, 45)),
+            );
         }
         if h.len() >= 2 {
             let min = h.iter().cloned().fold(f32::INFINITY, f32::min);
             let max = h.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let span = (max - min).max(max.abs() * 0.02).max(1e-3);
             let mid = (max + min) * 0.5;
-            let pts: Vec<egui::Pos2> = h.iter().enumerate().map(|(k, v)| {
-                let x = rect.left() + rect.width() * k as f32 / (h.len().saturating_sub(1)).max(1) as f32;
-                let y = rect.bottom() - rect.height() * (((*v - mid) / span) + 0.5);
-                egui::pos2(x, y)
-            }).collect();
+            let pts: Vec<egui::Pos2> = h
+                .iter()
+                .enumerate()
+                .map(|(k, v)| {
+                    let x = rect.left()
+                        + rect.width() * k as f32 / (h.len().saturating_sub(1)).max(1) as f32;
+                    let y = rect.bottom() - rect.height() * (((*v - mid) / span) + 0.5);
+                    egui::pos2(x, y)
+                })
+                .collect();
             painter.add(egui::Shape::line(pts, Stroke::new(1.8, ACCENT)));
-            painter.text(egui::pos2(rect.left() + 8.0, rect.top() + 6.0), egui::Align2::LEFT_TOP, format!("{max:.1} {}", LIVE_VARS[*selected].unit), FontId::proportional(10.0), MUTED);
-            painter.text(egui::pos2(rect.left() + 8.0, rect.bottom() - 6.0), egui::Align2::LEFT_BOTTOM, format!("{min:.1} {}", LIVE_VARS[*selected].unit), FontId::proportional(10.0), MUTED);
+            painter.text(
+                egui::pos2(rect.left() + 8.0, rect.top() + 6.0),
+                egui::Align2::LEFT_TOP,
+                format!("{max:.1} {}", LIVE_VARS[*selected].unit),
+                FontId::proportional(10.0),
+                MUTED,
+            );
+            painter.text(
+                egui::pos2(rect.left() + 8.0, rect.bottom() - 6.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{min:.1} {}", LIVE_VARS[*selected].unit),
+                FontId::proportional(10.0),
+                MUTED,
+            );
         } else {
-            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "waiting for samples", FontId::proportional(12.0), MUTED);
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "waiting for samples",
+                FontId::proportional(12.0),
+                MUTED,
+            );
         }
         ui.add_space(6.0);
-        ui.label(RichText::new(format!("{} samples · {}", h.len(), LIVE_VARS[*selected].group)).size(11.0).color(MUTED));
+        ui.label(
+            RichText::new(format!(
+                "{} samples · {}",
+                h.len(),
+                LIVE_VARS[*selected].group
+            ))
+            .size(11.0)
+            .color(MUTED),
+        );
     });
 }
 
@@ -2408,29 +3303,42 @@ fn live_card(ui: &mut Ui, var: &LiveVar, value: f64, history: &[f32], width: f32
             ui.set_width(width - 28.0);
             ui.label(RichText::new(var.name).size(12.0).color(MUTED));
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{value:.1}")).font(FontId::proportional(28.0)).strong().color(TEXT));
+                ui.label(
+                    RichText::new(format!("{value:.1}"))
+                        .font(FontId::proportional(28.0))
+                        .strong()
+                        .color(TEXT),
+                );
                 ui.label(RichText::new(var.unit).size(12.0).color(MUTED));
             });
             let spark_w = ui.available_width().max(140.0);
-            let rect = ui.allocate_exact_size(Vec2::new(spark_w, 34.0), egui::Sense::hover()).0;
+            let rect = ui
+                .allocate_exact_size(Vec2::new(spark_w, 34.0), egui::Sense::hover())
+                .0;
             let painter = ui.painter_at(rect);
             painter.rect_filled(rect, 4.0, Color32::from_rgb(12, 17, 21));
             if history.len() > 1 {
                 let min = history.iter().cloned().fold(f32::INFINITY, f32::min);
                 let max = history.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                 let span = (max - min).max(1.0);
-                let pts: Vec<egui::Pos2> = history.iter().enumerate().map(|(i, v)| {
-                    let x = rect.left() + rect.width() * i as f32 / (history.len() - 1) as f32;
-                    let y = rect.bottom() - rect.height() * (*v - min) / span;
-                    egui::pos2(x, y)
-                }).collect();
+                let pts: Vec<egui::Pos2> = history
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let x = rect.left() + rect.width() * i as f32 / (history.len() - 1) as f32;
+                        let y = rect.bottom() - rect.height() * (*v - min) / span;
+                        egui::pos2(x, y)
+                    })
+                    .collect();
                 painter.add(egui::Shape::line(pts, Stroke::new(1.5, ACCENT)));
             }
         });
 }
 
 fn default_path(name: &str) -> String {
-    std::env::var("HOME").map(|h| format!("{h}/{name}")).unwrap_or_else(|_| name.to_string())
+    std::env::var("HOME")
+        .map(|h| format!("{h}/{name}"))
+        .unwrap_or_else(|_| name.to_string())
 }
 
 /// Pre-write battery snapshot (ADF id 0x0F65, DDE3 scale 0.02037243 / LSB).
@@ -2458,7 +3366,11 @@ fn report_error(tx: &Sender<Msg>, prefix: &str, err: &anyhow::Error) {
 }
 
 fn ascii(bytes: &[u8]) -> String {
-    let s: String = bytes.iter().take_while(|b| **b >= 0x20 && **b != 0xC3 && **b != 0xFF).map(|b| *b as char).collect();
+    let s: String = bytes
+        .iter()
+        .take_while(|b| **b >= 0x20 && **b != 0xC3 && **b != 0xFF)
+        .map(|b| *b as char)
+        .collect();
     if s.is_empty() {
         hex(bytes)
     } else {
@@ -2470,8 +3382,4 @@ fn pad_calibration(cal: &[u8]) -> Vec<u8> {
     let mut full = vec![0xFFu8; IMAGE_SIZE];
     full[CAL_START..CAL_START + CAL_LEN].copy_from_slice(cal);
     full
-}
-
-fn calibration_index() -> usize {
-    checksum::BLOCKS.iter().position(|b| b.name == "calibration").unwrap_or(0)
 }
