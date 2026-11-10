@@ -1487,10 +1487,10 @@ impl App {
                     }
                     ui.checkbox(&mut self.echo, "Echo");
                     if self.connected {
-                        if ui.add_enabled(!self.busy, egui::Button::new(RichText::new("Disconnect").color(DANGER)).fill(CARD_ALT).min_size(Vec2::new(100.0, 30.0))).clicked() {
+                        if centered_button_enabled(ui, !self.busy, Vec2::new(100.0, 30.0), egui::Button::new(RichText::new("Disconnect").color(DANGER)).fill(CARD_ALT)).clicked() {
                             self.disconnect();
                         }
-                    } else if ui.add_enabled(!self.busy && !self.port.is_empty(), egui::Button::new(RichText::new("Connect").color(BG)).fill(ACCENT).min_size(Vec2::new(100.0, 30.0))).clicked() {
+                    } else if centered_button_enabled(ui, !self.busy && !self.port.is_empty(), Vec2::new(100.0, 30.0), egui::Button::new(RichText::new("Connect").color(BG)).fill(ACCENT)).clicked() {
                         self.connect();
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1637,20 +1637,20 @@ impl App {
     fn quick_card(&mut self, ui: &mut Ui) {
         section_title(ui, "Quick actions");
         ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(self.connected && !self.busy, egui::Button::new(RichText::new("Read full flash").color(BG)).fill(ACCENT).min_size(Vec2::new(180.0, 34.0))).clicked() {
+            if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new(RichText::new("Read full flash").color(BG)).fill(ACCENT)).clicked() {
                 self.tab = Tab::Read;
                 self.start_read();
             }
-            if ui.add_enabled(!self.busy, egui::Button::new("Load image…").min_size(Vec2::new(180.0, 34.0))).clicked() {
+            if centered_button_enabled(ui, !self.busy, Vec2::new(180.0, 34.0), egui::Button::new("Load image…")).clicked() {
                 if let Some(path) = rfd::FileDialog::new().add_filter("ECU image", &["bin"]).pick_file() {
                     self.load_image(path);
                 }
             }
-            if ui.add_enabled(self.connected && !self.busy, egui::Button::new("Live data").min_size(Vec2::new(180.0, 34.0))).clicked() {
+            if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new("Live data")).clicked() {
                 self.tab = Tab::Live;
                 self.start_live();
             }
-            if ui.add_enabled(self.connected && !self.busy, egui::Button::new("Fault codes").min_size(Vec2::new(180.0, 34.0))).clicked() {
+            if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new("Fault codes")).clicked() {
                 self.tab = Tab::Dtc;
                 self.start_dtc_read();
             }
@@ -1666,7 +1666,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Save to").color(MUTED));
                 ui.add(egui::TextEdit::singleline(&mut self.read_path).desired_width(420.0));
-                if ui.add_sized(Vec2::new(90.0, 28.0), egui::Button::new("Browse…")).clicked() {
+                if centered_button(ui, Vec2::new(90.0, 28.0), egui::Button::new("Browse…")).clicked() {
                     if let Some(path) = rfd::FileDialog::new().set_file_name("dde3_full.bin").add_filter("BIN", &["bin"]).save_file() {
                         self.read_path = path.display().to_string();
                     }
@@ -1674,7 +1674,7 @@ impl App {
             });
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.add_enabled(self.connected && !self.busy, egui::Button::new(RichText::new("Read full flash").color(BG)).fill(ACCENT).min_size(Vec2::new(180.0, 34.0))).clicked() {
+                if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new(RichText::new("Read full flash").color(BG)).fill(ACCENT)).clicked() {
                     self.start_read();
                 }
                 if self.active_job == Some(Job::Full) {
@@ -1694,14 +1694,14 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Save to").color(MUTED));
                 ui.add(egui::TextEdit::singleline(&mut self.cal_path).desired_width(380.0));
-                if ui.add_sized(Vec2::new(90.0, 28.0), egui::Button::new("Browse…")).clicked() {
+                if centered_button(ui, Vec2::new(90.0, 28.0), egui::Button::new("Browse…")).clicked() {
                     if let Some(path) = rfd::FileDialog::new().set_file_name("dde3_cal.bin").add_filter("BIN", &["bin"]).save_file() {
                         self.cal_path = path.display().to_string();
                     }
                 }
             });
             ui.add_space(8.0);
-            if ui.add_enabled(self.connected && !self.busy, egui::Button::new(RichText::new("Read calibration").color(BG)).fill(ACCENT).min_size(Vec2::new(180.0, 34.0))).clicked() {
+            if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new(RichText::new("Read calibration").color(BG)).fill(ACCENT)).clicked() {
                 self.start_read_cal();
             }
             if self.active_job == Some(Job::Cal) {
@@ -1731,7 +1731,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Image").color(MUTED));
                 ui.add(egui::TextEdit::singleline(&mut self.image_name).desired_width(420.0).hint_text("select a 256 KB or 32 KB .bin"));
-                if ui.add_sized(Vec2::new(90.0, 28.0), egui::Button::new("Open…")).clicked() {
+                if centered_button(ui, Vec2::new(90.0, 28.0), egui::Button::new("Open…")).clicked() {
                     if let Some(path) = rfd::FileDialog::new().add_filter("ECU image", &["bin"]).pick_file() {
                         self.load_image(path);
                     }
@@ -1742,7 +1742,7 @@ impl App {
                 let ok = self.checks_ok();
                 let kind = if partial { "calibration image" } else { "full image" };
                 ui.label(RichText::new(format!("{} bytes · {} · {}", img.len(), kind, if ok { "checksum OK" } else { "checksum BAD (corrected automatically on write)" })).size(12.0).color(if ok { MUTED } else { WARN }));
-                if !ok && ui.add_sized(Vec2::new(130.0, 30.0), egui::Button::new("Review")).clicked() {
+                if !ok && centered_button(ui, Vec2::new(130.0, 30.0), egui::Button::new("Review")).clicked() {
                     self.tab = Tab::Checksum;
                 }
             }
@@ -1768,10 +1768,10 @@ impl App {
             ui.add_space(8.0);
             let ready = self.backup_ok && self.write_confirm == "WRITE" && self.image.is_some();
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(ready && !partial && self.connected && !self.busy, egui::Button::new(RichText::new("Erase and write").color(BG)).fill(WARN).min_size(Vec2::new(180.0, 34.0))).clicked() {
+                if centered_button_enabled(ui, ready && !partial && self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new(RichText::new("Erase and write").color(BG)).fill(WARN)).clicked() {
                     self.start_write();
                 }
-                if ui.add_enabled(ready && self.connected && !self.busy, egui::Button::new(RichText::new("Write calibration only").color(BG)).fill(ACCENT).min_size(Vec2::new(180.0, 34.0))).clicked() {
+                if centered_button_enabled(ui, ready && self.connected && !self.busy, Vec2::new(180.0, 34.0), egui::Button::new(RichText::new("Write calibration only").color(BG)).fill(ACCENT)).clicked() {
                     self.start_write_cal();
                 }
             });
@@ -1794,13 +1794,13 @@ impl App {
         heading(ui, "Checksums", "Verify or correct the 4-byte compensation word at the end of each block.");
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(self.image.is_some() && !self.busy, egui::Button::new("Correct all").min_size(Vec2::new(140.0, 30.0))).clicked() {
+            if centered_button_enabled(ui, self.image.is_some() && !self.busy, Vec2::new(140.0, 30.0), egui::Button::new("Correct all")).clicked() {
                 self.correct_all_checksums();
             }
-            if ui.add_enabled(self.image.is_some() && !self.busy, egui::Button::new("Save image…").min_size(Vec2::new(140.0, 30.0))).clicked() {
+            if centered_button_enabled(ui, self.image.is_some() && !self.busy, Vec2::new(140.0, 30.0), egui::Button::new("Save image…")).clicked() {
                 self.save_image();
             }
-            if ui.add_enabled(!self.busy, egui::Button::new("Open image…").min_size(Vec2::new(140.0, 30.0))).clicked() {
+            if centered_button_enabled(ui, !self.busy, Vec2::new(140.0, 30.0), egui::Button::new("Open image…")).clicked() {
                 if let Some(path) = rfd::FileDialog::new().add_filter("ECU image", &["bin"]).pick_file() {
                     self.load_image(path);
                 }
@@ -1848,7 +1848,7 @@ impl App {
                             apply_idx = Some(i);
                         }
                         let correctable = checksum::CORRECTABLE.contains(&blk.name);
-                        if ui.add_enabled(correctable, egui::Button::new("Fix").min_size(Vec2::new(48.0, 22.0))).clicked() {
+                        if centered_button_enabled(ui, correctable, Vec2::new(48.0, 22.0), egui::Button::new("Fix")).clicked() {
                             fix_idx = Some(i);
                         }
                     });
@@ -1873,21 +1873,21 @@ impl App {
         ui.add_space(8.0);
         card(ui, ui.available_width(), |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(self.connected && !self.busy, egui::Button::new(RichText::new("Read faults").color(BG)).fill(ACCENT).min_size(Vec2::new(150.0, 34.0))).clicked() {
+                if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(150.0, 34.0), egui::Button::new(RichText::new("Read faults").color(BG)).fill(ACCENT)).clicked() {
                     self.start_dtc_read();
                 }
                 if self.dtc_clear_armed {
-                    if ui.add_enabled(self.connected && !self.busy, egui::Button::new(RichText::new("Confirm clear").color(BG)).fill(DANGER).min_size(Vec2::new(150.0, 34.0))).clicked() {
+                    if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(150.0, 34.0), egui::Button::new(RichText::new("Confirm clear").color(BG)).fill(DANGER)).clicked() {
                         self.start_dtc_clear();
                     }
                     if ui.small_button("cancel").clicked() {
                         self.dtc_clear_armed = false;
                     }
                     ui.label(RichText::new("next click erases the fault memory").size(11.0).color(DANGER));
-                } else if ui.add_enabled(self.connected && !self.busy && !self.dtcs.is_empty(), egui::Button::new("Clear faults").fill(CARD_ALT).min_size(Vec2::new(150.0, 34.0))).clicked() {
+                } else if centered_button_enabled(ui, self.connected && !self.busy && !self.dtcs.is_empty(), Vec2::new(150.0, 34.0), egui::Button::new("Clear faults").fill(CARD_ALT)).clicked() {
                     self.dtc_clear_armed = true;
                 }
-                if ui.add_enabled(self.connected && !self.busy, egui::Button::new("Battery ⚡").min_size(Vec2::new(120.0, 34.0))).clicked() {
+                if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(120.0, 34.0), egui::Button::new("Battery ⚡")).clicked() {
                     self.start_battery();
                 }
                 if let Some(v) = self.battery_v {
@@ -2029,16 +2029,16 @@ impl App {
         let enabled_count = self.live_enabled.iter().filter(|v| **v).count();
         ui.horizontal_wrapped(|ui| {
             if self.live_running {
-                if ui.add(egui::Button::new(RichText::new("Stop").color(DANGER)).fill(CARD_ALT).min_size(Vec2::new(130.0, 30.0))).clicked() {
+                if centered_button(ui, Vec2::new(130.0, 30.0), egui::Button::new(RichText::new("Stop").color(DANGER)).fill(CARD_ALT)).clicked() {
                     self.stop_live();
                 }
-            } else if ui.add_enabled(self.connected && !self.busy, egui::Button::new(RichText::new("Start").color(BG)).fill(ACCENT).min_size(Vec2::new(130.0, 30.0))).clicked() {
+            } else if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(130.0, 30.0), egui::Button::new(RichText::new("Start").color(BG)).fill(ACCENT)).clicked() {
                 self.start_live();
             }
-            if ui.add(egui::Button::new(format!("Variables ({enabled_count})")).min_size(Vec2::new(130.0, 30.0))).clicked() {
+            if centered_button(ui, Vec2::new(130.0, 30.0), egui::Button::new(format!("Variables ({enabled_count})"))).clicked() {
                 self.show_var_picker = !self.show_var_picker;
             }
-            if ui.add_sized(Vec2::new(130.0, 30.0), egui::Button::new("Graph").selected(self.show_graph)).clicked() {
+            if centered_button(ui, Vec2::new(130.0, 30.0), egui::Button::new("Graph").selected(self.show_graph)).clicked() {
                 self.show_graph = !self.show_graph;
             }
             ui.label(RichText::new(if self.live_running { format!("polling at {:.1} Hz", self.live_rate) } else { "idle".to_string() }).size(12.0).color(MUTED));
@@ -2075,13 +2075,13 @@ impl App {
         let enabled: Vec<usize> = (0..LIVE_VARS.len()).filter(|i| self.live_enabled[*i]).collect();
         ui.horizontal_wrapped(|ui| {
             if self.logging {
-                if ui.add(egui::Button::new(RichText::new("Stop logging").color(DANGER)).fill(CARD_ALT).min_size(Vec2::new(160.0, 34.0))).clicked() {
+                if centered_button(ui, Vec2::new(160.0, 34.0), egui::Button::new(RichText::new("Stop logging").color(DANGER)).fill(CARD_ALT)).clicked() {
                     self.stop_logging();
                 }
-            } else if ui.add_enabled(self.connected && !self.busy, egui::Button::new(RichText::new("Start logging").color(BG)).fill(ACCENT).min_size(Vec2::new(160.0, 34.0))).clicked() {
+            } else if centered_button_enabled(ui, self.connected && !self.busy, Vec2::new(160.0, 34.0), egui::Button::new(RichText::new("Start logging").color(BG)).fill(ACCENT)).clicked() {
                 self.start_logging();
             }
-            if ui.add(egui::Button::new(format!("Variables ({})", enabled.len())).min_size(Vec2::new(160.0, 34.0))).clicked() {
+            if centered_button(ui, Vec2::new(160.0, 34.0), egui::Button::new(format!("Variables ({})", enabled.len()))).clicked() {
                 self.show_var_picker = !self.show_var_picker;
             }
             ui.label(RichText::new(format!("{:.1} Hz · {} rows", self.live_rate, self.log_rows)).size(12.0).color(MUTED));
@@ -2121,10 +2121,10 @@ impl App {
         heading(ui, "Protocol log", "Raw TX/RX telegrams and operation messages.");
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.add_sized(Vec2::new(80.0, 28.0), egui::Button::new("Copy")).clicked() {
+            if centered_button(ui, Vec2::new(80.0, 28.0), egui::Button::new("Copy")).clicked() {
                 ui.ctx().copy_text(self.logs.join("\n"));
             }
-            if ui.add_sized(Vec2::new(80.0, 28.0), egui::Button::new("Clear")).clicked() {
+            if centered_button(ui, Vec2::new(80.0, 28.0), egui::Button::new("Clear")).clicked() {
                 self.logs.clear();
             }
             ui.label(RichText::new(format!("{} lines", self.logs.len())).size(12.0).color(MUTED));
@@ -2182,19 +2182,10 @@ impl App {
             );
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui
-                    .add_sized(
-                        Vec2::new(190.0, 32.0),
-                        egui::Button::new(RichText::new("Confirm power cycle").color(BG)).fill(ACCENT),
-                    )
-                    .clicked()
-                {
+                if centered_button(ui, Vec2::new(190.0, 32.0), egui::Button::new(RichText::new("Confirm power cycle").color(BG)).fill(ACCENT)).clicked() {
                     confirm = true;
                 }
-                if ui
-                    .add_sized(Vec2::new(120.0, 32.0), egui::Button::new("Skip"))
-                    .clicked()
-                {
+                if centered_button(ui, Vec2::new(120.0, 32.0), egui::Button::new("Skip")).clicked() {
                     skip = true;
                 }
             });
@@ -2213,7 +2204,48 @@ impl App {
 // Styling and helpers
 // ---------------------------------------------------------------------------
 
+/// Embedded so the UI renders identically on Windows and Linux. The egui default
+/// fonts have no glyphs for the sidebar icons, the status dot or the arrow, which
+/// showed as tofu boxes on systems without a matching fallback font.
+const UI_FONT: &[u8] = include_bytes!("../assets/fonts/DejaVuSans.ttf");
+
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "dejavu".to_owned(),
+        Arc::new(egui::FontData::from_static(UI_FONT)),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("dejavu".to_owned());
+    }
+    ctx.set_fonts(fonts);
+}
+
+fn centered_button(ui: &mut Ui, size: Vec2, button: egui::Button<'_>) -> egui::Response {
+    let layout = Layout::left_to_right(Align::Center).with_main_align(Align::Center);
+    ui.allocate_ui_with_layout(size, layout, |ui| ui.add_sized(size, button))
+        .inner
+}
+
+fn centered_button_enabled(
+    ui: &mut Ui,
+    enabled: bool,
+    size: Vec2,
+    button: egui::Button<'_>,
+) -> egui::Response {
+    let layout = Layout::left_to_right(Align::Center).with_main_align(Align::Center);
+    ui.allocate_ui_with_layout(size, layout, |ui| {
+        ui.add_enabled_ui(enabled, |ui| ui.add_sized(size, button)).inner
+    })
+    .inner
+}
+
 fn style(ctx: &egui::Context) {
+    install_fonts(ctx);
     let mut style = (*ctx.style()).clone();
     style.visuals = egui::Visuals::dark();
     style.visuals.panel_fill = BG;
