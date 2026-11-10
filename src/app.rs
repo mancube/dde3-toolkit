@@ -61,6 +61,19 @@ pub enum Tab {
 }
 
 impl Tab {
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "dtc" | "errors" | "faults" => Tab::Dtc,
+            "read" => Tab::Read,
+            "write" => Tab::Write,
+            "checksum" => Tab::Checksum,
+            "live" => Tab::Live,
+            "logger" => Tab::Logger,
+            "log" => Tab::Log,
+            _ => Tab::Overview,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
@@ -245,10 +258,31 @@ pub struct App {
     backup_ok: bool,
     write_confirm: String,
     fast_write: bool,
+    auto_live: bool,
+    auto_read: bool,
+    auto_cal: bool,
+    auto_log: Option<PathBuf>,
+    auto_write_cal: bool,
+    auto_write: bool,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        demo: bool,
+        initial_tab: Tab,
+        autoconnect: bool,
+        auto_live: bool,
+        auto_read: bool,
+        auto_cal: bool,
+        auto_log: Option<PathBuf>,
+        show_vars: bool,
+        port: Option<String>,
+        image: Option<PathBuf>,
+        auto_write_cal: bool,
+        auto_write: bool,
+        fast_write: bool,
+    ) -> Self {
         style(&cc.egui_ctx);
         let (tx, rx) = unbounded();
         let mut app = Self {
@@ -260,7 +294,7 @@ impl App {
             ports: Vec::new(),
             port: String::new(),
             echo: true,
-            tab: Tab::Overview,
+            tab: initial_tab,
             status: "Ready".into(),
             error: None,
             ecu: None,
@@ -293,14 +327,66 @@ impl App {
             log_path: String::new(),
             log_rows: 0,
             show_graph: true,
-            show_var_picker: false,
+            show_var_picker: show_vars,
             graph_var: 0,
             backup_ok: false,
             write_confirm: String::new(),
-            fast_write: false,
+            fast_write,
+            auto_live,
+            auto_read,
+            auto_cal,
+            auto_log,
+            auto_write_cal,
+            auto_write,
         };
         app.refresh_ports();
+        if demo {
+            app.demo();
+        }
+        if let Some(path) = image {
+            app.load_image(path);
+        }
+        if autoconnect {
+            if let Some(p) = port {
+                if !p.is_empty() {
+                    app.port = p;
+                }
+            }
+            app.connect();
+        }
         app
+    }
+
+    /// Fake connected state for UI development without hardware.
+    fn demo(&mut self) {
+        self.connected = true;
+        self.status = "Demo mode".into();
+        self.ecu = Some(EcuInfo {
+            hardware: "DDE3.0 SIM".into(),
+            software: "DDE 3.0 fuer M47 (demo)".into(),
+        });
+        self.port = "/dev/ttyUSB1".into();
+        let mut img = vec![0u8; IMAGE_SIZE];
+        img = checksum::correct(&img);
+        self.checks = checksum::verify(&img);
+        self.image = Some(img);
+        self.image_name = "demo_dde3.bin".into();
+        self.image_is_partial = false;
+        self.write_path = "demo_dde3.bin".into();
+        self.dtcs = vec![
+            protocol::Dtc { ort: 0x26, art: 0x02, uw: vec![437, 659], shadow: Vec::new() },
+            protocol::Dtc { ort: 0x05, art: 0x01, uw: vec![1371, 1593], shadow: Vec::new() },
+            protocol::Dtc { ort: 0x36, art: 0x04, uw: vec![837, 1059], shadow: Vec::new() },
+        ];
+        self.battery_v = Some(13.9);
+        self.sync_comp_edits();
+        self.logs = vec![
+            "DDE3 Toolkit started (demo mode)".into(),
+            "TX 12 04 00 16".into(),
+            "RX 92 04 A0 44 44 45 33 2E 30 20 46 55 45 52 20 4D 34 37".into(),
+            "TX 12 05 14 01 31".into(),
+            "RX 92 05 A0 03".into(),
+        ];
     }
 
     fn refresh_ports(&mut self) {
@@ -330,6 +416,27 @@ impl App {
                     self.busy = false;
                     self.ecu = Some(info);
                     self.status = "Connected".into();
+                    if self.auto_write {
+                        self.tab = Tab::Write;
+                        self.backup_ok = true;
+                        self.write_confirm = "WRITE".into();
+                        self.start_write();
+                    } else if self.auto_write_cal {
+                        self.tab = Tab::Write;
+                        self.backup_ok = true;
+                        self.write_confirm = "WRITE".into();
+                        self.start_write_cal();
+                    } else if self.auto_read {
+                        self.tab = Tab::Read;
+                        self.start_read();
+                    } else if self.auto_cal {
+                        self.tab = Tab::Read;
+                        self.start_read_cal();
+                    } else if let Some(path) = self.auto_log.clone() {
+                        self.start_logging_to(path);
+                    } else if self.auto_live {
+                        self.start_live();
+                    }
                 }
                 Msg::Error(e) => {
                     eprintln!("ERROR {e}");
@@ -490,6 +597,7 @@ impl App {
                                 ));
                             }
                             let software = k.read_app(0x7BFB0, 10).map(|b| ascii(&b)).unwrap_or_else(|_| "unknown".into());
+                            snapshot_battery(&mut k, &tx);
                             let logs = k.take_logs();
                             *guard = Some(k);
                             for l in logs {
@@ -555,6 +663,7 @@ impl App {
                 return;
             };
             let _ = tx.send(Msg::Status("Reading full flash".into()));
+            snapshot_battery(k, &tx);
             k.set_silence(10);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(done as f32 / total as f32, format!("Reading {done} / {total} bytes")));
@@ -607,6 +716,7 @@ impl App {
                 return;
             };
             let _ = tx.send(Msg::Status("Reading calibration".into()));
+            snapshot_battery(k, &tx);
             k.set_silence(10);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(done as f32 / total as f32, format!("Reading calibration {done} / {total} bytes")));
@@ -1550,6 +1660,8 @@ impl App {
     fn read_tab(&mut self, ui: &mut Ui) {
         heading(ui, "Read flash", "Full 256 KB read over K-line, 9600 baud.");
         ui.add_space(8.0);
+        battery_pill(ui, self.battery_v);
+        ui.add_space(4.0);
         card(ui, ui.available_width(), |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Save to").color(MUTED));
@@ -1612,6 +1724,8 @@ impl App {
     fn write_tab(&mut self, ui: &mut Ui) {
         heading(ui, "Write flash", "Erase and program flash, or calibration only.");
         ui.add_space(8.0);
+        battery_pill(ui, self.battery_v);
+        ui.add_space(4.0);
         let partial = self.image_is_partial;
         card(ui, ui.available_width(), |ui| {
             ui.horizontal(|ui| {
@@ -2147,6 +2261,18 @@ fn card(ui: &mut Ui, width: f32, add: impl FnOnce(&mut Ui)) {
 fn section_title(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).size(13.0).strong().color(TEXT));
     ui.add_space(8.0);
+}
+
+/// Battery status pill (DDE3 ADF 0x0F65 scale 0.02037243 / LSB).
+/// Shown on the Read/Write tabs: a weak battery mid-flash is the
+/// classic brick cause, worth the glance.
+fn battery_pill(ui: &mut Ui, voltage: Option<f64>) {
+    match voltage {
+        Some(v) if v < 11.5 => pill(ui, &format!("Battery {v:.1} V — critical"), DANGER),
+        Some(v) if v < 12.0 => pill(ui, &format!("Battery {v:.1} V — low"), WARN),
+        Some(v) => pill(ui, &format!("Battery {v:.1} V"), OK),
+        None => pill(ui, "Battery not measured", MUTED),
+    }
 }
 
 fn pill(ui: &mut Ui, text: &str, color: Color32) {

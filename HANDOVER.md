@@ -512,6 +512,17 @@ addressing modes — used to locate the tables), `tools/gen_dtc_rs.py`
   power-cycles, then `start_post_write_clear()` waits 5 s, clears the DS2
   fault memory (with 5 s link-recovery retry) and re-reads the fault list.
 - Pre-write battery snapshot logged to the protocol log.
+- Battery pill (`battery_pill`) on the Read/Write tabs (critical/low/OK
+  colouring, DDE3 scale), and a voltage snapshot on connect + before
+  every read/write (dde4 parity).
+- GUI automation flags ported from dde4: `--autoconnect`, `--auto-read`,
+  `--auto-cal`, `--auto-live`, `--auto-log <path>`, `--auto-write-cal`,
+  `--auto-write`, `--fast-write`, `--show-vars`, `--tab <name>`,
+  `--width/--height`, `--demo` (fake ECU mode). After connect, first
+  match wins: write > write-cal > read > cal > log > live.
+- Not ported (deliberately): `patches` tab/state (no DDE3 patches),
+  `freeze_frames`/`dtc_read_at` (DDE3 stores raw u16 per DTC and scales
+  on the fly instead of pre-reading per-DTC freeze frames).
 - Error handling now matches dde4: `catch_unwind` worker guard,
   `lock_or_recover`, `is_link_error` classification, `recover_link` after
   connect errors, fatal-link-loss handling in the live loop.

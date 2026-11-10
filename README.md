@@ -161,6 +161,29 @@ Bench timing (sim, 9600 8E1 + 3 ms/byte pacing): read 256 KB ≈ 98 s,
 read-cal ≈ 12 s, write-cal ≈ 4 min, full write ≈ 8.5 min —
 protocol-inherent, not a bottleneck in the tool.
 
+### GUI automation
+
+The GUI accepts the same automation flags as dde4-toolkit (any one of
+them switches a flag-style invocation into GUI mode):
+
+```sh
+./target/release/dde3-toolkit --autoconnect --port /dev/ttyUSB1 --auto-read
+./target/release/dde3-toolkit --port /dev/ttyUSB1 --auto-write --image flash.bin
+./target/release/dde3-toolkit --autoconnect --auto-log /tmp/log.csv
+./target/release/dde3-toolkit --autoconnect --auto-live
+./target/release/dde3-toolkit --tab dtc --show-vars --width 1400 --height 900
+./target/release/dde3-toolkit --demo          # fake ECU, no hardware
+```
+
+Flags: `--autoconnect`, `--auto-read`, `--auto-cal`, `--auto-live`,
+`--auto-log <path>`, `--auto-write-cal`, `--auto-write`, `--fast-write`,
+`--show-vars`, `--tab <name>`, `--width <f>`, `--height <f>`, `--demo`.
+
+After connect, exactly one auto-action runs: write > write-cal > read >
+cal > log > live (first match wins). Battery voltage is snapshotted on
+connect and before every read/write, shown as a pill on the Read/Write
+tabs and on the Fault codes tab.
+
 **Bench wiring (dual-adapter):** `/dev/ttyUSB1` (FT232R) drives the K-line,
 `/dev/ttyUSB0` (QinHeng UART-LPT) taps it passively — run
 `python3 tools/monitor.py` on it to watch real wire traffic.

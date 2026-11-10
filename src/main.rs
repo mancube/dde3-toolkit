@@ -436,11 +436,59 @@ fn run() -> Result<()> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    // No arguments → launch the egui GUI.
-    if args.len() == 1 || args.iter().any(|a| a == "--gui") {
+    // GUI when there are no arguments, or when a GUI-only flag is present
+    // (CLI commands are command-first: `dde3-toolkit <command> [options]`).
+    const GUI_FLAGS: &[&str] = &[
+        "--gui", "--demo", "--autoconnect", "--auto-live", "--auto-read",
+        "--auto-cal", "--auto-log", "--auto-write-cal", "--auto-write",
+        "--fast-write", "--show-vars", "--tab", "--width", "--height",
+    ];
+    if args.len() == 1 || args.iter().any(|a| GUI_FLAGS.contains(&a.as_str())) {
+        let demo = args.iter().any(|a| a == "--demo");
+        let autoconnect = args.iter().any(|a| a == "--autoconnect");
+        let auto_live = args.iter().any(|a| a == "--auto-live");
+        let auto_read = args.iter().any(|a| a == "--auto-read");
+        let auto_cal = args.iter().any(|a| a == "--auto-cal");
+        let auto_log = args
+            .iter()
+            .position(|a| a == "--auto-log")
+            .and_then(|i| args.get(i + 1))
+            .map(std::path::PathBuf::from);
+        let image = args
+            .iter()
+            .position(|a| a == "--image")
+            .and_then(|i| args.get(i + 1))
+            .map(std::path::PathBuf::from);
+        let auto_write_cal = args.iter().any(|a| a == "--auto-write-cal");
+        let auto_write = args.iter().any(|a| a == "--auto-write");
+        let fast_write = args.iter().any(|a| a == "--fast-write");
+        let show_vars = args.iter().any(|a| a == "--show-vars");
+        let port = args
+            .iter()
+            .position(|a| a == "--port")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        let tab = args
+            .iter()
+            .position(|a| a == "--tab")
+            .and_then(|i| args.get(i + 1))
+            .map(|s| app::Tab::parse(s))
+            .unwrap_or(app::Tab::Overview);
+        let width = args
+            .iter()
+            .position(|a| a == "--width")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(1180.0);
+        let height = args
+            .iter()
+            .position(|a| a == "--height")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(760.0);
         let native_options = eframe::NativeOptions {
             viewport: eframe::egui::ViewportBuilder::default()
-                .with_inner_size([1180.0, 760.0])
+                .with_inner_size([width, height])
                 .with_min_inner_size([940.0, 620.0])
                 .with_title("DDE3 Toolkit"),
             ..Default::default()
@@ -448,7 +496,11 @@ fn main() {
         let _ = eframe::run_native(
             "DDE3 Toolkit",
             native_options,
-            Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+            Box::new(move |cc| Ok(Box::new(app::App::new(
+                cc, demo, tab, autoconnect, auto_live, auto_read, auto_cal,
+                auto_log, show_vars, port, image, auto_write_cal, auto_write,
+                fast_write,
+            )))),
         );
         return;
     }
