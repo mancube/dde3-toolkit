@@ -1,7 +1,9 @@
 # DDE3 Toolkit — Handover Document
 
 > For the agent taking over. Read this fully before starting.
-> **Read §0b (session-4 status) first — the plan was re-scoped there.**
+> **Read §18 (2026-11-11 status) first — fault read/clear is solved, DTC tab and
+> bench runner added, and the toolkit is now its own git repo.**
+> Then §0b (session-4 status, where the plan was re-scoped).
 >
 > ⚠️ §0–§13 were **reconstructed on 2026-11-09** after an editing accident
 > truncated this file. The reconstruction uses the session-3/4 summary plus
@@ -450,3 +452,108 @@ sniff_session{,2,3,4}.raw`, `sniff_bg.raw`.
 Tests: `cargo test` → 12 passing, including new `captured_winkfp_frames`
 (byte-exact frames from the capture) and
 `parser_keeps_partial_frame_across_reads` (the 50 ms gap case).
+
+---
+
+## 18. Session 6 findings: fault memory SOLVED, DTC tab, bench, new git repo (2026-11-11)
+
+### 18.1 ECU identity (captured 2026-11-09, `analysis/captures/ecu_identity.txt`)
+
+- Reply to `12 04 00 16`: `92 04 A0 44 44 45 33 2E 30 20 46 55 45 52 20 4D 34 37`
+  = **"DDE 3.0 fuer M47"** — the real ECU is an M47 engine DDE 3.0.
+- The real ECU answered all services the same day (ident, DS2 fault read,
+  seed/key `12 08 90 42 4D 57 05 00`, and a **full 256 KB flash write** that
+  completed 11:21–11:24).
+
+### 18.2 DTC protocol — SOLVED (was the big open item, §14/§17)
+
+DDE3 has no dedicated fault-READ job in `10DDE30.prg`; the fault memory
+lives in the **diagnostic program `DDE30DS0.prg`** (the DDE4 analogue of the
+DS2 shell). Its 177-job table was decoded with the same VM
+(`tools/prg_vm.py`). Fault services are DS2 sub-commands (decoded from the
+2026-11-09 11:18–11:26 captures + VM):
+
+| Service | Request | Reply (SB=0xA0) |
+|---|---|---|
+| Fault count | `12 05 14 01` | `<n>` |
+| Fault entry (iterates; pos advances, wraps to 1 after last) | `12 05 04 00` | `<ort> <art> <uw1:2 BE> <uw2:2 BE>` |
+| Shadow/freeze values | `12 05 04 01` | 11 × u16 BE (per-fault, after entry request) |
+| Clear fault memory (DS2) | `12 04 05` | — |
+
+(The K-line BAP clear `12 09 07 0E 42 41 50 00` from 10DDE30.prg is a second,
+independent clear path — both are implemented.)
+
+**The DTC text tables are embedded in the `DDE30DS0.prg` body** (XOR 0xF7
+encoded, NUL-terminated strings at fixed offsets) — unlike DDE4, which
+ships them in external CSV/SGBD files:
+
+| Table | Offset (decoded body) | Rows | Meaning |
+|---|---|---|---|
+| ORT (fault classes) | `0x06b725` | 48 | class text, 144 B rows |
+| FArtMatrix | `0x06bf7a` | 47 × 16 | ORT slot → FArt code |
+| FArtTexte | `0x06cf69` | 97 | fault text, 160 B rows |
+| FUmweltTexte | `0x06df52` | 11 | freeze params + `value = A*raw + B` scaling (raw = u16 BE) |
+
+Tools added: `tools/extract_ds_frames.py` (fault-service frames from the VM),
+`tools/disasm.py` (full EDIC15/EDIABAS disassembler: 118 opcodes, 16
+addressing modes — used to locate the tables), `tools/gen_dtc_rs.py`
+(regenerates `src/dtc.rs` from the .prg; run with
+`python3 tools/gen_dtc_rs.py --prg /path/to/DDE30DS0.prg`).
+
+`src/dtc.rs` (generated): ORT/FART/UWELT/MATRIX constants, `Dtc` struct,
+`text()`, `uw_values()` (scaling), `battery_uw()` (0x08). 6 unit tests.
+
+### 18.3 GUI: 8th tab "Fault codes"
+
+- Fault cards: ORT class + FArt text + freeze values (scaled), shadow row
+  collapsible, battery-voltage display (ADF 0x0F65, scale 0.02037243/LSB).
+- Armed two-step clear button (Clear → Confirm), mirroring dde4.
+- Post-write modal (ported from dde4): after a successful write the user
+  power-cycles, then `start_post_write_clear()` waits 5 s, clears the DS2
+  fault memory (with 5 s link-recovery retry) and re-reads the fault list.
+- Pre-write battery snapshot logged to the protocol log.
+- Error handling now matches dde4: `catch_unwind` worker guard,
+  `lock_or_recover`, `is_link_error` classification, `recover_link` after
+  connect errors, fatal-link-loss handling in the live loop.
+
+### 18.4 Bench runner (headless, parity with dde4 `bench.rs`)
+
+`src/bench.rs` + `bench` subcommand: `--info | --read | --read-cal |
+--write | --write-cal`, `--image`, `--out`, PROGRESS/WRITE_DONE/ELAPSED on
+stderr, protocol-log dump on failure, link-recovery check after write.
+`write_full`/`write_calibration` now enter programming mode (UPROG_EIN)
+before erase (matches the decompiled job order; the sim NACKs without it).
+
+Measured against the in-process sim (9600 8E1 + 3 ms/byte pacing):
+read 256 KB ≈ 98 s, read-cal ≈ 12 s, write-cal (32 KB) ≈ 245 s, full write
+≈ 8.5 min. **Write speed is protocol-inherent** (per-byte pacing at 9600
+baud), not a bug; `--data-delay 0` speeds the sim runs up but is unverified
+on real hardware.
+
+### 18.5 Repo state
+
+- dde3-toolkit is now its **own git repo** (`git init` 2026-11-11, branch
+  `main`). The old IkacLogger repo was backed up to
+  `/tmp/old-logger-repo-backup-20261109.tgz` before removal.
+- Dual-adapter bench wiring (from §17/§14): `/dev/ttyUSB1` FT232R drives the
+  K-line, `/dev/ttyUSB0` QinHeng UART-LPT taps it passively
+  (`tools/monitor.py`); the ECU itself is simulated in-process.
+- `cargo test`: 25 passing.
+
+### 18.6 Still open
+
+1. **Real-ECU DTC verification** — the protocol and tables are decoded from
+   sources + one capture window; a live `dtc` read against the bench ECU
+   (sim) is implemented; do it against a real M47 ECU to confirm the
+   ORT/FArt/UMwelt mapping (esp. which of the 11 UMWELT slots are used by
+   which faults — the shadow reply always carries all 11).
+2. **Checksum hardware confirmation** — algorithm verified vs the Python
+   reference and unit tests; a real-ECU checksum-status reply has not been
+   captured yet.
+3. **Live data (MW) ids** — the ADF table (`tool32_edc15m_export.csv`)
+   comes from the DDE4/EDC15M export; ids must be confirmed on the real ECU
+   (battery 0x0F65 is confirmed by capture).
+4. Wire the GUI write path to the real 9600 pacing already used by the CLI
+   (done — both pass 9600 now; the old 38400/125000 "fast" args were dde4
+   leftovers silently ignored by the protocol; "fast write" now only drops
+   the inter-byte pause).
