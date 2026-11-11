@@ -70,6 +70,9 @@ Releases are **git-tagged binary bundles in `dist/`**, not CI artifacts:
 3. Never hand-edit files in `dist/`; only the release script touches them.
 4. Prebuilt binaries consumers get by checking out the tag — see the
    "Releases" section of `README.md`.
+5. Version labels: the GUI footer and the CLI usage line both print
+   `env!("CARGO_PKG_VERSION")`, i.e. the same `Cargo.toml` the script
+   bumps — nothing else to touch when releasing.
 
 ## Branches / pushing
 

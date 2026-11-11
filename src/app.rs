@@ -1588,7 +1588,13 @@ impl App {
                 }
                 ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
                     ui.add_space(6.0);
-                    ui.label(RichText::new("v0.1.0").size(10.0).color(MUTED));
+                    // Version comes from Cargo.toml (bumped by scripts/release.sh),
+                    // so the GUI label can never drift from the release again.
+                    ui.label(
+                        RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                            .size(10.0)
+                            .color(MUTED),
+                    );
                     ui.label(RichText::new("EDC15 / DDE3.0").size(11.0).color(MUTED));
                     ui.separator();
                     if let Some(ecu) = &self.ecu {

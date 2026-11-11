@@ -29,6 +29,7 @@ use crate::checksum::{correct, verify, CAL_LEN, CAL_START, IMAGE_SIZE};
 use crate::protocol::Kline;
 
 fn print_usage() {
+    eprintln!("dde3-toolkit v{}", env!("CARGO_PKG_VERSION"));
     eprintln!("Usage: dde3-toolkit [--gui] <command> [options]");
     eprintln!();
     eprintln!("With no arguments, launches the egui GUI.");
