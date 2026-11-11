@@ -313,7 +313,7 @@ impl SimEcu {
         let sub = *p.get(3).unwrap_or(&0x00);
         let mut vals: Vec<u16> = Vec::new();
         if sub == 0x10 {
-            for ch in p[4..].chunks_exact(2) {
+            for ch in p[4..].as_chunks::<2>().0 {
                 let id = ((ch[0] as u16) << 8) | ch[1] as u16;
                 vals.push(Self::mw_value(id));
             }

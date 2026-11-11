@@ -45,27 +45,33 @@ const ERASED_0: u32 = 0xFFFF_FFFF;
 const ERASED_1: u32 = 0x0000_0000;
 
 /// Regression vectors: LCG buffer, see `edc15m_checksum.py --selftest`
+#[allow(dead_code)]
 const VECTOR_SEED: u32 = 0x12345678;
+#[allow(dead_code)]
 const VECTOR_LEN: usize = 0x8000;
+#[allow(dead_code)]
 const VECTOR_CHECKSUM: u32 = 0x007B_C5EB; // calibration block over [0x0B80, 0x7C00)
+#[allow(dead_code)]
 const CODE_VECTOR_LEN: usize = 0x14000;
+#[allow(dead_code)]
 const CODE_VECTOR_CHECKSUM: u32 = 0x2477_887F; // code block over [0x10000, 0x14000)
 
 // ---------------------------------------------------------------------------
 // Public interface
 // ---------------------------------------------------------------------------
 
-/// One discovered checksum, checked. `pos`/`start`/`end` are offsets into the
+/// A discovered checksum slot: `(pos, start, end, seeds)`, offsets into the
 /// buffer that was verified.
+type FoundChecksum = (usize, usize, usize, (u16, u16, u16, u16));
+
+/// One discovered checksum, checked. `pos` is the offset of the 4-byte value
+/// in the buffer that was verified.
 #[derive(Clone, Copy, Debug)]
 pub struct Checksum {
     /// "calibration" or "code"
     pub name: &'static str,
     /// File offset of the 4-byte checksum value
     pub pos: usize,
-    /// Range the checksum covers: [start, end)
-    pub start: usize,
-    pub end: usize,
     /// Value currently stored at `pos`
     pub stored: u32,
     /// Value recomputed from the image
@@ -83,21 +89,11 @@ fn name_for(pos: usize) -> &'static str {
 }
 
 fn rol(v: u16, n: u16) -> u16 {
-    let n = n & 0xF;
-    if n == 0 {
-        v
-    } else {
-        ((v << n) | (v >> (16 - n))) & M16
-    }
+    v.rotate_left(u32::from(n))
 }
 
 fn ror(v: u16, n: u16) -> u16 {
-    let n = n & 0xF;
-    if n == 0 {
-        v
-    } else {
-        ((v >> n) | (v << (16 - n))) & M16
-    }
+    v.rotate_right(u32::from(n))
 }
 
 /// 32-bit EDC15M TDI V3.1 checksum over buf[start:end].
@@ -136,7 +132,7 @@ fn checksum(buf: &[u8], start: usize, end: usize, seeds: (u16, u16, u16, u16)) -
         p = p.wrapping_add(2);
         q = q.wrapping_add(2) & M16;
         h = (q.wrapping_add(h).wrapping_sub(1)) & M16;
-        g = g ^ u16::from_le_bytes([buf[p], buf[p + 1]]);
+        g ^= u16::from_le_bytes([buf[p], buf[p + 1]]);
         p = p.wrapping_add(2);
         q = q.wrapping_add(2) & M16;
         if h & 0xF != 0 {
@@ -169,12 +165,12 @@ fn slot(
     buf: &[u8],
     base: usize,
     key: [u8; 2],
-) -> Option<(usize, usize, usize, (u16, u16, u16, u16))> {
+) -> Option<FoundChecksum> {
     if key[0] == key[1] {
         return None; // a repeated byte is filler, not a block id
     }
     let mut slot = base + SLOT_LO;
-    while slot + 1 <= base + BLOCK {
+    while slot < base + BLOCK {
         if buf[slot - 6..slot - 4] == key {
             return Some((slot - 4, base + CS_START, slot, CAL_SEEDS));
         }
@@ -199,7 +195,7 @@ fn has_checksum(buf: &[u8], pos: usize) -> bool {
 /// has no tag — off the id the last block carries itself.  A full read
 /// additionally gets the fixed-geometry code block, once the calibration
 /// block has been recognised, and only while its field is not blank.
-pub fn find_checksums(buf: &[u8]) -> Vec<(usize, usize, usize, (u16, u16, u16, u16))> {
+pub fn find_checksums(buf: &[u8]) -> Vec<FoundChecksum> {
     let n = buf.len();
     let block_count = n / BLOCK;
     let blocks: Vec<usize> = (0..block_count).map(|i| i * BLOCK).collect();
@@ -228,7 +224,7 @@ pub fn find_checksums(buf: &[u8]) -> Vec<(usize, usize, usize, (u16, u16, u16, u
         }
     }
 
-    if found.len() > 0 && n == FULL_SIZE {
+    if !found.is_empty() && n == FULL_SIZE {
         let (start, end, pos, seeds) = CODE_BLOCK;
         if has_checksum(buf, pos) {
             found.push((pos, start, end, seeds));
@@ -248,8 +244,6 @@ pub fn verify(buf: &[u8]) -> Vec<Checksum> {
             Checksum {
                 name: name_for(pos),
                 pos,
-                start,
-                end,
                 stored,
                 computed,
                 ok: stored == computed,
@@ -287,9 +281,9 @@ mod tests {
     fn vector(len: usize) -> Vec<u8> {
         let mut buf = vec![0u8; len];
         let mut x: u32 = VECTOR_SEED;
-        for i in 0..len {
-            x = x.wrapping_mul(1103515245).wrapping_add(12345) & 0xFFFF_FFFF;
-            buf[i] = (x >> 16) as u8;
+        for b in buf.iter_mut() {
+            x = x.wrapping_mul(1103515245).wrapping_add(12345);
+            *b = (x >> 16) as u8;
         }
         buf
     }
@@ -336,7 +330,7 @@ mod tests {
         let img = synthetic_block([0x12, 0x34], 0xDEAD_BEEF);
         let pos = verify(&img)[0].pos;
         let fixed = correct_at(&img, pos).expect("slot is discovered");
-        assert_eq!(verify(&fixed)[0].ok, true);
+        assert!(verify(&fixed)[0].ok);
         assert!(
             correct_at(&img, 0x13FFC).is_none(),
             "no block at 0x13FFC in a 32 kB buffer"

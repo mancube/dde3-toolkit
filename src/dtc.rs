@@ -265,13 +265,14 @@ pub fn fart_text(code: u8) -> &'static str {
 }
 
 /// The two freeze-frame measurement ids used for a fault location.
+#[allow(dead_code)]
 pub fn ort_uw_ids(code: u8) -> (u8, u8) {
     ORT.iter().find(|(c, _, _, _)| *c == code).map(|(_, _, u1, u2)| (*u1, *u2)).unwrap_or((0, 0))
 }
 
 /// Environment table entry for a measurement id.
 pub fn uw_info(id: u8) -> Option<Uw> {
-    UMWELT.iter().find(|(c, _, _, _, _)| *c == id).map(|(c, n, u, a, b)| Uw { id: *c, name: *n, unit: *u, a: *a, b: *b })
+    UMWELT.iter().find(|(c, _, _, _, _)| *c == id).map(|(c, n, u, a, b)| Uw { id: *c, name: n, unit: u, a: *a, b: *b })
 }
 
 /// Scale a raw freeze value: `a * raw + b` (or 0.0 if the id is unknown).

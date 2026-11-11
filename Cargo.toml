@@ -8,8 +8,6 @@ license = "MIT"
 [dependencies]
 anyhow = "1"
 serialport = "4.10"
-hex = "0.4"
-thiserror = "1"
 crossbeam-channel = "0.5"
 libc = "0.2"
 eframe = { version = "0.31.1", default-features = false, features = [

@@ -230,7 +230,6 @@ fn xor_end(s: &[u8]) -> Option<usize> {
 /// can erase or program the ECU.
 struct Tap {
     port: Box<dyn SerialPort>,
-    path: String,
 }
 
 impl Tap {
@@ -242,10 +241,7 @@ impl Tap {
             .timeout(Duration::from_millis(10))
             .open()
             .with_context(|| format!("cannot open {path}"))?;
-        Ok(Self {
-            port,
-            path: path.to_string(),
-        })
+        Ok(Self { port })
     }
 
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {

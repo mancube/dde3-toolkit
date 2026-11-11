@@ -24,7 +24,7 @@ use eframe::egui::{
 
 use crate::checksum::{self, CAL_LEN, CAL_START, IMAGE_SIZE};
 use crate::live::{LiveVar, LIVE_VARS};
-use crate::protocol::{self, hex, Kline};
+use crate::protocol::{self, Kline};
 
 const BG: Color32 = Color32::from_rgb(10, 14, 18);
 const PANEL: Color32 = Color32::from_rgb(14, 19, 24);
@@ -141,7 +141,7 @@ impl LogWriter {
         }
         let _ = writeln!(self.file);
         self.rows += 1;
-        if self.rows % 20 == 0 {
+        if self.rows.is_multiple_of(20) {
             let _ = self.file.flush();
         }
     }
@@ -176,7 +176,6 @@ pub struct App {
     connected: bool,
     ports: Vec<String>,
     port: String,
-    echo: bool,
     tab: Tab,
     status: String,
     error: Option<String>,
@@ -224,6 +223,7 @@ pub struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         demo: bool,
@@ -250,7 +250,6 @@ impl App {
             connected: false,
             ports: Vec::new(),
             port: String::new(),
-            echo: true,
             tab: initial_tab,
             status: "Ready".into(),
             error: None,
@@ -568,7 +567,6 @@ impl App {
         }
         self.stop_live();
         let path = self.port.clone();
-        let echo = self.echo;
         let link = self.link.clone();
         let tx = self.tx.clone();
         self.busy = true;
@@ -576,7 +574,7 @@ impl App {
         self.status = "Opening port".into();
         thread::spawn(move || {
             let mut guard = lock_or_recover(&link);
-            match Kline::open(&path, 9600, echo) {
+            match Kline::open(&path, 9600) {
                 Ok(mut k) => {
                     let ident = k.identify();
                     match ident {
@@ -673,15 +671,9 @@ impl App {
                     format!("Reading {done} / {total} bytes"),
                 ));
             };
-            let mut result = k.read_full(&mut progress);
-            if let Err(e) = &result {
-                if !protocol::is_link_error(e) {
-                    let _ = tx.send(Msg::Status("Retrying once with 20 ms silence".into()));
-                    thread::sleep(Duration::from_millis(1000));
-                    k.set_silence(20);
-                    result = k.read_full(&mut progress);
-                }
-            }
+            // read_full retries once internally on a non-link error
+            // (20 ms silence) — the same recovery the CLI gets.
+            let result = k.read_full(&mut progress);
             let logs = k.take_logs();
             for l in logs {
                 let _ = tx.send(Msg::Log(l));
@@ -729,15 +721,9 @@ impl App {
                     format!("Reading calibration {done} / {total} bytes"),
                 ));
             };
-            let mut result = k.read_range(CAL_START, CAL_LEN, &mut progress);
-            if let Err(e) = &result {
-                if !protocol::is_link_error(e) {
-                    let _ = tx.send(Msg::Status("Retrying once with 20 ms silence".into()));
-                    thread::sleep(Duration::from_millis(1000));
-                    k.set_silence(20);
-                    result = k.read_range(CAL_START, CAL_LEN, &mut progress);
-                }
-            }
+            // read_range retries once internally on a non-link error
+            // (20 ms silence) — the same recovery the CLI gets.
+            let result = k.read_range(CAL_START, CAL_LEN, &mut progress);
             let logs = k.take_logs();
             for l in logs {
                 let _ = tx.send(Msg::Log(l));
@@ -869,56 +855,6 @@ impl App {
                 }
                 Err(e) => {
                     report_error(&tx, "calibration write failed", &e);
-                }
-            }
-        });
-    }
-
-    // -----------------------------------------------------------------------
-    // Seed/key and fault clear
-    // -----------------------------------------------------------------------
-
-    fn send_seed_key(&mut self, z: u8) {
-        if !self.connected {
-            self.error = Some("Connect to the ECU first".into());
-            return;
-        }
-        self.start(move |link, tx| {
-            let mut guard = lock_or_recover(&link);
-            let Some(k) = guard.as_mut() else {
-                let _ = tx.send(Msg::Error("link closed".into()));
-                return;
-            };
-            let req = protocol::frame_seed_key(z);
-            match k.request(&req, Duration::from_secs(3)) {
-                Ok(r) => {
-                    let _ = tx.send(Msg::Log(format!("SEED_KEY Z=0x{z:02X} reply: {}", hex(&r))));
-                }
-                Err(e) => {
-                    let _ = tx.send(Msg::Error(format!("seed-key failed: {e}")));
-                }
-            }
-        });
-    }
-
-    fn send_fault_clear(&mut self) {
-        if !self.connected {
-            self.error = Some("Connect to the ECU first".into());
-            return;
-        }
-        self.start(move |link, tx| {
-            let mut guard = lock_or_recover(&link);
-            let Some(k) = guard.as_mut() else {
-                let _ = tx.send(Msg::Error("link closed".into()));
-                return;
-            };
-            let req = protocol::frame_fault_clear();
-            match k.request(&req, Duration::from_secs(5)) {
-                Ok(r) => {
-                    let _ = tx.send(Msg::Log(format!("FAULT_CLEAR reply: {}", hex(&r))));
-                }
-                Err(e) => {
-                    let _ = tx.send(Msg::Error(format!("fault clear failed: {e}")));
                 }
             }
         });
@@ -1234,20 +1170,17 @@ impl App {
                     thread::sleep(Duration::from_millis(250));
                     continue;
                 }
-                match pairs {
-                    Some(v) => {
-                        reported = false;
-                        let mut rows = None;
-                        if let Some(w) = lock_or_recover(&log).as_mut() {
-                            w.write_row(&v);
-                            rows = Some(w.rows);
-                        }
-                        if let Some(rows) = rows {
-                            let _ = tx.send(Msg::LogProgress(rows));
-                        }
-                        let _ = tx.send(Msg::Live(v));
+                if let Some(v) = pairs {
+                    reported = false;
+                    let mut rows = None;
+                    if let Some(w) = lock_or_recover(&log).as_mut() {
+                        w.write_row(&v);
+                        rows = Some(w.rows);
                     }
-                    None => {}
+                    if let Some(rows) = rows {
+                        let _ = tx.send(Msg::LogProgress(rows));
+                    }
+                    let _ = tx.send(Msg::Live(v));
                 }
                 thread::sleep(Duration::from_millis(55));
             }
@@ -1518,7 +1451,7 @@ impl App {
                 Frame::new()
                     .fill(PANEL)
                     .inner_margin(Margin::symmetric(18, 12))
-                    .stroke(Stroke::new(1.0, BORDER)),
+                    .stroke(Stroke::new(1.0_f32, BORDER)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -1558,7 +1491,6 @@ impl App {
                     {
                         self.refresh_ports();
                     }
-                    ui.checkbox(&mut self.echo, "Echo");
                     if self.connected {
                         if centered_button_enabled(
                             ui,
@@ -1630,7 +1562,7 @@ impl App {
                             Color32::TRANSPARENT
                         })
                         .stroke(if selected {
-                            Stroke::new(1.0, BORDER)
+                            Stroke::new(1.0_f32, BORDER)
                         } else {
                             Stroke::NONE
                         })
@@ -1683,7 +1615,7 @@ impl App {
                 if let Some(err) = self.error.clone() {
                     Frame::new()
                         .fill(Color32::from_rgb(55, 24, 26))
-                        .stroke(Stroke::new(1.0, DANGER))
+                        .stroke(Stroke::new(1.0_f32, DANGER))
                         .corner_radius(10)
                         .inner_margin(12)
                         .show(ui, |ui| {
@@ -2021,7 +1953,7 @@ impl App {
             ui.add_space(12.0);
             Frame::new()
                 .fill(Color32::from_rgb(45, 36, 20))
-                .stroke(Stroke::new(1.0, WARN))
+                .stroke(Stroke::new(1.0_f32, WARN))
                 .corner_radius(10)
                 .inner_margin(12)
                 .show(ui, |ui| {
@@ -2759,7 +2691,7 @@ impl App {
         let log_height = (ui.available_height() - 12.0).max(240.0);
         Frame::new()
             .fill(Color32::from_rgb(8, 12, 15))
-            .stroke(Stroke::new(1.0, BORDER))
+            .stroke(Stroke::new(1.0_f32, BORDER))
             .corner_radius(10)
             .inner_margin(10)
             .show(ui, |ui| {
@@ -2892,15 +2824,15 @@ fn style(ctx: &egui::Context) {
     style.visuals.extreme_bg_color = Color32::from_rgb(7, 10, 13);
     style.visuals.faint_bg_color = CARD_ALT;
     style.visuals.widgets.noninteractive.bg_fill = CARD;
-    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
     style.visuals.widgets.inactive.bg_fill = CARD_ALT;
-    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, BORDER);
     style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(33, 44, 54);
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT_DIM);
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT_DIM);
     style.visuals.widgets.active.bg_fill = Color32::from_rgb(38, 52, 63);
-    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, ACCENT);
     style.visuals.selection.bg_fill = ACCENT_DIM;
-    style.visuals.selection.stroke = Stroke::new(1.0, ACCENT);
+    style.visuals.selection.stroke = Stroke::new(1.0_f32, ACCENT);
     style.visuals.hyperlink_color = ACCENT;
     style.spacing.item_spacing = Vec2::new(10.0, 8.0);
     style.spacing.button_padding = Vec2::new(12.0, 7.0);
@@ -2933,7 +2865,7 @@ fn card(ui: &mut Ui, width: f32, add: impl FnOnce(&mut Ui)) {
     let inner = (width - 32.0).max(0.0);
     Frame::new()
         .fill(CARD)
-        .stroke(Stroke::new(1.0, BORDER))
+        .stroke(Stroke::new(1.0_f32, BORDER))
         .corner_radius(12)
         .inner_margin(16)
         .show(ui, |ui| {
@@ -2967,7 +2899,7 @@ fn pill(ui: &mut Ui, text: &str, color: Color32) {
             color.b(),
             22,
         ))
-        .stroke(Stroke::new(1.0, color.gamma_multiply(0.5)))
+        .stroke(Stroke::new(1.0_f32, color.gamma_multiply(0.5)))
         .corner_radius(20)
         .inner_margin(Margin::symmetric(10, 4))
         .show(ui, |ui| {
@@ -3061,7 +2993,7 @@ fn graph_card(
             let y = rect.top() + rect.height() * k as f32 / 4.0;
             painter.line_segment(
                 [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                Stroke::new(1.0, Color32::from_rgb(27, 37, 45)),
+                Stroke::new(1.0_f32, Color32::from_rgb(27, 37, 45)),
             );
         }
         if h.len() >= 2 {
@@ -3079,7 +3011,7 @@ fn graph_card(
                     egui::pos2(x, y)
                 })
                 .collect();
-            painter.add(egui::Shape::line(pts, Stroke::new(1.8, ACCENT)));
+            painter.add(egui::Shape::line(pts, Stroke::new(1.8_f32, ACCENT)));
             painter.text(
                 egui::pos2(rect.left() + 8.0, rect.top() + 6.0),
                 egui::Align2::LEFT_TOP,
@@ -3119,7 +3051,7 @@ fn graph_card(
 fn live_card(ui: &mut Ui, var: &LiveVar, value: f64, history: &[f32], width: f32) {
     Frame::new()
         .fill(CARD)
-        .stroke(Stroke::new(1.0, BORDER))
+        .stroke(Stroke::new(1.0_f32, BORDER))
         .corner_radius(12)
         .inner_margin(14)
         .show(ui, |ui| {
@@ -3153,7 +3085,7 @@ fn live_card(ui: &mut Ui, var: &LiveVar, value: f64, history: &[f32], width: f32
                         egui::pos2(x, y)
                     })
                     .collect();
-                painter.add(egui::Shape::line(pts, Stroke::new(1.5, ACCENT)));
+                painter.add(egui::Shape::line(pts, Stroke::new(1.5_f32, ACCENT)));
             }
         });
 }

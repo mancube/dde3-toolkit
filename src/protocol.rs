@@ -36,8 +36,6 @@ use crate::sim::SimEcu;
 
 pub const ECU_ADDR: u8 = 0x12;
 
-/// DDE3 flash base address (file offset). DDE3 reads from 0x00000.
-pub const BASE: u32 = 0x00000;
 /// DDE3 flash image size: 256 KB.
 pub const IMAGE_SIZE: usize = 0x40000;
 
@@ -260,10 +258,12 @@ impl JobStatus {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_okay(self) -> bool {
         matches!(self, JobStatus::Okay)
     }
 
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             JobStatus::Okay => "OKAY",
@@ -293,6 +293,7 @@ pub fn frame_ident() -> Vec<u8> {
 }
 
 /// Checksum status: `12 04 0A`.
+#[allow(dead_code)]
 pub fn frame_checksum_status() -> Vec<u8> {
     vec![0x12, 0x04, 0x0A]
 }
@@ -418,10 +419,6 @@ pub fn frame_mw_select(ids: &[u16]) -> Vec<u8> {
     p
 }
 
-/// MW live data (fixed block): `12 05 0B 03`.
-pub fn frame_mw_status() -> Vec<u8> {
-    vec![0x12, 0x05, 0x0B, 0x03]
-}
 
 // ---------------------------------------------------------------------------
 // Fault memory (DTC) — DS2 frames extracted from the FS_* jobs in
@@ -461,15 +458,17 @@ impl Dtc {
     /// Layout (verified against the M47 reference report):
     ///   [0]=ORT  [1]=ART slot mask  [2]=error frequency  [3..11]=freeze u16 BE
     pub fn from_record(rec: &[u8]) -> Dtc {
-        let ort = rec.get(0).copied().unwrap_or(0);
+        let ort = rec.first().copied().unwrap_or(0);
         let mask = rec.get(1).copied().unwrap_or(0);
         let freq = rec.get(2).copied().unwrap_or(0);
         let arts = crate::dtc::active_arts(ort, mask);
         let uw: Vec<u16> = rec
             .get(3..11)
             .unwrap_or(&[])
-            .chunks_exact(2)
-            .map(|p| u16::from_be_bytes([p[0], p[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|p| u16::from_be_bytes(*p))
             .collect();
         Dtc {
             ort,
@@ -578,16 +577,14 @@ pub struct Kline {
     path: String,
     parser: FrameParser,
     pending: VecDeque<Frame>,
-    last_sent: Option<Frame>,
     logs: Vec<String>,
-    echo: bool,
     silence: Duration,
     write_delay: Duration,
     sim: Option<SimEcu>,
 }
 
 impl Kline {
-    pub fn open(path: &str, baud: u32, echo: bool) -> Result<Self> {
+    pub fn open(path: &str, baud: u32) -> Result<Self> {
         let port = serialport::new(path, baud)
             .data_bits(DataBits::Eight)
             .parity(Parity::Even)
@@ -600,9 +597,7 @@ impl Kline {
             path: path.to_string(),
             parser: FrameParser::default(),
             pending: VecDeque::new(),
-            last_sent: None,
             logs: Vec::new(),
-            echo,
             silence: Duration::from_millis(10),
             write_delay: Duration::from_millis(3),
             sim: None,
@@ -615,10 +610,6 @@ impl Kline {
     /// is a passive tap that cannot drive the bus.
     pub fn set_sim(&mut self, sim: SimEcu) {
         self.sim = Some(sim);
-    }
-
-    pub fn sim_enabled(&self) -> bool {
-        self.sim.is_some()
     }
 
     pub fn set_silence(&mut self, ms: u64) {
@@ -764,7 +755,6 @@ impl Kline {
         let mut busy = 0u32;
 
         loop {
-            self.last_sent = Some(sent.clone());
             // Drop stale state from the previous transaction (e.g. the bus
             // echo that was consumed after its response).
             self.parser.clear();
@@ -812,7 +802,7 @@ impl Kline {
                                         thread::sleep(Duration::from_millis(50));
                                         break 'recv; // resend in the outer loop
                                     }
-                                    other => {
+                                    _ => {
                                         res = Some(Err(Nrc { sid, code: sb }.into()));
                                         break;
                                     }
@@ -943,19 +933,7 @@ impl Kline {
         &mut self,
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(IMAGE_SIZE);
-        let mut addr: u32 = 0;
-        while addr < IMAGE_SIZE as u32 {
-            let count = 0x80u32.min(IMAGE_SIZE as u32 - addr) as u8;
-            let req = frame_flash_read(addr, count);
-            let r = self.request(&req, Duration::from_secs(5))?;
-            check_flash_read_reply(&r, count, addr)?;
-            let data_start = 3;
-            out.extend_from_slice(&r[data_start..data_start + count as usize]);
-            addr += count as u32;
-            progress(out.len(), IMAGE_SIZE);
-        }
-        Ok(out)
+        self.read_flash(0, IMAGE_SIZE, progress)
     }
 
     /// Read a range of flash using `12 09 06 <addr> <count>` frames.
@@ -965,23 +943,49 @@ impl Kline {
         length: usize,
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<Vec<u8>> {
-        if start.checked_add(length).map_or(true, |end| end > IMAGE_SIZE) {
+        if start.checked_add(length).is_none_or(|end| end > IMAGE_SIZE) {
             bail!("range outside 256 KB image");
         }
-        let mut out = Vec::with_capacity(length);
-        let mut addr = start as u32;
-        let end = (start + length) as u32;
-        while addr < end {
-            let count = 0x80u32.min(end - addr) as u8;
-            let req = frame_flash_read(addr, count);
-            let r = self.request(&req, Duration::from_secs(5))?;
-            check_flash_read_reply(&r, count, addr)?;
-            let data_start = 3;
-            out.extend_from_slice(&r[data_start..data_start + count as usize]);
-            addr += count as u32;
-            progress(out.len(), length);
+        self.read_flash(start, length, progress)
+    }
+
+    /// Shared read loop for [`Kline::read_full`] / [`Kline::read_range`]:
+    /// 0x80-byte `12 09 06` chunks over `start..start+length`.
+    ///
+    /// On a non-link error (timeout, bad reply) the whole read is retried
+    /// once after a 1 s pause with 20 ms inter-byte silence; a hard link
+    /// error (port gone) is not retried. GUI and CLI both read through
+    /// this, so both recover identically.
+    fn read_flash(
+        &mut self,
+        start: usize,
+        length: usize,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<Vec<u8>> {
+        let attempt = |k: &mut Self, progress: &mut dyn FnMut(usize, usize)| -> Result<Vec<u8>> {
+            let mut out = Vec::with_capacity(length);
+            let mut addr = start as u32;
+            let end = (start + length) as u32;
+            while addr < end {
+                let count = 0x80u32.min(end - addr) as u8;
+                let req = frame_flash_read(addr, count);
+                let r = k.request(&req, Duration::from_secs(5))?;
+                check_flash_read_reply(&r, count, addr)?;
+                out.extend_from_slice(&r[3..3 + count as usize]);
+                addr += count as u32;
+                progress(out.len(), length);
+            }
+            Ok(out)
+        };
+        let res = attempt(self, progress);
+        if let Err(e) = &res {
+            if !is_link_error(e) {
+                thread::sleep(Duration::from_millis(1000));
+                self.set_silence(20);
+                return attempt(self, progress);
+            }
         }
-        Ok(out)
+        res
     }
 
     /// Erase flash: sends `12 09 07 06 <addr> <count>`.
@@ -1191,8 +1195,8 @@ impl Kline {
             );
         }
         let mut out = Vec::new();
-        for pair in r[5..].chunks_exact(2) {
-            out.push(u16::from_be_bytes([pair[0], pair[1]]));
+        for pair in r[5..].as_chunks::<2>().0 {
+            out.push(u16::from_be_bytes(*pair));
         }
         Ok(out)
     }
@@ -1399,9 +1403,7 @@ mod tests {
         ];
         assert_eq!(payload[0], 0x12, "prefix must be the ECU address");
         assert_eq!(payload[2], 0xA0, "status at [2]");
-        let vals: Vec<u16> = payload[5..].chunks_exact(2)
-            .map(|p| u16::from_be_bytes([p[0], p[1]]))
-            .collect();
+        let vals: Vec<u16> = payload[5..].as_chunks::<2>().0.iter().map(|p| u16::from_be_bytes(*p)).collect();
         assert_eq!(vals, vec![0, 0, 990, 2854, 586]);
     }
 

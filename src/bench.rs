@@ -45,7 +45,7 @@ pub struct BenchArgs {
 
 pub fn run(args: BenchArgs) -> Result<()> {
     let started = Instant::now();
-    let mut k = Kline::open(&args.port, args.baud, true)
+    let mut k = Kline::open(&args.port, args.baud)
         .with_context(|| format!("cannot open {}", args.port))?;
     k.set_data_delay(args.data_delay);
     if args.sim {

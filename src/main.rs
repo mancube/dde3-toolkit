@@ -25,7 +25,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::checksum::{correct, verify, CAL_LEN, IMAGE_SIZE};
+use crate::checksum::{correct, verify, CAL_LEN, CAL_START, IMAGE_SIZE};
 use crate::protocol::Kline;
 
 fn print_usage() {
@@ -84,11 +84,6 @@ fn parse_hex_u8(s: &str) -> Result<u8> {
         .with_context(|| format!("invalid byte value: {s}"))
 }
 
-fn parse_hex_u32(s: &str) -> Result<u32> {
-    u32::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16)
-        .with_context(|| format!("invalid address value: {s}"))
-}
-
 fn read_image(path: &str, expected: usize) -> Result<Vec<u8>> {
     let data = std::fs::read(path).with_context(|| format!("cannot read image file {path}"))?;
     if data.len() != expected {
@@ -128,7 +123,6 @@ fn run() -> Result<()> {
     let mut duration: Option<f64> = None;
     let mut baud: u32 = 9600;
     let mut data_delay_ms: u64 = 3;
-    let echo: bool = true;
     let mut sim: bool = false;
     let mut fast: bool = false;
     let mut bench_image: Option<String> = None;
@@ -203,7 +197,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         "ident" => {
-            let mut k = Kline::open(&port, baud, echo)?;
+            let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
@@ -224,39 +218,17 @@ fn run() -> Result<()> {
         }
         "read" => {
             let out = args.get(2).context("read requires <out.bin>").cloned()?;
-            let mut k = Kline::open(&port, baud, echo)?;
+            let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
             }
-            let mut image = Vec::with_capacity(IMAGE_SIZE);
-            let mut addr: u32 = 0;
-            let mut done = 0usize;
-            while addr < IMAGE_SIZE as u32 {
-                let count = 0x80u32.min(IMAGE_SIZE as u32 - addr) as u8;
-                let req = crate::protocol::frame_flash_read(addr, count);
-                let r = k.request(&req, Duration::from_secs(5))?;
-                // Reply layout: 12 <len> A0 <data...> — the ECU answers
-                // with its OWN address 0x12 (2026-11-09 real-car capture),
-                // status byte at [2], data from [3].
-                if r.first() != Some(&protocol::ECU_ADDR) || r.get(2) != Some(&0xA0) {
-                    anyhow::bail!(
-                        "unexpected flash read reply at 0x{addr:06X}: {}",
-                        protocol::hex(&r)
-                    );
-                }
-                let data_start = 3;
-                if r.len() < data_start + count as usize {
-                    anyhow::bail!(
-                        "short flash read reply at 0x{addr:06X}: {}",
-                        protocol::hex(&r)
-                    );
-                }
-                image.extend_from_slice(&r[data_start..data_start + count as usize]);
-                addr += count as u32;
-                done += count as usize;
-                println!("read 0x{addr:06X} / 0x{:06X} ({} bytes)", IMAGE_SIZE, done);
-            }
+            // Same code path as the GUI's full-flash read, including its
+            // single retry with 20 ms silence on a non-link error.
+            let mut progress = |done: usize, total: usize| {
+                println!("read 0x{done:06X} / 0x{total:06X}");
+            };
+            let image = k.read_full(&mut progress)?;
             std::fs::write(&out, &image).with_context(|| format!("cannot write {out}"))?;
             println!("wrote {} bytes to {out}", image.len());
             Ok(())
@@ -266,35 +238,16 @@ fn run() -> Result<()> {
                 .get(2)
                 .context("read-cal requires <out.bin>")
                 .cloned()?;
-            let mut k = Kline::open(&port, baud, echo)?;
+            let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
             }
-            let cal_start: u32 = 0x38000;
-            let cal_len: usize = 0x8000;
-            let mut image = Vec::with_capacity(cal_len);
-            let mut addr = cal_start;
-            while addr < cal_start + cal_len as u32 {
-                let count = 0x80u32.min(cal_len as u32 - (addr - cal_start)) as u8;
-                let req = crate::protocol::frame_flash_read(addr, count);
-                let r = k.request(&req, Duration::from_secs(5))?;
-                if r.first() != Some(&protocol::ECU_ADDR) || r.get(2) != Some(&0xA0) {
-                    anyhow::bail!(
-                        "unexpected flash read reply at 0x{addr:06X}: {}",
-                        protocol::hex(&r)
-                    );
-                }
-                let data_start = 3;
-                if r.len() < data_start + count as usize {
-                    anyhow::bail!(
-                        "short flash read reply at 0x{addr:06X}: {}",
-                        protocol::hex(&r)
-                    );
-                }
-                image.extend_from_slice(&r[data_start..data_start + count as usize]);
-                addr += count as u32;
-            }
+            // Same code path as the GUI's calibration read.
+            let mut progress = |done: usize, total: usize| {
+                println!("read cal 0x{done:05X} / 0x{total:05X}");
+            };
+            let image = k.read_range(CAL_START, CAL_LEN, &mut progress)?;
             std::fs::write(&out, &image).with_context(|| format!("cannot write {out}"))?;
             println!("wrote {} bytes to {out}", image.len());
             Ok(())
@@ -303,29 +256,17 @@ fn run() -> Result<()> {
             let image_path = args.get(2).context("write requires <image.bin>").cloned()?;
             let image = read_image(&image_path, IMAGE_SIZE)?;
             confirm_write()?;
-            let mut k = Kline::open(&port, baud, echo)?;
+            let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
             }
-            // Enter programming mode.
-            let _ = k.request(&crate::protocol::frame_uprog_ein(), Duration::from_secs(3))?;
-            // Erase.
-            let erase_req = crate::protocol::frame_flash_erase(0x00000, 0x00);
-            println!("erasing flash...");
-            let _ = k.request(&erase_req, Duration::from_secs(60))?;
-            // Write blocks.
-            let mut off = 0usize;
-            while off < image.len() {
-                let chunk = &image[off..off + 0x80.min(image.len() - off)];
-                let req = crate::protocol::frame_flash_write(off as u32, chunk);
-                let _ = k.request(&req, Duration::from_secs(5))?;
-                off += chunk.len();
-                println!("wrote 0x{off:06X} / 0x{:06X}", IMAGE_SIZE);
-            }
-            // End write.
-            let end_req = crate::protocol::frame_flash_write_end(0x00000);
-            let _ = k.request(&end_req, Duration::from_secs(10))?;
+            // Same erase → write → end sequence as the GUI, including the
+            // post-erase settle delay and the per-write-block byte delay.
+            let mut progress = |done: usize, total: usize| {
+                println!("wrote 0x{done:06X} / 0x{total:06X}");
+            };
+            k.write_full(&image, baud, data_delay_ms, &mut progress)?;
             println!("write complete");
             if sim {
                 println!("verifying read-back...");
@@ -344,27 +285,18 @@ fn run() -> Result<()> {
                 .get(2)
                 .context("write-cal requires <cal.bin>")
                 .cloned()?;
-            let cal = read_image(&cal_path, 0x8000)?;
+            let cal = read_image(&cal_path, CAL_LEN)?;
             confirm_write()?;
-            let mut k = Kline::open(&port, baud, echo)?;
+            let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
             }
-            let _ = k.request(&crate::protocol::frame_uprog_ein(), Duration::from_secs(3))?;
-            let erase_req = crate::protocol::frame_flash_erase(0x38000, 0x00);
-            println!("erasing calibration...");
-            let _ = k.request(&erase_req, Duration::from_secs(60))?;
-            let mut off = 0usize;
-            while off < cal.len() {
-                let chunk = &cal[off..off + 0x80.min(cal.len() - off)];
-                let req = crate::protocol::frame_flash_write(0x38000 + off as u32, chunk);
-                let _ = k.request(&req, Duration::from_secs(5))?;
-                off += chunk.len();
-                println!("wrote cal 0x{off:06X} / 0x8000");
-            }
-            let end_req = crate::protocol::frame_flash_write_end(0x38000);
-            let _ = k.request(&end_req, Duration::from_secs(10))?;
+            // Same sequence as the GUI's calibration write.
+            let mut progress = |done: usize, total: usize| {
+                println!("wrote cal 0x{done:05X} / 0x{total:05X}");
+            };
+            k.write_calibration(&cal, baud, data_delay_ms, &mut progress)?;
             println!("calibration write complete");
             if sim {
                 println!("verifying calibration read-back...");
@@ -381,7 +313,7 @@ fn run() -> Result<()> {
         "seed-key" => {
             let z_str = args.get(2).context("seed-key requires <Z>").cloned()?;
             let z = parse_hex_u8(&z_str)?;
-            let mut k = Kline::open(&port, baud, echo)?;
+            let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
@@ -392,7 +324,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         "fault-clear" => {
-            let mut k = Kline::open(&port, baud, echo)?;
+            let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
@@ -403,7 +335,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         "dtc" => {
-            let mut k = Kline::open(&port, baud, echo)?;
+            let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
@@ -419,7 +351,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         "ds2-clear" => {
-            let mut k = Kline::open(&port, baud, echo)?;
+            let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
@@ -492,7 +424,7 @@ fn run() -> Result<()> {
             }
         }
         "uprog-ein" => {
-            let mut k = Kline::open(&port, baud, echo)?;
+            let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
@@ -502,7 +434,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         "break-probe" => {
-            let mut k = Kline::open(&port, baud, echo)?;
+            let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
             // Requires a prior DS2 unlock (UPROG_EIN + SEED_KEY); see FINDINGS §4.
             println!(
@@ -537,7 +469,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         "diagnose-ende" => {
-            let mut k = Kline::open(&port, baud, echo)?;
+            let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
@@ -561,7 +493,7 @@ fn run() -> Result<()> {
             //     drained below; IDENT proves the new rate end-to-end.
             const TARGET: u32 = 38_400;
             let old_baud = baud;
-            let mut k = Kline::open(&port, old_baud, echo)?;
+            let mut k = Kline::open(&port, old_baud)?;
             k.set_data_delay(data_delay_ms);
             let frame = crate::protocol::frame_baud(TARGET, 0x03);
             println!("sending 0x91 @ {old_baud}: {}", protocol::hex(&frame));

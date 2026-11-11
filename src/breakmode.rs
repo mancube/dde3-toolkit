@@ -670,7 +670,9 @@ mod tests {
         assert_eq!(s0bg::BAUD_10_4K, 0x002F);
         assert_eq!(s0bg::BAUD_38_4K, 0x000C);
         // The high-baud value must be the lowest register value (fastest).
-        assert!(s0bg::BAUD_38_4K < s0bg::BAUD_10_4K && s0bg::BAUD_10_4K < s0bg::BAUD_9600);
+        const {
+            assert!(s0bg::BAUD_38_4K < s0bg::BAUD_10_4K && s0bg::BAUD_10_4K < s0bg::BAUD_9600);
+        }
     }
 
     #[test]
