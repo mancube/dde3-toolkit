@@ -58,8 +58,8 @@ To install a release, check out the tag and verify the binary:
 
 ```sh
 git clone https://git.nas.lan/ikac/dde3-toolkit.git
-cd dde3-toolkit && git checkout v0.2.0
-cd dist && sha256sum -c dde3-toolkit-*.sha256
+cd dde3-toolkit && git checkout v0.1
+sha256sum -c dist/dde3-toolkit-*.sha256   # run from the repo root
 ```
 
 To cut a new release (bumps `Cargo.toml`, builds both targets, updates

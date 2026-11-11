@@ -14,6 +14,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 V="${1:?usage: scripts/release.sh <version>}"
+# Cargo.toml needs full semver; the tag keeps the given name (v0.1, v0.2.0, ...).
+if [[ ! $V =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then V="$V.0"; TAG="v${1}"; else TAG="v$V"; fi
 NAME=dde3-toolkit
 DIST=dist
 LINUX="$DIST/$NAME-linux-x86_64"
@@ -47,11 +49,11 @@ sha256sum "$WIN" > "$WIN.sha256"
 
 # 5. Commit, tag, push.
 git add Cargo.toml "$DIST"
-git commit -m "release: v$V"
-git tag -a "v$V" -m "release v$V"
+git commit -m "release: $TAG"
+git tag -a "$TAG" -m "release $TAG"
 git push origin main
-git push origin "v$V"
+git push origin "$TAG"
 
 echo
-echo "v$V released:"
+echo "$TAG released:"
 ls -l "$DIST"
