@@ -1123,6 +1123,13 @@ impl App {
                         Some(k) => {
                             let mut pairs = Vec::new();
                             let mut error = None;
+                            // Live-logging pacing (Tier 0, docs/FINDINGS_faster_logger.md):
+                            // 1 ms/byte ≈ the natural 9600 baud byte time
+                            // (1.04 ms), so the frame goes out as one
+                            // continuous stream — exactly as fast as the ECU
+                            // itself transmits, no new wire behaviour. The
+                            // 3 ms default was an inherited WinKFP habit.
+                            k.set_write_delay(1);
                             // DDE3 live data via MW_SELECT_LESEN (`12 <LEN> 0B 10 <id bytes>`).
                             // The selected set is batched into as FEW telegrams as the
                             // 0x80-byte DS2 cap allows (protocol::MW_BATCH_SIZE) — a
@@ -1182,7 +1189,11 @@ impl App {
                     }
                     let _ = tx.send(Msg::Live(v));
                 }
-                thread::sleep(Duration::from_millis(55));
+                // Back-to-back polling: the next request goes out as soon as
+                // the reply is parsed (the 55 ms WinKFP-style tester gap is
+                // gone). The transaction itself still costs ~50–100 ms of
+                // wire + silence time, so there is no busy-spin.
+                thread::sleep(Duration::from_millis(1));
             }
         });
     }

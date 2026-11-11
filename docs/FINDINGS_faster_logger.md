@@ -132,6 +132,50 @@ with `edc15m-checksum-tool`, but is not worth it:
 
 Both end states are **without touching one byte of ECU flash**.
 
+## 4a. Measured baseline + Tier 0 implementation (2026-11-11)
+
+**Measured (real car, `captures/dde3_log.csv`, 5 ids incl. battery 0x0F65):**
+45 rows over 17.6 s = **2.50 Hz**, deltas a rock-steady **398–400 ms** per
+cycle. The wire log (`captures/dde3newlog.txt`) shows exactly one
+`12 0F 0B 10 …` request + one `12 10 A0 …` reply per cycle — no BUSY,
+no retries, no skips.
+
+Cost model of that 400 ms cycle before the change:
+
+| Item | Time |
+|---|---|
+| 55 ms hardcoded sleep between polls | 55 ms |
+| TX 16 bytes @ 3 ms/byte pacing + per-byte drain | ~65 ms |
+| ECU reply latency (unknown — the blind spot) | ? |
+| RX 18 bytes @ 9600 (~19 ms) + 10 ms silence detection | ~29 ms |
+| **known total** | **~149 ms** → leaves **~250 ms unexplained** |
+
+The steady 399 ms (not jittery) says the missing ~250 ms is deterministic —
+most likely ECU reply latency (its live job may run slower than the 0x2EF4
+task scalars suggested, or the ECU's frame-end detection waits for line
+silence after our TX). **This is now measurable, not guessable:**
+
+Implemented (Tier 0, this commit):
+
+1. **Timestamped wire log** — every `TX`/`RX`/`SIM`/… line in the protocol
+   log is prefixed with `[+Δs]` = gap since the previous line. The next
+car capture shows the TX→RX gap (ECU latency) vs. TX pacing vs. silence
+   waits directly.
+2. **55 ms poll sleep removed** (`src/app.rs` live loop) — next request goes
+   out as soon as the reply is parsed. The transaction itself still costs
+   ~50–100 ms, so no busy-spin.
+3. **Live TX pacing 3 ms/byte → 1 ms/byte** (live path only; the flash-
+   write paths keep their 3 ms default — writes stay as conservative as
+   before). 1 ms ≈ the natural 9600 byte time (1.04 ms), so the frame is a
+   continuous stream, no faster than the ECU's own transmissions.
+
+**Expected:** ~85 ms/cycle saved → ~3.2 Hz if the ECU really takes ~250 ms
+per reply; up to ~15–20 Hz if the missing time was tester-side after all.
+**Next capture to read:** TX→`RX` gap on the 5-id poll. If ECU latency is
+indeed ~250 ms, polling is ECU-capped and the remaining levers are the
+ECU's own periodic 16-byte live block (listen, don't poll — check its
+period in the timestamped log) and Tier 2 (38.4 k break-channel RAM reads).
+
 ## 5. Known blind spots (honest list)
 
 - **Boot block (`0x0000–0x7FFF`) missing from the dump** — `C3A9`'s boot-time

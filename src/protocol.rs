@@ -581,6 +581,10 @@ pub struct Kline {
     silence: Duration,
     write_delay: Duration,
     sim: Option<SimEcu>,
+    /// Wall clock of the last TX/RX log line — used to stamp every log line
+    /// with an absolute time and the gap to the previous line, so a capture
+    /// shows where time goes (TX pacing, ECU reply latency, silence waits).
+    last_log: Option<Instant>,
 }
 
 impl Kline {
@@ -601,6 +605,7 @@ impl Kline {
             silence: Duration::from_millis(10),
             write_delay: Duration::from_millis(3),
             sim: None,
+            last_log: None,
         })
     }
 
@@ -678,7 +683,13 @@ impl Kline {
     }
 
     fn log(&mut self, line: String) {
-        self.logs.push(line);
+        let now = Instant::now();
+        let delta = self
+            .last_log
+            .map(|last| now.duration_since(last).as_secs_f64())
+            .unwrap_or(0.0);
+        self.last_log = Some(now);
+        self.logs.push(format!("[+{delta:6.3}s] {line}"));
     }
 
     fn write_frame(&mut self, frame: &[u8]) -> Result<()> {
