@@ -1595,7 +1595,7 @@ impl App {
                             .size(10.0)
                             .color(MUTED),
                     );
-                    ui.label(RichText::new("EDC15 / DDE3.0").size(11.0).color(MUTED));
+                    ui.label(RichText::new("EDC15M/DDE3").size(11.0).color(MUTED));
                     ui.separator();
                     if let Some(ecu) = &self.ecu {
                         if let Some(i) = &ecu.ident {
