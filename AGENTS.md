@@ -19,6 +19,7 @@ the knowledge base; don't re-derive or guess against it.
 | Need | File |
 |---|---|
 | Git rules (commit format, when to commit) | `GIT.md` — commit after every major, verified change |
+| Cutting a release (linux+windows in `dist/`) | `scripts/release.sh <version>` — see `GIT.md` "Releases" and README "Releases" |
 | Handing over to the next agent | `HANDOVER.md` — when instructed, reduce it to: status + task at hand; push deep detail into `docs/` first |
 | Wire facts | `docs/wire-protocol.md` |
 | Fault/DTC protocol | `docs/dtc-fault-protocol.md` |
