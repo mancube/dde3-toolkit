@@ -63,10 +63,11 @@ sha256sum -c dist/dde3-toolkit-*.sha256   # run from the repo root
 ```
 
 To cut a new release (bumps `Cargo.toml`, builds both targets, updates
-`dist/`, commits, tags and pushes):
+`dist/`, commits, tags, pushes and creates the Gitea release with the
+binaries as downloadable assets):
 
 ```sh
-scripts/release.sh 0.3.0
+scripts/release.sh 0.2
 ```
 
 ## Windows build

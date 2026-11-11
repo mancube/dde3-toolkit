@@ -54,6 +54,17 @@ git tag -a "$TAG" -m "release $TAG"
 git push origin main
 git push origin "$TAG"
 
+# 6. Gitea release with the dist/ files as assets (needs `gt`).
+if command -v gt >/dev/null 2>&1; then
+  gt release create "$TAG" \
+    -n "Release $TAG — prebuilt binaries, verify with the .sha256 files." \
+    --asset "$LINUX" --asset "$LINUX.sha256" \
+    --asset "$WIN" --asset "$WIN.sha256" \
+    --verify-tag
+else
+  echo "WARNING: gt not found — skipped the Gitea release (assets are in dist/)." >&2
+fi
+
 echo
 echo "$TAG released:"
 ls -l "$DIST"
