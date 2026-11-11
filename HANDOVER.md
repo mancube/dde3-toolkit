@@ -13,6 +13,72 @@
 > re-derived facts (job list re-dumped from the .prg, frames.md intact).
 > Where the original wording was lost, content is faithful but paraphrased.
 
+## 21. ⚠️ REAL-CAR FINDING (session 12) — ECU replies with `0x12`, NOT `0x92` ← **READ THIS FIRST**
+
+The toolkit was developed against a `frames.md`/WinKFP assumption that the ECU
+answers with the DS2 response prefix `0x92` (`ECU_ADDR | 0x80`). **A real-car
+capture (`dde3 toolkit log.txt`, 2026-11-09) proved that wrong.** On this
+ECU the reply is prefixed with the ECU's own address **`0x12`** — not `0x92`.
+This single mismatch was why ident, fault read, and live/battery all failed to
+parse against the real car.
+
+**Real-wire reply convention (authoritative, from the capture):**
+
+```text
+<12> <len> <SB> [<data ...>]   + trailing XOR on the wire
+```
+
+- Prefix byte = `0x12` (ECU address), **not** `0x92`.
+- Status (JOBRESULT) at offset **[2]**; data from offset **[3]** (fault/flash)
+  or offset **[5]** (MW live).
+- `len` (offset [1]) = total wire length **including** the trailing XOR byte.
+- The trailing XOR still covers all payload bytes (unchanged).
+
+**Other real-wire facts discovered from the same capture:**
+
+1. **IDENT is a bare ASCII string**, not a `12 …` envelope. `TX 12 04 00 16`
+   → `RX 38 38 37 35 32 30 31` = `"8875201"` (XOR-terminated on the wire).
+   `ident_valid()` now accepts a 4–48 byte printable string.
+2. **The ECU emits a periodic ~16-byte live block** on the K-line that
+   interleaves with request/reply: `12 10 A0 10 00 00 00 00 00 03 DE 0B 26 02
+   4A` (DE/DF and 25/26 cycle each tick). This is the ECU's own polling of its
+   last-selected live set, NOT a reply to us. It must be skipped when selecting
+   the small fault/battery replies.
+3. **MW live reply** to `12 0F 0B 10 <5 ids>`: `12 10 A0 10 00 <u16 BE per id>
+   ` — for ids `[0F83 0F10 0F40 0F00 0F65]` the values were `[0, 0, 990, 2854,
+   586]` = PWG 0, N 0, boost 990 hPa, WTF 2854 (→12.3 °C), batt 586 (→11.9 V)
+   (engine-off, ~12 °C — consistent).
+4. **Battery (single-id) reply** is smaller: `12 1B A0 …` / `12 08 A0 10 00
+   <u16>` (27-byte / 8-byte forms seen). Distinguished from the 16-byte block
+   by its `len` field.
+
+**Code changes (all in `src/protocol.rs` + `src/sim.rs`):**
+
+- Reply prefix checks changed from `ECU_ADDR | 0x80` (`0x92`) to `ECU_ADDR`
+  (`0x12`): `live_values`, `read_dtcs`, `clear_faults_ds2`,
+  `check_flash_read_reply`. `ident_valid()` rewritten for the bare string.
+- **`FrameParser`** rewritten from tail-anchored `take_frame` to a
+  front-anchored 3-case extractor using `xor_end()` (shortest-valid-prefix
+  XOR), `MAX_BUF=192` (was `MAX_FRAME=64`) so echo+reply fit, and a
+  tail-half resync on overflow.
+- **`do_request(payload, timeout, accept)`** + **`request_filtered`**: drain
+  *all* frames per chunk, log each as `RX`/`SKIP`, and return only the first
+  frame satisfying `accept`. `is_not_live_broadcast(f)` (skip `f[1]==0x10 &&
+  f[3]==0x10`) is used for the small fault/battery replies; `live_values` uses
+  a **length-matching** filter (`f[1] == 6 + 2*n`) so a 5-id poll (whose reply
+  equals the broadcast) still resolves while a 1-id battery read skips the
+  16-byte block.
+- **`src/sim.rs`** updated to the `0x12` convention so `--sim` stays consistent
+  (status/nack/ident/mw all emit `0x12`, not `0x92`).
+- **5 new real-car fixture tests** (bytes taken verbatim from the capture):
+  `real_car_live_reply_splits_echo`, `real_car_live_values_decode`,
+  `real_car_ident_reply_is_raw_string`, `ident_valid_accepts_plain_string`,
+  `is_not_live_broadcast_distinguishes`.
+
+**Status:** `cargo build` clean, `cargo test` → **48 passed / 0 failed**
+(43 pre-existing + 5 new). **Re-test against the real car is the next step** —
+ident, fault read, and live/battery should now parse correctly end-to-end.
+
 ## 0b. STATUS — updated 2026-11-09 (session 4) ← READ THIS
 
 | Task | State |
@@ -622,3 +688,212 @@ Byte-for-byte parity with `edc15m_checksum.py` verified on real 256 KB and
 **Naming (user directive):** EDC15M and DDE3 are the same ECU. Noted in the
 `dde3-toolkit` README, the `edc15m-checksum-tool` README, and §5 — so the
 mixup never happens again.
+
+---
+
+## Session 10 — DS2 baud analysis, batched live data, break-entered service protocol
+
+### What was asked
+Confirm the ECU's DS2 handling for the *fastest* read/write/logging, batch
+live data into one telegram (as other loggers do), and plan + implement the
+break-entered service protocol.
+
+### Findings (full write-up: `FINDINGS_baud_service_protocol.md`)
+- The K-line is one C166 S0 UART with a **3-value baud ladder**: `S0BG` =
+  `0x33` (9600, default), `0x2F` (~10.4 k), `0x0C` (~38.4 k).
+- **The DS2 diagnostic protocol is fixed at 9600** — the receive state machine
+  at `0x1E904` (states 0–2) never re-rates the port, and there is no in-band
+  DS2 command that does. DS2 read/write/log ceiling = 9600 8E1.
+- **DS2 length-byte rule** (receiver `0x1EB2C`/`0x1EB46`): the length byte
+  equals the **total wire byte count** (address byte + payload + trailing XOR),
+  capped at 0x80.
+- The **tested** WinKFP logger (`testo customjobs.txt`, job
+  `MW_SELECT_LESEN_NORM`, disasm `0x5FE5F`) sends the whole live set in ONE
+  telegram: `12 <LEN> 0B 10 <ids…>` with `LEN = 5 + 2·n` (the job computes it
+  with `slen + 5`).
+- **The bug:** `frame_mw_select` hard-coded `LEN = 0x05` and the loop chunked
+  in 10s. The sim ignored the length byte, so it only worked against the sim.
+- The 10.4 k / 38.4 k bauds live in a **separate break-entered service
+  protocol** (states 3–6 of `0x1E904`): UART break → 10.4 k → handshake
+  (`0xA5`, gated on internal unlock flags `C0DF.0`/`C3A9==0xA5`) → optional
+  38.4 k. `BAUDRATEN_*` jobs target the CAN/EDIC bus, not the K-line.
+- **Open (needs HW):** the secondary command opcodes at `0x1F6D2` (the
+  byte-addressed RAM/EEPROM/PEC interpreter) — not decoded, not guessed.
+  Also flagged: the flash read/write frames use a 2-byte count in the reference
+  (`12 09 06 <A:3> <n:2>`) vs the toolkit's 1-byte count + hard-coded `LEN=0x09`;
+  left unchanged pending a capture (a full 256 KB write reportedly worked on HW,
+  so the framing model for that path is unresolved — do NOT change without a capture).
+
+### Changes
+- **`src/protocol.rs`**
+  - `frame_mw_select` now computes `LEN = 5 + 2·n` (with a `MW_BATCH_SIZE` = 50
+    guard, under the 0x80 cap) instead of hard-coding 0x05.
+  - Added raw transport for break mode: `Kline::raw_write` / `raw_read` /
+    `raw_break` (uses `serialport` `set_break`/`clear_break`).
+- **`src/app.rs`** — the live loop now sends the selected set in as few
+  telegrams as the cap allows (one per `MW_BATCH_SIZE`) instead of one per 10;
+  dropped the dead `defined`/`single`/`redefine` scaffolding.
+- **`src/breakmode.rs`** (new) — the break-entered service protocol: `s0bg`
+  baud constants, `enter(kline, fast)` (break → 10.4 k → `0xA5` handshake →
+  optional 38.4 k), `BreakHandle` raw transport + `exit()`, `BreakSim`, unit
+  tests. CLI: `dde3-toolkit break-probe [--fast]`.
+- **Tests** — new `mw_select_batched_length` (protocol) and `mw_live_batch`
+  (sim) lock in the batched framing; `breakmode` baud-ladder + handshake-gate
+  tests. **33 passing** (release + debug).
+
+### Next step (hardware)
+Run `dde3-toolkit break-probe --port /dev/ttyUSB1` (after UPROG_EIN + seed/key)
+with `tools/monitor.py` capturing `/dev/ttyUSB0`, to (a) confirm the handshake
+byte/rate that selects 38.4 k, and (b) capture the secondary command opcodes at
+`0x1F6D2`. Then add the byte-addressed read/write commands to `breakmode.rs`.
+
+## 20. Session 11 — break-mode secondary command set DECODED + implemented (offline RE)
+
+With no ECU on the bench, the `0x1F6D2` interpreter was decoded fully from
+`/home/ilija/Desktop/edc15m_out/research/out/disasm.txt` (ground truth) and
+cross-checked against `research/routines_part2.md`.
+
+### What is now known (and implemented in `src/breakmode.rs`)
+- **Frame shape**: raw 4-byte blocks, no DS2 length/XOR —
+  request `[0x01, OPC, xx, DATA]` (first byte MUST be 0x01, gate `0x1F6EC`),
+  reply `[0x00, TAG, RESP, HI]` (TAG 0x02/0x01/0x05, HI 0x01 data / 0x00 default).
+- **Opcode map** (slot = `(table_addr − 0x1F724)/4`, 0x51 entries, clamped to 0x50):
+  0x02 echo+checksum, 0x04/0x07 addr low/high, 0x0B/0x0E/0x0D word-aware RAM
+  reads, 0x10 block-buffer read, 0x13 fault/DTC read (`+0xCE7A`), 0x18 EEPROM
+  16-bit read, 0x1B checksum, 0x25/0x26 set addr, 0x2A block handshake/reset
+  (`DATA` must be 0x11), 0x31 block store, 0x3E PEC bulk, 0x4F set block size.
+- **Shared-register subtlety**: the address register is the 24-bit value at
+  `C804..C806` and the **partner cache** is the 24-bit value at `C806..C808` —
+  they **share byte C806**; the word-read path stores `C806..C808 ← addr −
+  0x0FF1E` before the 24-bit `C804 −= 1` decrement. `BreakSim` models this with
+  a 5-byte shared block.
+- **Two unknown-opcode defaults**: `0xED` (slot A, `0x1FBBA`) / `0xEB` (slot B,
+  `0x1FBD0`), `HI = 0x00`; per-slot A/B transcribed in `BreakSim::default_reply`.
+- **Corrections to routines_part2.md**: checksum is **0x1B** (not 0x1C),
+  16-bit EEPROM read is **0x18** (not 0x19).
+
+### Changes
+- **`src/breakmode.rs`** — added `opcode::*` constants, `request()` frame builder,
+  `Reply`/`parse_reply()`, `BreakHandle::command()` + typed helpers
+  (`reset_block`, `set_addr`, `get_addr`, `checksum`, `read_ram`), and the
+  mailbox-faithful `BreakSim` (RAM + block buffer + checksum + addr/partner
+  registers + default replies). `enter()` now sends the **second** handshake
+  byte (`0xA6` = fast → 38.4 k latch, else `0xA5` = stay 10.4 k).
+- **`src/main.rs`** — `break-probe` drives the verified sequence
+  (`0x2A/0x11`, `0x1B`, `0x04/0x07`, legacy `0x51` → expected `00 02 ED 00`).
+- **FINDINGS §4.4** (new) — the decoded command format + opcode table + the
+  corrections above.
+- **Tests** — 12 `breakmode` unit tests (was 2). **43 passing** (release+debug),
+  build clean (no breakmode warnings).
+
+### Next step (hardware, when the ECU returns)
+1. **T2.1 capture**: `break-probe` + `tools/monitor.py` on `/dev/ttyUSB0` to
+   confirm the on-wire 4-byte layout (byte order, echo behaviour, PEC framing).
+2. Then wire the byte-addressed RAM/EEPROM/fault reads into the CLI/GUI and the
+   `0x3E` PEC bulk stream (the only piece still capture-pending).
+
+## 17. DS2 service 0x91 (baud change) — ECU patch + `baud` command (session 8)
+
+Stock firmware does **not** implement DS2 `0x91` (no case in the dispatcher
+chain 0x2933E–0x293D0, `research/out/disasm.txt`; falls through to the
+unsupported path 0x295F2 → reply `12 04 FF`). The stock tester job
+`BAUDRATEN_UMSTELLUNG` (10DDE30.prg @ 0x121C, template `12 08 91 00 BBBB
+BBBB BB 03`) was never wired to it either — that is why nothing in the
+stock DDE30 world can re-rate the DS2 link.
+
+**ECU-side patch** (32 bytes, no TDI checksum impact):
+- dispatcher hook 0x293D0: `EA 00 F2 95` → `EA 00 C3 18` (fallthrough now
+  targets trampoline T @ 0x185C3 — a 65-byte erased, zero-reference block)
+- T: `CMP R4,#91; JMPA cc_Z,H; JMP 0x295F2`
+- H: `CALLS 0x2692C` (header) + `CBFA=A0` (ACK) + `MOV S0BG,#0x0C` (38.4 k)
+  + `JMP 0x295F6` (common tail) — exact idioms of the 0x9E case and the
+  S0BG encoding at 0x1E8F4.
+
+Key wire semantics: the ACK is queued **after** the S0BG switch, so it
+goes out at 38.4 k — that is the sync point; never expect a reply at the
+old rate. Revert to 9600 = power cycle (v1 hard-codes 38.4 k; variant V2
+honors the 24-bit baud field from CBF6+1..+3).
+
+Full docs + applier + patched image:
+`~/Desktop/edc15m_out/baud91_patch/{patch_0x91.py, PATCH_0x91.md, e46_baud91.bin}`
+(checksum tool confirms both TDI sums still valid on the patched image).
+
+**Toolkit changes:**
+- `src/protocol.rs` — `frame_baud(baud, p2)` builder (0x91 frame).
+- `src/main.rs` — `baud` subcommand: send 0x91 @9600 (expect silence) →
+  settle → `set_baud(38400)` → drain pending ACK (raw_read) → verify with
+  IDENT (3×) → on failure fall back to 9600 to distinguish "never switched"
+  (stock firmware) from "dead" (power-cycle needed).
+- 43 unit tests pass; `cargo check` clean (only pre-existing warnings).
+
+**Bench test when the ECU is back:**
+1. flash `e46_baud91.bin` (full image; pristine backup `e46_orig.bin`)
+2. `dde3-toolkit ident --port /dev/ttyUSB1` (9600 sanity)
+3. `dde3-toolkit baud --port /dev/ttyUSB1` → expect IDENT reply @38.4k
+4. power cycle → `ident` again at 9600 (revert works)
+
+## 22. Session 12 — FS_LESEN wire protocol verified, `read_dtcs()` rewritten (2026-11-11)
+
+The old `read_dtcs()` mis-parsed the fault reply and reported the wrong ORT
+(Mengensteller 0x01 instead of Gluehanlage 0x08). Root cause: the ECU returns
+the 50-byte fault record in **chunks across several requests** (per the
+decompiled FS_LESEN job in `DDE30DSO.prg`), and the old code treated the
+reply as one flat blob.
+
+### Verified wire protocol (DS2, 9600 8E1, replies start with ECU addr 0x12)
+
+| Step | Request (TX)            | Reply (RX data after `A0`)                        | Record bytes |
+|------|--------------------------|----------------------------------------------------|--------------|
+| 1    | `12 05 14 01`            | `<anz> <rec 0..22>`                                | header 22 B  |
+| 2    | `12 05 04 00`            | `<pos> <rec 22..26>`                               | entry 4 B    |
+| 3    | `12 05 04 01`            | `<pos> <rec 26..37>`                               | shadow 11 B  |
+| 4    | `12 05 14 01` (again)    | `<anz'> <rec 37..50> [<next rec 0..22> if anz'>0]` | tail 13 B    |
+
+Step 4 is the only part not directly visible in the captures (old toolkit
+never sent it); it is taken from the decompiled job (count request is re-used
+after the entry/shadow pair, reply carries the record tail and, when more
+faults remain, the next fault's 22-byte header inline). **Pending one real-car
+confirmation** — the wire log (`dde3newlog.txt`) will show it on the next run.
+
+### 50-byte fault record layout (matches `actual error.txt` M47 reference)
+
+| Off | Len | Field |
+|-----|-----|-------|
+| 0   | 1   | ORT (fault class, FORTTEXTE key) |
+| 1   | 1   | ART mask — bit *i* selects FARTMATRIX column A(i+1) |
+| 2   | 1   | error frequency (0..100 %) |
+| 3   | 19  | freeze/environment words (raw; per-ORT scaling via SHADOWFEHLER + FUmwelt) |
+| 22  | 4   | entry chunk (runtime counters) |
+| 26  | 11  | shadow chunk (SHADOWFEHLER freeze data) |
+| 37  | 13  | tail (counters / checksum tail) |
+
+Reference (M47, `actual error.txt`): `08 C8 3C 00 38 9C E3 00 37 9D DE C4 C1
+04 00 48 00 99 03 00 76 DC 5B 03 4A 00 76 D1 7D 00 76 DC 5A 00 34 32 33 32 34
+00 30 21 00 00 00 31 C5 00 00 22` → ORT 0x08 Gluehanlage, mask 0xC8 → bits
+3,6,7 → FARTMATRIX[0x08] slots A4/A7/A8 = **0x32 "Gluehkerzen bzw.
+Gluehrelais defekt"**, **0x05 "Fehler momentan vorhanden"**, **0x07 "Fehler
+sporadisch"**; frequency 60. Tables cross-checked against the extracted
+`fartmatrix.txt` / `farttexte.txt` / `forttexte.txt` / `fumwelttexte.txt` /
+`shadowfehler.txt` / `jobresult.txt`.
+
+### Changes
+- `src/protocol.rs` — `read_dtcs()` rewritten for the 4-step chunked protocol
+  (iterates all faults, advances via the next-header in step-4 replies,
+  pads/truncates to 50 B, keeps the full record per DTC).
+- `src/dtc.rs` — `fart_slot()` (ART mask bit → FARTMATRIX code) and
+  `active_arts()`; `Dtc` extended with `art_mask`, `freq`, `arts`, `record`;
+  `Dtc::from_record()` builds a DTC from the raw 50 bytes; `describe()`
+  renders ORT/freq/ART texts + raw record.
+- `src/sim.rs` — sim now stores full 50-byte records and answers the 4-step
+  sequence (`fault_count/fault_entry/fault_shadow`).
+- `src/app.rs` — DTC tab shows ORT + mask + freq + all active ART texts +
+  freeze words + the full errorcode hex (same as the reference report).
+- 57 unit tests pass, incl. `dtc_from_record_reference_m47` (reference record
+  → ORT 0x08, arts [0x32,0x05,0x07]) and `fault_replay_assembles_full_records`.
+
+### Bench test (real car)
+1. `dde3-toolkit dtc --port /dev/ttyUSB1` → expect "Gluehanlage" + the three
+   ART texts above, not "Mengensteller".
+2. Check `dde3newlog.txt` TX/RX for the step-4 tail-count reply shape; if it
+   differs from the table above, adjust the 2-line tail slice in
+   `read_dtcs()` only — the rest of the pipeline is data-driven.

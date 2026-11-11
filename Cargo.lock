@@ -431,6 +431,7 @@ dependencies = [
  "crossbeam-channel",
  "eframe",
  "hex",
+ "libc",
  "rfd",
  "serialport",
  "thiserror 1.0.69",

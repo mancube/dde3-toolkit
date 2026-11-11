@@ -12,8 +12,11 @@
 
 mod app;
 mod bench;
+mod capture;
+mod breakmode;
 mod checksum;
 mod dtc;
+mod live;
 mod protocol;
 mod sim;
 
@@ -42,16 +45,30 @@ fn print_usage() {
     );
     eprintln!("  dtc                        Read DS2 fault memory with texts and freeze frames");
     eprintln!("  ds2-clear                  Clear DS2 fault memory (12 04 05)");
+    eprintln!("  capture                  PASSIVELY capture K-line traffic for debugging:");
+    eprintln!("                             frames named, raw bytes kept verbatim. Read-only");
+    eprintln!("                             by construction - nothing is ever transmitted,");
+    eprintln!("                             so no erase/write is possible in this mode.");
+    eprintln!("                             Default port is the passive tap /dev/ttyUSB0.");
+    eprintln!("    [--out <file>] [--duration <secs>]");
     eprintln!("  bench                      Headless run: identify + optional read/write,");
     eprintln!("                             progress and timing on stderr, useful exit status");
     eprintln!("    [--info|--read|--read-cal|--write|--write-cal]");
     eprintln!("    [--image <path>] [--out <path>]");
     eprintln!("  checksum <image.bin>       Verify and optionally correct flash checksums");
     eprintln!("  uprog-ein                  Enter programming mode (12 04 0D)");
+    eprintln!("  break-probe              Enter the break-entered service protocol, send one
+                             probe byte, dump the response (--fast for 38.4k)");
     eprintln!("  diagnose-ende              Leave session / end diagnostics (12 04 9F)");
+    eprintln!("  baud                       Switch the DS2 link to 38.4 kbaud via service 0x91");
+    eprintln!("                             (requires the 0x91 flash patch; see");
+    eprintln!("                             ~/Desktop/edc15m_out/baud91_patch/PATCH_0x91.md)");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --port <path>              Sender serial port (default /dev/ttyUSB1, FT232R)");
+    eprintln!("  --port <path>              Serial port (default /dev/ttyUSB1 FT232R sender;");
+    eprintln!("                             capture defaults to /dev/ttyUSB0 passive tap)");
+    eprintln!("  --duration <secs>          Capture duration in seconds (capture only;");
+    eprintln!("                             default: run until Ctrl-C)");
     eprintln!("  --baud <rate>              Baud rate (default 9600)");
     eprintln!("  --data-delay <ms>          Per-byte delay for control frames (default 3)");
     eprintln!("  --sim                      Run against the built-in ECU simulator");
@@ -107,11 +124,13 @@ fn run() -> Result<()> {
     let command = &args[1];
     // /dev/ttyUSB1 = FT232R sender (drives the K-line).
     // /dev/ttyUSB0 = UART-LPT passive monitor (ECU-side tap, cannot drive).
-    let mut port = "/dev/ttyUSB1".to_string();
+    let mut port: Option<String> = None;
+    let mut duration: Option<f64> = None;
     let mut baud: u32 = 9600;
     let mut data_delay_ms: u64 = 3;
     let echo: bool = true;
     let mut sim: bool = false;
+    let mut fast: bool = false;
     let mut bench_image: Option<String> = None;
     let mut bench_out: Option<String> = None;
 
@@ -120,7 +139,16 @@ fn run() -> Result<()> {
         match args[i].as_str() {
             "--port" => {
                 i += 1;
-                port = args.get(i).cloned().context("--port requires a value")?;
+                port = Some(args.get(i).cloned().context("--port requires a value")?);
+            }
+            "--duration" => {
+                i += 1;
+                duration = Some(
+                    args.get(i)
+                        .context("--duration requires a value")?
+                        .parse::<f64>()
+                        .with_context(|| format!("invalid duration: {}", args[i]))?,
+                );
             }
             "--baud" => {
                 i += 1;
@@ -139,6 +167,7 @@ fn run() -> Result<()> {
                     .with_context(|| format!("invalid data delay: {}", args[i]))?;
             }
             "--sim" => sim = true,
+            "--fast" => fast = true,
             "--image" => {
                 i += 1;
                 bench_image = Some(args.get(i).cloned().context("--image requires a value")?);
@@ -152,7 +181,27 @@ fn run() -> Result<()> {
         i += 1;
     }
 
+    // Resolve the port: explicit --port wins; otherwise the sender for the
+    // driver commands and the passive tap for `capture` (read-only).
+    let port: String = port.unwrap_or_else(|| {
+        if command == "capture" {
+            "/dev/ttyUSB0".to_string()
+        } else {
+            "/dev/ttyUSB1".to_string()
+        }
+    });
+
     match command.as_str() {
+        "capture" => {
+            let opts = capture::CaptureOptions {
+                port,
+                baud,
+                out: bench_out.clone().map(PathBuf::from),
+                duration: duration.map(Duration::from_secs_f64),
+            };
+            capture::run(&opts)?;
+            Ok(())
+        }
         "ident" => {
             let mut k = Kline::open(&port, baud, echo)?;
             k.set_data_delay(data_delay_ms);
@@ -442,6 +491,41 @@ fn run() -> Result<()> {
             println!("UPROG_EIN sent");
             Ok(())
         }
+        "break-probe" => {
+            let mut k = Kline::open(&port, baud, echo)?;
+            k.set_data_delay(data_delay_ms);
+            // Requires a prior DS2 unlock (UPROG_EIN + SEED_KEY); see FINDINGS §4.
+            println!(
+                "break-entered service probe (fast={}): bauds 9600->{} (handshake),{}",
+                fast,
+                breakmode::BAUD_10_4K,
+                if fast { format!(" -> {}", breakmode::BAUD_38_4K) } else { String::new() }
+            );
+            match breakmode::enter(&mut k, fast) {
+                Ok(mut h) => {
+                    // Probe sequence (FINDINGS §4.4): verified opcodes first,
+                    // then the legacy 0x51 byte. The expected answers are the
+                    // capture reference for the on-wire layout.
+                    if let Ok(r) = h.reset_block() {
+                        println!("block handshake 02A/11: {}", protocol::hex(&[r.tag, r.data, r.hi]));
+                    }
+                    if let Ok(c) = h.checksum() {
+                        println!("checksum (0x1B): {c:02X}");
+                    }
+                    if let Ok(a) = h.get_addr() {
+                        println!("address (0x04/0x07): {a:04X}");
+                    }
+                    // Legacy probe: opcode 0x51 clamps to slot 0x50 → default
+                    // A reply [00 02 ED 00].
+                    h.raw_write(&[0x01, 0x51, 0x00, 0x00])?;
+                    let r = h.raw_read(4, Duration::from_millis(500))?;
+                    println!("secondary response (0x51 probe): {}", protocol::hex(&r));
+                    h.exit();
+                }
+                Err(e) => println!("break entry failed: {e}"),
+            }
+            Ok(())
+        }
         "diagnose-ende" => {
             let mut k = Kline::open(&port, baud, echo)?;
             k.set_data_delay(data_delay_ms);
@@ -454,6 +538,57 @@ fn run() -> Result<()> {
             )?;
             println!("DIAGNOSE_ENDE sent");
             Ok(())
+        }
+        "baud" => {
+            // DS2 service 0x91 — only answered by patched firmware (the
+            // 0x91 trampoline in 0x185C3, see ~/Desktop/edc15m_out/baud91_patch/).
+            //
+            // Wire semantics (from the patch design, PATCH_0x91.md):
+            //   * the ECU switches S0BG to 0x0C (38.4 k) BEFORE it queues
+            //     its ACK, so the ACK goes out at the NEW rate. There is
+            //     nothing to wait for at the old rate.
+            //   * the ACK (92 04 A0) then rides the line at 38.4k and is
+            //     drained below; IDENT proves the new rate end-to-end.
+            const TARGET: u32 = 38_400;
+            let old_baud = baud;
+            let mut k = Kline::open(&port, old_baud, echo)?;
+            k.set_data_delay(data_delay_ms);
+            let frame = crate::protocol::frame_baud(TARGET, 0x03);
+            println!("sending 0x91 @ {old_baud}: {}", protocol::hex(&frame));
+            // No ACK expected at the old rate; a short window only.
+            let _ = k.request(&frame, Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(100));
+            k.set_baud(TARGET)?;
+            // Drain the pending ECU ACK / any line noise at the new rate.
+            let drained = k.raw_read(256, Duration::from_millis(300))?;
+            if !drained.is_empty() {
+                println!("drained pending bytes @ {TARGET}: {}", protocol::hex(&drained));
+            }
+            // Verify the link at the new rate with IDENT.
+            let mut last_err = None;
+            for _ in 0..3 {
+                match k.request(&crate::protocol::frame_ident(), Duration::from_millis(500)) {
+                    Ok(r) => {
+                        println!("IDENT @ {TARGET}: {}", protocol::hex(&r));
+                        println!("DS2 link now runs at {TARGET} (revert to {old_baud} by power cycle)");
+                        return Ok(());
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            // No reply at the new rate: check whether the ECU never switched.
+            let _ = k.set_baud(old_baud);
+            match k.request(&crate::protocol::frame_ident(), Duration::from_millis(500)) {
+                Ok(r) => anyhow::bail!(
+                    "ECU still answers @ {old_baud} ({}) — it never switched (stock firmware or patch not applied?)",
+                    protocol::hex(&r)
+                ),
+                Err(_) => anyhow::bail!(
+                    "no reply at {TARGET} ({}), also silent at {old_baud} — ECU unresponsive; power-cycle it",
+                    last_err.map(|e| format!("{e}")).unwrap_or_default()
+                ),
+            }
         }
         _ => {
             eprintln!("unknown command: {command}");

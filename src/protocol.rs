@@ -76,16 +76,20 @@ pub fn build_frame(payload: &[u8]) -> Vec<u8> {
     v
 }
 
-/// ECU reply convention (derived from `frames.md` — "Generic OK response
-/// fed to each job: `92 04 A0`" — and the FLASH_LESEN listing in
-/// `decompiled_winkfp.txt`, which reads the status byte at reply offset 2
-/// and copies data from reply offset 3):
+/// ECU reply convention (**2026-11-09 real M47 capture**, `dde3 toolkit
+/// log.txt`): the ECU answers with its OWN address `0x12` — NOT the DS2
+/// `0x92` response prefix the toolkit first assumed (a WinKFP `frames.md`
+/// assumption, wrong for this ECU) — the JOBRESULT status byte at offset 2,
+/// data from offset 3:
 ///
 /// ```text
-/// <92> <len echo> <SB> [<data ...>]  + trailing XOR on the wire
+/// <12> <len> <SB> [<data ...>]  + trailing XOR on the wire
 /// ```
 ///
-/// MW live data (`0x0B`) uses the echo style `92 05 0B <sub> A0 <data>`.
+/// MW live data (`0B 10`) replies `12 <len> A0 10 00 <u16 BE per id ...>`
+/// (data from offset 5); IDENT replies with a bare ASCII string. The ECU also
+/// emits a periodic ~16-byte live block (`12 10 A0 10 …`) on the K-line that
+/// interleaves with request/reply — see [`is_not_live_broadcast`].
 /// [`request`] treats byte [2] as the JOBRESULT status byte when it is a
 /// known status (A0/A1/A2/B0–B2/FF/00): OKAY → Ok, BUSY → retry, else NRC.
 /// Any other byte at [2] means a data reply and is returned as-is.
@@ -97,9 +101,10 @@ pub fn known_status_sb(sb: u8) -> bool {
     matches!(sb, 0xA0 | 0xA1 | 0xA2 | 0xB0 | 0xB1 | 0xB2 | 0xFF | 0x00)
 }
 
-/// Maximum plausible DS2 frame length; longer buffers are resynced by
-/// dropping leading bytes.
-const MAX_FRAME: usize = 64;
+/// Maximum plausible buffer before resync. Must comfortably hold an echo
+/// (≤ ~40 B) plus a full reply (≤ ~130 B) that arrive back-to-back on the
+/// half-duplex K-line.
+const MAX_BUF: usize = 192;
 
 #[derive(Default)]
 pub struct FrameParser {
@@ -108,31 +113,57 @@ pub struct FrameParser {
 
 impl FrameParser {
     /// Accumulate bytes. Nothing is emitted until [`take_frame`] succeeds, so
-    /// frames that arrive across several reads (WinKFP gaps ~50 ms before the
-    /// trailing XOR byte) are handled correctly.
+    /// frames that arrive across several reads are handled correctly.
     pub fn feed(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
-        if self.buf.len() > MAX_FRAME {
-            self.buf.remove(0);
+        if self.buf.len() > MAX_BUF {
+            // Last-resort resync for persistent garbage: keep the tail half.
+            self.buf.drain(0..self.buf.len() - MAX_BUF / 2);
         }
     }
 
-    /// Try to complete a frame from the accumulated buffer. Call after a line
-    /// silence. The last byte is the XOR checksum of the frame payload.
+    /// Extract the next complete frame from the front of the buffer.
     ///
-    /// Returns the frame, or `None` when no alignment ends in a valid XOR.
-    /// On `None` the buffer is kept (the trailing XOR byte may still be
-    /// on its way); [`feed`] drops leading bytes once the buffer outgrows
-    /// [`MAX_FRAME`], which is also how persistent garbage is flushed.
+    /// A frame is a run of bytes whose final byte equals the XOR of the
+    /// preceding bytes. Three cases, in order:
+    ///  1. the buffer starts with the ECU address (0x12): the frame is the
+    ///     shortest XOR-terminated prefix — this is what splits our TX echo
+    ///     from the ECU reply (and any interleaved periodic live block) that
+    ///     follow each other back-to-back on the line;
+    ///  2. otherwise, skip leading garbage until a 0x12-anchored frame
+    ///     appears;
+    ///  3. otherwise the whole silence-delimited buffer is one raw reply
+    ///     (e.g. the IDENT string, which carries no 0x12 anchor).
+    ///
+    /// Returns the payload (trailing XOR byte stripped), or `None` when no
+    /// complete frame is present yet — the partial frame stays buffered.
     pub fn take_frame(&mut self) -> Option<Frame> {
-        let mut i = 0;
-        while self.buf.len() - i >= 2 {
-            let body = &self.buf[i..self.buf.len() - 1];
-            if !body.is_empty() && xor_cs(body) == self.buf[self.buf.len() - 1] {
-                let payload = self.buf.drain(i..self.buf.len() - 1).collect();
+        // 1) Envelope frame anchored at the front.
+        if self.buf.first() == Some(&ECU_ADDR) {
+            if let Some(k) = xor_end(&self.buf) {
+                let payload = self.buf[..k].to_vec();
+                self.buf.drain(0..=k);
                 return Some(Frame { payload });
             }
-            i += 1;
+        }
+        // 2) Skip leading garbage until a 0x12-anchored frame appears.
+        for i in 1..self.buf.len() {
+            if self.buf[i] != ECU_ADDR {
+                continue;
+            }
+            if let Some(k) = xor_end(&self.buf[i..]) {
+                let payload = self.buf[i..i + k].to_vec();
+                self.buf.drain(0..i + k + 1);
+                return Some(Frame { payload });
+            }
+        }
+        // 3) No 0x12 anchor: a raw reply is the whole buffer, XOR-terminated.
+        if self.buf.len() >= 2
+            && xor_cs(&self.buf[..self.buf.len() - 1]) == self.buf[self.buf.len() - 1]
+        {
+            let payload = self.buf[..self.buf.len() - 1].to_vec();
+            self.buf.clear();
+            return Some(Frame { payload });
         }
         None
     }
@@ -140,6 +171,18 @@ impl FrameParser {
     pub fn clear(&mut self) {
         self.buf.clear();
     }
+}
+
+/// Index of a frame's trailing XOR byte: the shortest `k >= 2` with
+/// `xor(s[..k]) == s[k]`. Returns `None` when no such position exists (the
+/// frame is incomplete).
+fn xor_end(s: &[u8]) -> Option<usize> {
+    for k in 2..s.len() {
+        if xor_cs(&s[..k]) == s[k] {
+            return Some(k);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +300,22 @@ pub fn frame_diagnose_ende() -> Vec<u8> {
     vec![0x12, 0x04, 0x9F]
 }
 
+/// DS2 service 0x91 (baud rate change) as implemented by the stock tester job
+/// `BAUDRATEN_UMSTELLUNG` (10DDE30.prg @ 0x121C):
+/// `12 08 91 00 <baud 24-bit BE> <p2>`. Not implemented in stock firmware
+/// (returns `12 04 FF`); works against the 0x91 patch (see
+/// ~/Desktop/edc15m_out/baud91_patch/PATCH_0x91.md). The baud field is
+/// honored only by patch variant V2; v1 always switches to 38.4 kbaud.
+pub fn frame_baud(baud: u32, p2: u8) -> Vec<u8> {
+    vec![
+        0x12, 0x08, 0x91, 0x00,
+        ((baud >> 16) & 0xFF) as u8,
+        ((baud >> 8) & 0xFF) as u8,
+        (baud & 0xFF) as u8,
+        p2,
+    ]
+}
+
 /// Seed/Key init: `12 08 90 42 4D 57 05 <Z>`.
 pub fn frame_seed_key(z: u8) -> Vec<u8> {
     vec![0x12, 0x08, 0x90, 0x42, 0x4D, 0x57, 0x05, z]
@@ -322,11 +381,32 @@ pub fn frame_fault_clear() -> Vec<u8> {
     vec![0x12, 0x09, 0x07, 0x0E, 0x42, 0x41, 0x50, 0x00]
 }
 
-/// MW live data (selectable): `12 05 0B 10 <id_lo> <id_hi> ...`.
+/// Max MW ids per batched telegram. The DS2 length byte is capped at 0x80
+/// (FINDINGS §2.1) so a `0B 10` frame holds at most (0x80-5)/2 = 61 ids.
+/// 50 keeps a safety margin below the boundary.
+pub const MW_BATCH_SIZE: usize = 50;
+
+/// MW live data (selectable): `12 <LEN> 0B 10 <id_hi id_lo> ...`.
+///
+/// Batched form — this is exactly what the tested WinKFP logger job
+/// `MW_SELECT_LESEN_NORM` sends (see `testo customjobs.txt` and the disasm at
+/// `0x5FE5F`: the length byte is computed as `slen(arg)+5`, i.e. the 4-byte
+/// prefix `12 LEN 0B 10` plus the packed id bytes plus the trailing XOR).
+/// The length byte is the *total* wire byte count (DS2 rule, FINDINGS §2.1):
+///
+/// ```text
+/// LEN = 4 (prefix) + 2·n (n ids) + 1 (XOR) = 5 + 2n
+/// ```
+///
+/// A u8 length is capped at 0x80, so one telegram holds up to 118 ids — send
+/// the whole selected live set in a single frame, not one id per telegram.
 pub fn frame_mw_select(ids: &[u16]) -> Vec<u8> {
+    if ids.len() > MW_BATCH_SIZE {
+        panic!("MW select: too many ids in one telegram ({} > {})", ids.len(), MW_BATCH_SIZE);
+    }
     let mut p = Vec::with_capacity(4 + ids.len() * 2);
     p.push(0x12);
-    p.push(0x05);
+    p.push((5 + ids.len() * 2) as u8);
     p.push(0x0B);
     p.push(0x10);
     for &id in ids {
@@ -349,47 +429,84 @@ pub fn frame_mw_status() -> Vec<u8> {
 // confirmation against real hardware.
 // ---------------------------------------------------------------------------
 
-/// One stored fault: location (ORT), fault type (ART) and raw freeze values.
+/// One stored fault: location (ORT), active fault types (ART), frequency and
+/// raw freeze values — parsed from the 50-byte fault record the ECU streams
+/// over the FS_LESEN sequence (see `read_dtcs` and HANDOVER §22).
 #[derive(Clone, Debug, Default)]
 pub struct Dtc {
+    /// Fault location code, record byte 0 (ORT table).
     pub ort: u8,
+    /// Primary FArt code (first active slot) — kept for compatibility.
     pub art: u8,
-    /// Raw freeze values from the entry reply (big-endian u16 pairs),
-    /// scaled by the ORT row's UW_1/UW_2 ids (see `crate::dtc::ort_uw_ids`).
+    /// ART slot mask byte, record byte 1 (bit i = slot A(i+1) active).
+    pub art_mask: u8,
+    /// Error frequency (Fehlerfrequenz), record byte 2.
+    pub freq: u8,
+    /// FArt codes of all active slots, in slot order (see `dtc::active_arts`).
+    pub arts: Vec<u8>,
+    /// Raw freeze values, record bytes 3..11 as big-endian u16 pairs
+    /// (scaled by the ORT row's UW_1/UW_2 ids, see `crate::dtc::ort_uw_ids`).
     pub uw: Vec<u16>,
-    /// Raw shadow (freeze-frame) values (big-endian u16 pairs), one per
-    /// FUmweltTexte row (see `crate::dtc::UMWELT`).
+    /// Legacy field, unused by the DS2 FS_LESEN flow.
     pub shadow: Vec<u16>,
+    /// The full raw fault record as received (50 bytes when read completely).
+    pub record: Vec<u8>,
 }
 
 impl Dtc {
+    /// Parse a fault from the assembled raw record.
+    ///
+    /// Layout (verified against the M47 reference report):
+    ///   [0]=ORT  [1]=ART slot mask  [2]=error frequency  [3..11]=freeze u16 BE
+    pub fn from_record(rec: &[u8]) -> Dtc {
+        let ort = rec.get(0).copied().unwrap_or(0);
+        let mask = rec.get(1).copied().unwrap_or(0);
+        let freq = rec.get(2).copied().unwrap_or(0);
+        let arts = crate::dtc::active_arts(ort, mask);
+        let uw: Vec<u16> = rec
+            .get(3..11)
+            .unwrap_or(&[])
+            .chunks_exact(2)
+            .map(|p| u16::from_be_bytes([p[0], p[1]]))
+            .collect();
+        Dtc {
+            ort,
+            art: arts.first().copied().unwrap_or(0),
+            art_mask: mask,
+            freq,
+            arts,
+            uw,
+            shadow: Vec::new(),
+            record: rec.to_vec(),
+        }
+    }
+
     /// Human-readable description using the text tables in `crate::dtc`.
     pub fn describe(&self) -> String {
-        let (u1, u2) = crate::dtc::ort_uw_ids(self.ort);
         let mut s = format!(
-            "ORT 0x{:02X} {}   |   ART 0x{:02X} {}",
+            "ORT 0x{:02X} {}   |   Fehlerfreq {}   |   ART mask 0x{:02X}",
             self.ort,
             crate::dtc::ort_text(self.ort),
-            self.art,
-            crate::dtc::fart_text(self.art)
+            self.freq,
+            self.art_mask
         );
-        for (i, raw) in self.uw.iter().enumerate() {
-            let id = match i {
-                0 => u1,
-                1 => u2,
-                _ => 0,
-            };
-            match crate::dtc::uw_info(id) {
-                Some(u) => {
-                    s.push_str(&format!(
-                        "\n      {} = {:.2} {}",
-                        u.name.trim(),
-                        crate::dtc::uw_value(id, *raw),
-                        u.unit
-                    ));
-                }
-                None => s.push_str(&format!("\n      UW{} raw 0x{:04X}", i + 1, raw)),
+        let legacy = [self.art];
+        let codes: &[u8] = if self.arts.is_empty() { &legacy } else { &self.arts };
+        if !(self.arts.is_empty() && self.art == 0) {
+            for a in codes {
+                s.push_str(&format!(
+                    "\n      ART 0x{:02X} {}",
+                    a,
+                    crate::dtc::fart_text(*a)
+                ));
             }
+        }
+        if !self.uw.is_empty() {
+            s.push_str("\n      freeze (BE u16): ");
+            for raw in &self.uw {
+                s.push_str(&format!("{raw:04X} "));
+            }
+            s.pop();
         }
         if !self.shadow.is_empty() {
             s.push_str("\n      freeze frame:");
@@ -409,29 +526,40 @@ impl Dtc {
                 }
             }
         }
+        if !self.record.is_empty() {
+            s.push_str("\n      record: ");
+            for b in &self.record {
+                s.push_str(&format!("{:02X} ", b));
+            }
+            s.pop();
+        }
         s
     }
 }
 
 /// Fault-memory count/start (FS_QUICK_LESEN / FS_LESEN): `12 05 14 01`.
-/// Reply: `92 05 A0 <anz>`.
+///
+/// First reply: `12 L A0 <anz> <rec 0..22>` — the count plus the first 22
+/// bytes of the current fault record. Subsequent replies: `12 L A0 <anz'>
+/// <rec 37..50> [<next rec 0..22>]` — the 13-byte tail of the fault just
+/// read plus, when more faults remain, the header of the next one.
 pub fn frame_dtc_count() -> Vec<u8> {
     vec![0x12, 0x05, 0x14, 0x01]
 }
 
-/// Read the next fault entry (FS_LESEN): `12 05 04 00`.
-/// Reply: `92 05 A0 <ort> <art> <uw1:2> <uw2:2>`.
+/// Read the entry chunk of the current fault (FS_LESEN): `12 05 04 00`.
+/// Reply: `12 L A0 <pos> <rec 22..26>` (4 bytes).
 pub fn frame_dtc_entry() -> Vec<u8> {
     vec![0x12, 0x05, 0x04, 0x00]
 }
 
-/// Read the shadow (freeze frame) of the current fault (FS_SHADOW_LESEN):
-/// `12 05 04 01`. Reply: `92 05 A0 <u16 BE ...>` (one per FUmweltTexte row).
+/// Read the shadow chunk of the current fault (FS_LESEN): `12 05 04 01`.
+/// Reply: `12 L A0 <pos> <rec 26..37>` (11 bytes).
 pub fn frame_dtc_shadow() -> Vec<u8> {
     vec![0x12, 0x05, 0x04, 0x01]
 }
 
-/// DS2 fault-memory clear (FS_LOESCHEN): `12 04 05`. Reply: `92 04 A0`.
+/// DS2 fault-memory clear (FS_LOESCHEN): `12 04 05`. Reply: `12 04 A0`.
 pub fn frame_dtc_clear() -> Vec<u8> {
     vec![0x12, 0x04, 0x05]
 }
@@ -518,6 +646,44 @@ impl Kline {
         std::mem::take(&mut self.logs)
     }
 
+    /// Raw byte write (no DS2 framing / XOR) — for the break-entered service
+    /// protocol (see `src/breakmode.rs`).
+    pub fn raw_write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.port
+            .write_all(bytes)
+            .with_context(|| format!("raw write failed on {}", self.path))?;
+        self.port
+            .flush()
+            .with_context(|| format!("raw flush failed on {}", self.path))?;
+        Ok(())
+    }
+
+    /// Raw byte read (no DS2 framing) — up to `n` bytes or `timeout`.
+    pub fn raw_read(&mut self, n: usize, timeout: Duration) -> Result<Vec<u8>> {
+        let deadline = Instant::now() + timeout;
+        let mut out = Vec::with_capacity(n);
+        let mut buf = [0u8; 256];
+        while out.len() < n && Instant::now() < deadline {
+            match self.port.read(&mut buf) {
+                Ok(0) => {}
+                Ok(k) => out.extend_from_slice(&buf[..k]),
+                Err(e) if e.kind() == ErrorKind::TimedOut => {}
+                Err(e) => return Err(e).with_context(|| "raw read failed"),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Hold the K-line low for a UART break (the break-entered protocol entry
+    /// trigger, `src/breakmode.rs`).
+    pub fn raw_break(&mut self) -> Result<()> {
+        self.port.set_break()?;
+        thread::sleep(Duration::from_millis(25));
+        self.port.clear_break()?;
+        self.port.flush()?;
+        Ok(())
+    }
+
     fn log(&mut self, line: String) {
         self.logs.push(line);
     }
@@ -570,6 +736,24 @@ impl Kline {
     /// NRC. Any other byte at [2] means a data reply (e.g. flash read, MW
     /// live) and is returned as-is.
     pub fn request(&mut self, payload: &[u8], timeout: Duration) -> Result<Vec<u8>> {
+        self.do_request(payload, timeout, |_| true)
+    }
+
+    /// Like [`request`], but only a reply that satisfies `accept` is returned;
+    /// other ECU frames (e.g. the periodic live broadcast) are logged and
+    /// skipped. Needed for the small fault/battery replies, which share the
+    /// K-line with the ECU's ~16-byte periodic live block.
+    pub fn request_filtered<F>(&mut self, payload: &[u8], timeout: Duration, accept: F) -> Result<Vec<u8>>
+    where
+        F: Fn(&[u8]) -> bool,
+    {
+        self.do_request(payload, timeout, accept)
+    }
+
+    fn do_request<F>(&mut self, payload: &[u8], timeout: Duration, mut accept: F) -> Result<Vec<u8>>
+    where
+        F: FnMut(&[u8]) -> bool,
+    {
         let frame = build_frame(payload);
         let sent = Frame {
             payload: payload.to_vec(),
@@ -609,7 +793,11 @@ impl Kline {
                         continue;
                     }
                     self.log(format!("RX {}", hex(&f.payload)));
-                    if f.payload.first() == Some(&(ECU_ADDR | 0x80)) {
+                    if !accept(&f.payload) {
+                        self.log(format!("SKIP (not the requested reply) {}", hex(&f.payload)));
+                        continue;
+                    }
+                    if f.payload.first() == Some(&ECU_ADDR) {
                         match status_byte(&f.payload) {
                             Some(sb) if known_status_sb(sb) => {
                                 match JobStatus::from_sb(sb, sid) {
@@ -650,7 +838,7 @@ impl Kline {
                     continue;
                 }
                 self.parser.feed(&chunk);
-                if let Some(f) = self.parser.take_frame() {
+                while let Some(f) = self.parser.take_frame() {
                     self.pending.push_back(f);
                 }
             }
@@ -862,63 +1050,108 @@ impl Kline {
         Ok(())
     }
 
-    /// Read the full DS2 fault memory (FS_LESEN sequence).
+    /// Read the full DS2 fault memory (FS_LESEN sequence, HANDOVER §22).
     ///
-    /// `12 05 14 01` returns the count; for each fault `12 05 04 00` returns
-    /// the entry and `12 05 04 01` the shadow/freeze frame (the ECU's read
-    /// pointer advances with each request, as the FS_LESEN disassembly
-    /// shows).
+    /// The ECU streams each 50-byte fault record in four chunks that the
+    /// PC software (FS_LESEN job) reassembles:
+    ///
+    ///   1. `12 05 14 01` -> `A0 <anz> <rec 0..22>`    (count + header)
+    ///   2. `12 05 04 00` -> `A0 <pos> <rec 22..26>`   (entry, 4 bytes)
+    ///   3. `12 05 04 01` -> `A0 <pos> <rec 26..37>`   (shadow, 11 bytes)
+    ///   4. `12 05 14 01` -> `A0 <anz'> <rec 37..50> [<next rec 0..22>]`
+    ///      (13-byte tail; the next fault's header when `anz' > 0`)
+    ///
+    /// Step 4 both finishes the current record and advances the ECU's fault
+    /// pointer; skipping it (the old bug) re-reads the same fault forever and
+    /// loses the 13 tail bytes of the 50-byte record.
     pub fn read_dtcs(&mut self) -> Result<Vec<Dtc>> {
-        let r = self.request(&frame_dtc_count(), Duration::from_secs(5))?;
-        if r.first() != Some(&(ECU_ADDR | 0x80)) || r.get(2) != Some(&0xA0) {
+        // The ECU keeps broadcasting a ~16-byte periodic live block on the K-
+        // line even while we do a fault read; `is_not_live_broadcast` skips it
+        // so the small fault replies (count/entry/shadow) are the ones kept.
+        let r = self.request_filtered(&frame_dtc_count(), Duration::from_secs(5), is_not_live_broadcast)?;
+        if r.first() != Some(&ECU_ADDR) || r.get(2) != Some(&0xA0) {
             bail!("unexpected fault-count reply: {}", hex(&r));
         }
-        let count = *r.get(3).unwrap_or(&0);
-        let mut out = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            let e = self.request(&frame_dtc_entry(), Duration::from_secs(5))?;
-            if e.first() != Some(&(ECU_ADDR | 0x80)) || e.get(2) != Some(&0xA0) {
+        let data = &r[3..];
+        let mut out: Vec<Dtc> = Vec::new();
+        if data.is_empty() {
+            return Ok(out); // ECU replied `A0` only: no faults
+        }
+        let remaining = data[0] as usize;
+        if remaining == 0 || data.len() < 23 {
+            return Ok(out); // count present but no fault record
+        }
+        let mut header: Vec<u8> = data[1..23].to_vec(); // rec 0..22 of fault 1
+
+        let mut left = remaining;
+        while left > 0 {
+            let mut rec: Vec<u8> = header.clone();
+
+            // 2. entry chunk: rec 22..26
+            let e = self.request_filtered(&frame_dtc_entry(), Duration::from_secs(5), is_not_live_broadcast)?;
+            if e.first() != Some(&ECU_ADDR) || e.get(2) != Some(&0xA0) {
                 bail!("unexpected fault-entry reply: {}", hex(&e));
             }
-            let d = &e[3..];
-            if d.len() < 2 {
-                bail!("short fault-entry reply: {}", hex(&e));
-            }
-            let mut dtc = Dtc {
-                ort: d[0],
-                art: d[1],
-                uw: Vec::new(),
-                shadow: Vec::new(),
-            };
-            for pair in d[2..].chunks_exact(2) {
-                dtc.uw.push(u16::from_be_bytes([pair[0], pair[1]]));
-            }
-            let s = self.request(&frame_dtc_shadow(), Duration::from_secs(5))?;
-            if s.first() != Some(&(ECU_ADDR | 0x80)) || s.get(2) != Some(&0xA0) {
+            rec.extend_from_slice(e.get(4..8).unwrap_or(&[]));
+
+            // 3. shadow chunk: rec 26..37
+            let s = self.request_filtered(&frame_dtc_shadow(), Duration::from_secs(5), is_not_live_broadcast)?;
+            if s.first() != Some(&ECU_ADDR) || s.get(2) != Some(&0xA0) {
                 bail!("unexpected fault-shadow reply: {}", hex(&s));
             }
-            for pair in s[3..].chunks_exact(2) {
-                dtc.shadow.push(u16::from_be_bytes([pair[0], pair[1]]));
+            rec.extend_from_slice(s.get(4..15).unwrap_or(&[]));
+
+            // 4. tail count: rec 37..50 (+ next header when more faults remain)
+            let r2 = self.request_filtered(&frame_dtc_count(), Duration::from_secs(5), is_not_live_broadcast)?;
+            if r2.first() != Some(&ECU_ADDR) || r2.get(2) != Some(&0xA0) {
+                bail!("unexpected fault-tail reply: {}", hex(&r2));
             }
-            out.push(dtc);
+            let d2 = &r2[3..];
+            rec.extend_from_slice(d2.get(1..14).unwrap_or(&[]));
+            let next = d2.first().copied().unwrap_or(0) as usize;
+
+            out.push(Dtc::from_record(&rec));
+            left -= 1;
+            if next == 0 || left == 0 {
+                break;
+            }
+
+            // Next fault's header: inline after the tail when present, else
+            // ask the ECU for it with one more count telegram.
+            if d2.len() >= 14 + 22 {
+                header = d2[14..14 + 22].to_vec();
+            } else {
+                let r3 = self.request_filtered(&frame_dtc_count(), Duration::from_secs(5), is_not_live_broadcast)?;
+                if r3.first() != Some(&ECU_ADDR) || r3.get(2) != Some(&0xA0) {
+                    bail!("unexpected fault-count reply: {}", hex(&r3));
+                }
+                let d3 = &r3[3..];
+                if d3.len() < 23 {
+                    break; // ECU closed the sequence
+                }
+                header = d3[1..23].to_vec();
+            }
         }
         Ok(out)
     }
 
     /// Clear the DS2 fault memory (FS_LOESCHEN): `12 04 05`.
     pub fn clear_faults_ds2(&mut self) -> Result<()> {
-        let r = self.request(&frame_dtc_clear(), Duration::from_secs(5))?;
-        if r.first() != Some(&(ECU_ADDR | 0x80)) || r.get(2) != Some(&0xA0) {
+        let r = self.request_filtered(&frame_dtc_clear(), Duration::from_secs(5), is_not_live_broadcast)?;
+        if r.first() != Some(&ECU_ADDR) || r.get(2) != Some(&0xA0) {
             bail!("unexpected fault-clear reply: {}", hex(&r));
         }
         Ok(())
     }
 
-    /// Live data polling via MW_SELECT_LESEN (`12 05 0B 10 <id bytes>`).
+    /// Live data polling via MW_SELECT_LESEN (`12 <LEN> 0B 10 <id bytes>`).
     ///
-    /// ⚠️ UNRESOLVED: The exact response layout for measurement values is not yet
-    /// confirmed against real hardware. This implementation sends the request and
-    /// parses big-endian u16 pairs starting at response offset 5.
+    /// `addrs` is the *whole* selected set; it is sent in ONE batched telegram
+    /// (the tested `MW_SELECT_LESEN_NORM` form, see [`frame_mw_select`]). The
+    /// real ECU replies `12 <LEN> A0 10 00 <u16 BE per id ...>` (prefix 0x12,
+    /// status 0xA0 at [2], two-byte header at [3..5]) — one big-endian u16 per
+    /// requested id, in request order, from offset 5. Values are raw counts;
+    /// the toolkit scales them via `src/live.rs` (FACT_A/FACT_B).
     pub fn live_values(
         &mut self,
         addrs: &[(u8, u8)],
@@ -929,11 +1162,22 @@ impl Kline {
             .map(|(hi, lo)| ((*hi as u16) << 8) | (*lo as u16))
             .collect();
         let req = frame_mw_select(&ids);
-        let r = self.request(&req, Duration::from_millis(800))?;
-        if r.len() < 6 || r[0] != 0x92 || r[4] != 0xA0 {
+        // The real ECU reply is `12 <len> A0 10 00 <u16 BE per id ...>` with
+        // `<len>` = 6 + 2*n (total wire length incl trailing XOR, n = #ids).
+        // The ECU also emits a periodic 16-byte live block on the K-line; matching
+        // the expected length selects our reply (and, for a 5-id poll, the
+        // identical periodic block — same data). This keeps a single-id battery
+        // read from being satisfied by the 16-byte broadcast.
+        let expected_len = (6 + 2 * ids.len()) as u8;
+        let r = self.request_filtered(&req, Duration::from_millis(800), |f| {
+            f.first() == Some(&0x12)
+                && f.get(2) == Some(&0xA0)
+                && f.get(1) == Some(&expected_len)
+        })?;
+        if r.len() < 6 || r[0] != 0x12 || r[2] != 0xA0 {
             bail!(
                 "unexpected MW live reply: status={:02X} ({})",
-                r.get(4).copied().unwrap_or(0),
+                r.get(2).copied().unwrap_or(0),
                 hex(&r)
             );
         }
@@ -945,16 +1189,29 @@ impl Kline {
     }
 }
 
-/// A healthy `92 04` reply starts with `0x92` (ECU_ADDR|0x80) and carries data.
+/// True when `reply` is a plausible IDENT answer. The real M47 ECU answers
+/// the IDENT (`12 04 00`) with a bare ASCII string (e.g. `8875201`,
+/// `DDE 3.0 fuer M47`) — no `0x12` envelope, no trailing XOR in the payload
+/// we receive — so accept a short string of printable characters.
 pub fn ident_valid(reply: &[u8]) -> bool {
-    reply.first() == Some(&(ECU_ADDR | 0x80)) && reply.len() >= 3
+    (4..=48).contains(&reply.len())
+        && reply
+            .iter()
+            .all(|b| matches!(*b, 0x20..=0x7E | 0x09))
 }
 
-/// Validate a flash-read reply: `92 <len> A0 <data...>` — status byte at
+/// True when `f` is NOT the ECU's periodic MW live broadcast block
+/// (`12 10 A0 10 …`, 16 bytes). Used to skip that block when selecting the
+/// small fault/battery replies that share the K-line with it.
+pub fn is_not_live_broadcast(f: &[u8]) -> bool {
+    !(f.get(1) == Some(&0x10) && f.get(3) == Some(&0x10))
+}
+
+/// Validate a flash-read reply: `12 <len> A0 <data...>` — status byte at
 /// [2], data from [3] (per the decompiled FLASH_LESEN: `move B0,S1[2]` for
 /// the status, `move S4,S1[3]L1` for the data).
 fn check_flash_read_reply(r: &[u8], count: u8, addr: u32) -> Result<()> {
-    if r.first() != Some(&(ECU_ADDR | 0x80)) || r.get(2) != Some(&0xA0) {
+    if r.first() != Some(&ECU_ADDR) || r.get(2) != Some(&0xA0) {
         bail!("unexpected flash read reply at 0x{addr:06X}: {}", hex(r));
     }
     if r.len() < 3 + count as usize {
@@ -976,6 +1233,24 @@ mod tests {
         parser.feed(&bytes);
         let f = parser.take_frame().expect("frame");
         assert_eq!(f.payload, vec![0x12, 0x04, 0x0D]);
+    }
+
+    #[test]
+    fn mw_select_batched_length() {
+        // Tested logger (MW_SELECT_LESEN_NORM) rule: LEN = 5 + 2n (total wire
+        // bytes, prefix `12 LEN 0B 10` + 2 bytes/id + trailing XOR).
+        let f = frame_mw_select(&[0x0F65]);
+        assert_eq!(f[0], 0x12);
+        assert_eq!(f[1], 7, "single id length must be 5 + 2*1");
+        assert_eq!(f[2..4], [0x0B, 0x10]);
+        assert_eq!(f.len(), 6);
+        // A batched set of 4 ids (SET_1 in `testo customjobs.txt`).
+        let f = frame_mw_select(&[0x0F62, 0x0F00, 0x0F30, 0x0E81]);
+        assert_eq!(f[1], 13, "4 ids -> 5 + 8 = 13");
+        assert_eq!(f.len(), 12);
+        // id order preserved, big-endian.
+        assert_eq!(&f[4..6], [0x0F, 0x62]);
+        assert_eq!(&f[10..12], [0x0E, 0x81]);
     }
 
     #[test]
@@ -1008,6 +1283,89 @@ mod tests {
         parser.feed(&build_frame(&[0x12, 0x04, 0x00]));
         let f = parser.take_frame().expect("frame");
         assert_eq!(f.payload, vec![0x12, 0x04, 0x00]);
+    }
+
+    // ---- Real-car (2026-11-09 M47) fixtures from `dde3 toolkit log.txt` ----
+
+    #[test]
+    fn real_car_live_reply_splits_echo() {
+        // Merged wire bytes as captured on the K-line: the ECU reply (16 B incl
+        // trailing XOR) immediately followed by our TX echo (15 B incl XOR). The
+        // parser must split them back-to-back, reply first, echo second.
+        let wire: Vec<u8> = vec![
+            // reply: 12 10 A0 10 00 00 00 00 00 03 DE 0B 26 02 4A 0A
+            0x12, 0x10, 0xA0, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xDE, 0x0B, 0x26,
+            0x02, 0x4A, 0x0A,
+            // echo of our request: 12 0F 0B 10 0F 83 0F 10 0F 40 0F 00 0F 65 BF
+            0x12, 0x0F, 0x0B, 0x10, 0x0F, 0x83, 0x0F, 0x10, 0x0F, 0x40, 0x0F, 0x00, 0x0F,
+            0x65, 0xBF,
+        ];
+        let mut p = FrameParser::default();
+        p.feed(&wire);
+        let reply = p.take_frame().expect("reply frame");
+        assert_eq!(
+            reply.payload,
+            vec![0x12, 0x10, 0xA0, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xDE, 0x0B, 0x26, 0x02, 0x4A]
+        );
+        let echo = p.take_frame().expect("echo frame");
+        assert_eq!(
+            echo.payload,
+            vec![0x12, 0x0F, 0x0B, 0x10, 0x0F, 0x83, 0x0F, 0x10, 0x0F, 0x40, 0x0F, 0x00, 0x0F, 0x65]
+        );
+        assert!(p.take_frame().is_none(), "buffer drained");
+    }
+
+    #[test]
+    fn real_car_live_values_decode() {
+        // The five u16 values in the live reply, in request order
+        // [0F83 0F10 0F40 0F00 0F65], decode to the engine-off / ~12 deg C set:
+        // PWG=0, N=0, boost=990 hPa, WTF=2854 (->12.3 deg C), batt=586 (->11.9 V).
+        let payload = vec![
+            0x12, 0x10, 0xA0, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xDE, 0x0B, 0x26, 0x02, 0x4A,
+        ];
+        assert_eq!(payload[0], 0x12, "prefix must be the ECU address");
+        assert_eq!(payload[2], 0xA0, "status at [2]");
+        let vals: Vec<u16> = payload[5..].chunks_exact(2)
+            .map(|p| u16::from_be_bytes([p[0], p[1]]))
+            .collect();
+        assert_eq!(vals, vec![0, 0, 990, 2854, 586]);
+    }
+
+    #[test]
+    fn real_car_ident_reply_is_raw_string() {
+        // Wire: echo of `12 04 00` + the bare ASCII ident "8875201" with its
+        // trailing XOR (0x31). The parser must return the 7-char string.
+        let wire: Vec<u8> = vec![
+            0x12, 0x04, 0x00, 0x16, // echo
+            b'8', b'8', b'7', b'5', b'2', b'0', b'1', 0x31, // "8875201" + XOR
+        ];
+        let mut p = FrameParser::default();
+        p.feed(&wire);
+        let _echo = p.take_frame().expect("echo");
+        let ident = p.take_frame().expect("ident reply");
+        assert_eq!(&ident.payload[..], b"8875201");
+        assert!(ident_valid(&ident.payload));
+    }
+
+    #[test]
+    fn ident_valid_accepts_plain_string() {
+        assert!(ident_valid(b"8875201"));
+        assert!(ident_valid(b"DDE 3.0 fuer M47"));
+        assert!(!ident_valid(&[]), "empty rejected");
+        assert!(!ident_valid(&[0x12, 0x04, 0x00]), "envelope is not a string");
+    }
+
+    #[test]
+    fn is_not_live_broadcast_distinguishes() {
+        // The 16-byte periodic block is skipped; small fault/battery replies kept.
+        let broadcast = vec![
+            0x12, 0x10, 0xA0, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xDE, 0x0B, 0x26, 0x02, 0x4A,
+        ];
+        let count_reply = vec![0x12, 0x05, 0xA0, 0x03]; // 3 faults
+        let batt_reply = vec![0x12, 0x08, 0xA0, 0x10, 0x00, 0x02, 0x4A]; // 586 -> 11.9 V
+        assert!(!is_not_live_broadcast(&broadcast));
+        assert!(is_not_live_broadcast(&count_reply));
+        assert!(is_not_live_broadcast(&batt_reply));
     }
 
     #[test]
@@ -1075,11 +1433,35 @@ mod tests {
             ort: 0x05,
             art: 0x01,
             uw: vec![100, 200],
-            shadow: vec![],
+            ..Default::default()
         };
         let s = d.describe();
         assert!(s.contains("Nadelbewegungsfuehler"), "ORT text: {s}");
         assert!(s.contains("Signal Kurzschluss nach B+"), "ART text: {s}");
+    }
+
+    #[test]
+    fn dtc_from_record_reference_m47() {
+        // The M47 reference fault as printed in `actual error.txt` (the
+        // reference tool's 50-byte "Errorcode" record).
+        let rec: [u8; 50] = [
+            0x08, 0xC8, 0x3C, 0x00, 0x38, 0x9C, 0xE3, 0x00, 0x37, 0x9D, 0xDE, 0xC4, 0xC1, 0x04,
+            0x00, 0x48, 0x00, 0x99, 0x03, 0x00, 0x76, 0xDC, 0x5B, 0x03, 0x4A, 0x00, 0x76, 0xD1,
+            0x7D, 0x00, 0x76, 0xDC, 0x5A, 0x00, 0x34, 0x32, 0x33, 0x32, 0x34, 0x00, 0x30, 0x21,
+            0x00, 0x00, 0x00, 0x31, 0xC5, 0x00, 0x00, 0x22,
+        ];
+        let d = Dtc::from_record(&rec);
+        assert_eq!(d.ort, 0x08, "ORT must be Gluehanlage, not Mengensteller");
+        assert_eq!(crate::dtc::ort_text(d.ort), "Gluehanlage");
+        assert_eq!(d.freq, 60);
+        assert_eq!(d.art_mask, 0xC8);
+        assert_eq!(d.arts, vec![0x32, 0x05, 0x07]);
+        assert_eq!(d.record, rec.to_vec());
+        let s = d.describe();
+        assert!(s.contains("Gluehkerzen bzw. Gluehrelais defekt"), "{s}");
+        assert!(s.contains("Fehler momentan vorhanden"), "{s}");
+        assert!(s.contains("Fehler sporadisch"), "{s}");
+        assert!(!s.contains("Mengensteller"), "{s}");
     }
 
     #[test]

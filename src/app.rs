@@ -23,6 +23,7 @@ use eframe::egui::{
 };
 
 use crate::checksum::{self, CAL_LEN, CAL_START, IMAGE_SIZE};
+use crate::live::{LiveVar, LIVE_VARS};
 use crate::protocol::{self, hex, Kline};
 
 const BG: Color32 = Color32::from_rgb(10, 14, 18);
@@ -106,228 +107,6 @@ struct EcuInfo {
     hardware: String,
     software: String,
 }
-
-// ---------------------------------------------------------------------------
-// Live data variable table (DDE3 measurement IDs from tool32_edc15m_export.csv,
-// extracted from 10DDE30.prg). Telegram format: 12 05 0B 10 <id_hi> <id_lo>.
-// Scaling: physical = raw * FACT_A + FACT_B.
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-struct LiveVar {
-    name: &'static str,
-    unit: &'static str,
-    id: u16,
-    factor: f64,
-    offset: f64,
-    group: &'static str,
-    default_on: bool,
-}
-
-const LIVE_VARS: &[LiveVar] = &[
-    // Engine
-    LiveVar {
-        name: "Engine speed",
-        unit: "rpm",
-        id: 0x0F10,
-        factor: 1.0,
-        offset: 0.0,
-        group: "Engine",
-        default_on: true,
-    },
-    LiveVar {
-        name: "Engine speed (sec)",
-        unit: "rpm",
-        id: 0x0F11,
-        factor: 1.0,
-        offset: 0.0,
-        group: "Engine",
-        default_on: false,
-    },
-    LiveVar {
-        name: "Idle speed setpoint",
-        unit: "rpm",
-        id: 0x0E02,
-        factor: 1.0,
-        offset: 0.0,
-        group: "Engine",
-        default_on: false,
-    },
-    LiveVar {
-        name: "Coolant",
-        unit: "°C",
-        id: 0x0F00,
-        factor: 0.1,
-        offset: -273.14,
-        group: "Engine",
-        default_on: true,
-    },
-    LiveVar {
-        name: "Pump temperature",
-        unit: "°C",
-        id: 0x0E11,
-        factor: 0.1,
-        offset: -273.14,
-        group: "Engine",
-        default_on: false,
-    },
-    LiveVar {
-        name: "Battery",
-        unit: "V",
-        id: 0x0F65,
-        factor: 0.02037243,
-        offset: 0.0,
-        group: "Engine",
-        default_on: true,
-    },
-    LiveVar {
-        name: "Pedal (filtered)",
-        unit: "%",
-        id: 0x0F83,
-        factor: 0.01,
-        offset: 0.0,
-        group: "Engine",
-        default_on: true,
-    },
-    LiveVar {
-        name: "Pedal (unfiltered)",
-        unit: "%",
-        id: 0x0F60,
-        factor: 0.01,
-        offset: 0.0,
-        group: "Engine",
-        default_on: false,
-    },
-    // Air & boost
-    LiveVar {
-        name: "Boost actual",
-        unit: "hPa",
-        id: 0x0F40,
-        factor: 1.0,
-        offset: 0.0,
-        group: "Air & boost",
-        default_on: true,
-    },
-    LiveVar {
-        name: "Boost setpoint",
-        unit: "hPa",
-        id: 0x0F34,
-        factor: 1.0,
-        offset: 0.0,
-        group: "Air & boost",
-        default_on: false,
-    },
-    LiveVar {
-        name: "Boost corrected",
-        unit: "hPa",
-        id: 0x0F33,
-        factor: 1.0,
-        offset: 0.0,
-        group: "Air & boost",
-        default_on: false,
-    },
-    LiveVar {
-        name: "Atmospheric pressure",
-        unit: "hPa",
-        id: 0x0F63,
-        factor: 1.0,
-        offset: 0.0,
-        group: "Air & boost",
-        default_on: false,
-    },
-    LiveVar {
-        name: "Air mass actual",
-        unit: "mg/Hub",
-        id: 0x0F30,
-        factor: 0.1,
-        offset: 0.0,
-        group: "Air & boost",
-        default_on: false,
-    },
-    LiveVar {
-        name: "MAF actual",
-        unit: "%",
-        id: 0x0F61,
-        factor: 0.01,
-        offset: 0.0,
-        group: "Air & boost",
-        default_on: false,
-    },
-    LiveVar {
-        name: "EGR duty",
-        unit: "%",
-        id: 0x0E80,
-        factor: 0.01,
-        offset: 0.0,
-        group: "Air & boost",
-        default_on: false,
-    },
-    LiveVar {
-        name: "VNT duty",
-        unit: "%",
-        id: 0x0E81,
-        factor: 0.01,
-        offset: 0.0,
-        group: "Air & boost",
-        default_on: false,
-    },
-    // Fuel & rail
-    LiveVar {
-        name: "Rail pressure",
-        unit: "bar",
-        id: 0x1F5D,
-        factor: 0.09995521484,
-        offset: 0.0,
-        group: "Fuel & rail",
-        default_on: true,
-    },
-    LiveVar {
-        name: "Injection quantity",
-        unit: "mm³",
-        id: 0x0F80,
-        factor: 0.01,
-        offset: 0.0,
-        group: "Fuel & rail",
-        default_on: true,
-    },
-    LiveVar {
-        name: "Driver request",
-        unit: "mm³",
-        id: 0x0F8B,
-        factor: 0.01,
-        offset: 0.0,
-        group: "Fuel & rail",
-        default_on: false,
-    },
-    LiveVar {
-        name: "Limit quantity",
-        unit: "mm³",
-        id: 0x0F8A,
-        factor: 0.01,
-        offset: 0.0,
-        group: "Fuel & rail",
-        default_on: false,
-    },
-    // Status
-    LiveVar {
-        name: "MIL",
-        unit: "-",
-        id: 0xDF02,
-        factor: 1.0,
-        offset: 0.0,
-        group: "Status",
-        default_on: false,
-    },
-    LiveVar {
-        name: "Diagnosis lamp",
-        unit: "-",
-        id: 0xDF00,
-        factor: 1.0,
-        offset: 0.0,
-        group: "Status",
-        default_on: false,
-    },
-];
 
 // ---------------------------------------------------------------------------
 // CSV value logger
@@ -554,19 +333,19 @@ impl App {
                 ort: 0x26,
                 art: 0x02,
                 uw: vec![437, 659],
-                shadow: Vec::new(),
+                ..Default::default()
             },
             protocol::Dtc {
                 ort: 0x05,
                 art: 0x01,
                 uw: vec![1371, 1593],
-                shadow: Vec::new(),
+                ..Default::default()
             },
             protocol::Dtc {
                 ort: 0x36,
                 art: 0x04,
                 uw: vec![837, 1059],
-                shadow: Vec::new(),
+                ..Default::default()
             },
         ];
         self.battery_v = Some(13.9);
@@ -1382,7 +1161,6 @@ impl App {
         let tx = self.tx.clone();
         let log = self.live_log.clone();
         thread::spawn(move || {
-            let mut defined = false;
             let mut reported = false;
             while !stop.load(Ordering::Relaxed) {
                 let (pairs, logs, link_error) = {
@@ -1391,32 +1169,29 @@ impl App {
                         Some(k) => {
                             let mut pairs = Vec::new();
                             let mut error = None;
-                            // DDE3 live data via MW_SELECT_LESEN (`12 05 0B 10 <id bytes>`).
-                            // The Kline::live_values uses service 0x0B (MW).
-                            let single = ids.len() <= 10;
-                            for chunk in ids.chunks(10) {
+                            // DDE3 live data via MW_SELECT_LESEN (`12 <LEN> 0B 10 <id bytes>`).
+                            // The selected set is batched into as FEW telegrams as the
+                            // 0x80-byte DS2 cap allows (protocol::MW_BATCH_SIZE) — a
+                            // normal live set is a single telegram, exactly like the
+                            // tested WinKFP logger (FINDINGS §2.2).
+                            for chunk in ids.chunks(protocol::MW_BATCH_SIZE) {
                                 let addrs: Vec<(u8, u8)> = chunk
                                     .iter()
                                     .map(|id| ((*id >> 8) as u8, *id as u8))
                                     .collect();
-                                let redefine = !single || !defined;
-                                match k.live_values(&addrs, redefine) {
+                                match k.live_values(&addrs, false) {
                                     Ok(vals) => {
                                         for (id, val) in chunk.iter().zip(vals) {
                                             pairs.push((*id, val));
                                         }
                                     }
                                     Err(e) => {
-                                        defined = false;
                                         error = Some(e);
                                         break;
                                     }
                                 }
                             }
                             let fatal = error.as_ref().is_some_and(protocol::is_link_error);
-                            if error.is_none() && single {
-                                defined = true;
-                            }
                             (
                                 error.is_none().then_some(pairs),
                                 k.take_logs(),
@@ -2529,59 +2304,56 @@ impl App {
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
-                            RichText::new(format!("ART 0x{:02X}", d.art))
-                                .font(FontId::monospace(11.0))
-                                .color(MUTED),
+                            RichText::new(format!(
+                                "mask 0x{:02X} · freq {}",
+                                d.art_mask, d.freq
+                            ))
+                            .font(FontId::monospace(11.0))
+                            .color(MUTED),
                         );
                     });
                 });
                 ui.add_space(6.0);
-                ui.label(
-                    RichText::new(format!("Fault: {}", crate::dtc::fart_text(d.art)))
-                        .size(13.0)
-                        .color(WARN),
-                );
-                let (u1, u2) = crate::dtc::ort_uw_ids(d.ort);
+                let legacy = [d.art];
+                let codes: &[u8] = if d.arts.is_empty() { &legacy } else { &d.arts };
+                for a in codes {
+                    ui.label(
+                        RichText::new(format!("Fault: {}", crate::dtc::fart_text(*a)))
+                            .size(13.0)
+                            .color(WARN),
+                    );
+                }
                 if !d.uw.is_empty() {
                     ui.add_space(6.0);
-                    egui::Grid::new(format!("dtc-uw-{}", i))
-                        .num_columns(2)
-                        .spacing([14.0, 4.0])
-                        .show(ui, |ui| {
-                            for (j, raw) in d.uw.iter().enumerate() {
-                                let id = if j == 0 { u1 } else { u2 };
-                                match crate::dtc::uw_info(id) {
-                                    Some(u) => {
-                                        ui.label(
-                                            RichText::new(u.name.trim()).size(12.0).color(MUTED),
-                                        );
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{:.2} {} (raw {})",
-                                                crate::dtc::uw_value(id, *raw),
-                                                u.unit,
-                                                raw
-                                            ))
-                                            .font(FontId::monospace(12.0))
-                                            .color(ACCENT),
-                                        );
-                                    }
-                                    None => {
-                                        ui.label(
-                                            RichText::new(format!("UW{}", j + 1))
-                                                .size(12.0)
-                                                .color(MUTED),
-                                        );
-                                        ui.label(
-                                            RichText::new(format!("0x{raw:04X}"))
-                                                .font(FontId::monospace(12.0))
-                                                .color(ACCENT),
-                                        );
-                                    }
-                                }
-                                ui.end_row();
-                            }
-                        });
+                    let hex: String = d.uw.iter().map(|v| format!("{v:04X} ")).collect();
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("freeze (BE u16)").size(12.0).color(MUTED));
+                        ui.label(
+                            RichText::new(hex.trim_end().to_string())
+                                .font(FontId::monospace(12.0))
+                                .color(ACCENT),
+                        );
+                    });
+                }
+                if !d.record.is_empty() {
+                    egui::CollapsingHeader::new(
+                        RichText::new(format!("Raw record ({} bytes)", d.record.len()))
+                            .size(12.0)
+                            .color(MUTED),
+                    )
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        let hex: String = d
+                            .record
+                            .iter()
+                            .map(|b| format!("{:02X} ", b))
+                            .collect();
+                        ui.label(
+                            RichText::new(hex.trim_end())
+                                .font(FontId::monospace(11.0))
+                                .color(MUTED),
+                        );
+                    });
                 }
                 if !d.shadow.is_empty() {
                     egui::CollapsingHeader::new(

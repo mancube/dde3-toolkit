@@ -7,10 +7,16 @@
 //!   FArtTexte        @ body 0x6cf69   ARTNR.ARTTEXT
 //!   FUmweltTexte     @ body 0x6df52   UWNR.UWTEXT.UW_EINH.UWF_A.UWF_B
 //!
-//! Fault-memory protocol (from the FS_* jobs in the same file):
-//!   start/count  `12 05 14 01`  -> `92 05 A0 <anz>`
-//!   entry n      `12 05 04 <n>` -> `92 05 A0 <ort> <art> <uw1:2> <uw2:2>`
-//!   clear        `12 04 05`     -> `92 04 A0`
+//! Fault-memory protocol (verified against real-car capture, HANDOVER §22):
+//!   count/tail   `12 05 14 01` -> `12 L A0 <anz> <rec 0..22>` (first),
+//!                then `12 L A0 <anz'> <rec 37..50> [<next rec 0..22>]`
+//!   entry        `12 05 04 00` -> `12 L A0 <pos> <rec 22..26>`
+//!   shadow       `12 05 04 01` -> `12 L A0 <pos> <rec 26..37>`
+//!   clear        `12 04 05`    -> `12 L A0`
+//!
+//! The 50-byte fault record: [0]=ORT, [1]=ART slot mask (bit i = slot A(i+1)),
+//! [2]=error frequency, [3..11]=freeze values (BE u16 pairs), [22..26]=entry
+//! chunk, [26..37]=shadow chunk, [37..50]=tail (next count reply).
 //!
 //! Freeze values: `value = A * raw + B` (raw is big-endian u16).
 
@@ -279,6 +285,30 @@ pub fn matrix_row(ort: u8) -> Option<&'static [u8; 16]> {
     MATRIX.iter().find(|(c, _)| *c == ort).map(|(_, v)| v)
 }
 
+/// FArt code of matrix slot `slot` (0-based = A1..A8) for the given ORT.
+///
+/// Each slot is a pair `(Ai_0, Ai_1)` in the 16-byte row. The reference tool
+/// displays the second byte (the Ai_1 column). Verified against the M47
+/// reference report: ORT 0x08, mask 0xC8 (bits 3,6,7) -> A4=0x32
+/// ("Gluehkerzen bzw. Gluehrelais defekt"), A7=0x05, A8=0x07.
+pub fn fart_slot(ort: u8, slot: usize) -> Option<u8> {
+    MATRIX.iter().find(|(c, _)| *c == ort).map(|(_, v)| v[slot * 2 + 1])
+}
+
+/// FArt codes of all slots selected by the record's ART mask byte
+/// (bit i of the mask = slot A(i+1) active), in slot order, zeros skipped.
+pub fn active_arts(ort: u8, mask: u8) -> Vec<u8> {
+    let mut out = Vec::new();
+    for slot in 0..8 {
+        if mask & (1 << slot) != 0 {
+            if let Some(code) = fart_slot(ort, slot).filter(|&c| c != 0) {
+                out.push(code);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +328,11 @@ mod tests {
         assert_eq!(uw.name, "Batteriespannung");
         assert!((uw_value(0x08, 148.0 as u16) - 14.78).abs() < 0.05);
         assert!(matrix_row(0x00).is_some());
+        // M47 reference report (actual error.txt): ORT 0x08, mask 0xC8
+        assert_eq!(active_arts(0x08, 0xC8), vec![0x32, 0x05, 0x07]);
+        assert_eq!(fart_text(0x32), "Gluehkerzen bzw. Gluehrelais defekt");
+        assert_eq!(fart_text(0x05), "Fehler momentan vorhanden");
+        assert_eq!(fart_text(0x07), "Fehler sporadisch");
         assert_eq!(ort_text(0x02), "unbekannter Fehlerort");
         assert_eq!(fart_text(0x91), "unbekannte Fehlerart");
     }

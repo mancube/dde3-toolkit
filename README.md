@@ -19,7 +19,13 @@ protocol, which was reverse-engineered from `10DDE30.prg` and
   reporting, and a post-write power-cycle modal
 - **DTCs (fault memory)** — read, freeze values, shadow values, text
   (ORT/FArt tables embedded in `DDE30DS0.prg`), DS2 and K-line clear
-- **Live data** — DDE3 MW service (measurement groups via ADF ids)
+- **Live data** — DDE3 MW service (measurement groups via ADF ids),
+  **batched into as few `0B 10` telegrams as the 0x80-byte DS2 cap allows**
+  (one telegram per normal set — the tested `MW_SELECT_LESEN_NORM` form,
+  `FINDINGS_baud_service_protocol.md` §2.2)
+- **Break-entered service protocol** — K-line entry implemented (`breakmode.rs`,
+  `break-probe`): UART break → 10.4 k handshake → 38.4 k; secondary command
+  opcodes pending a hardware capture (§4)
 - **Seed/key** — `12 08 90 42 4D 57 05 <Z>`, Z = seconds mod 46
 - **Checksum** — TDI V3.1 verify/correct (cal + code blocks)
 - **Protocol log** — every frame with timing, per-operation and continuous
@@ -34,7 +40,7 @@ protocol, which was reverse-engineered from `10DDE30.prg` and
 |---|---|---|
 | ECU address | `0x12` | xsend templates start with 0x12 |
 | Wire frame | `<DS2 payload> <XOR>` | CONFIRMED, passive capture (HANDOVER §17) |
-| Default baud | 9600 8E1 | xsetpar `80 25`; DDE3 K-line stays at 9600 |
+| Default baud | 9600 8E1 | xsetpar `80 25`; DS2 link stays at 9600 (see FINDINGS §1 — a 3-value S0 baud ladder: 9600 / ~10.4 k / ~38.4 k, the last two only on the break-entered service protocol) |
 | Flash base | `0x00000` | DDE3 reads from address 0 |
 | Flash size | 256 KB (0x40000) | HANDOVER §14 |
 | Calibration | 0x38000, 32 KB | checksum.rs |
@@ -65,7 +71,7 @@ SB = 0xA0 (OK), 0xA1 (busy, retried), 0xFF (NACK).
 | FLASH_LOESCHEN | `12 09 07 06 <A> <count>` | Erase flash |
 | FLASH_SCHREIBEN | `12 09 07 02 <A> <data…>` | 128-byte block write |
 | FLASH_SCHREIBEN_ENDE | `12 09 07 0F <A> <00>` | End write |
-| MW live data | `12 05 0B 10 <id_hi> <id_lo>` | ADF id (e.g. 0x0F65 battery) |
+| MW live data | `12 <LEN> 0B 10 <id…>` | Batched: `LEN = 5 + 2·n` (n ids in one telegram, tested logger form) |
 
 ## DTC tables
 
@@ -76,6 +82,21 @@ regenerate with:
 
 ```sh
 python3 tools/gen_dtc_rs.py --prg /path/to/DDE30DS0.prg
+```
+
+## Live data / value logger variables
+
+The live-data and value-logger variable list is the **ADF table the ECU
+actually exposes**, generated in `src/live.rs` from the tool32 ADF export of
+`10DDE30.prg` (`tool32_edc15m_export.csv`) — not a hand-curated list. Each
+row carries the ADF id (last two bytes of the `12 05 0B 10 <hi> <lo>`
+telegram), the exported English name, unit, and `FACT_A`/`FACT_B` scaling.
+Group labels are derived from the ADF `NAME` prefix; a small set of commonly
+watched values (rpm, coolant, battery, pedal, boost) is on by default.
+Regenerate with:
+
+```sh
+python3 tools/gen_live_rs.py [path/to/tool32_edc15m_export.csv]
 ```
 
 ## Layout
@@ -91,6 +112,7 @@ dde3-toolkit/
 │   ├── protocol.rs      # DDE3 frame codec, Kline, all services
 │   ├── checksum.rs      # TDI V3.1 flash checksum
 │   ├── dtc.rs           # GENERATED DTC tables + text/scaling helpers
+│   ├── live.rs          # GENERATED live-data/value-logger ADF table
 │   ├── sim.rs           # in-process ECU simulator (flash + fault memory)
 │   ├── bench.rs         # headless bench runner
 │   └── app.rs           # egui GUI (8 tabs)
@@ -101,6 +123,7 @@ dde3-toolkit/
 │   ├── extract_ds_frames.py
 │   ├── disasm.py        # full EDIC15/EDIABAS disassembler
 │   ├── gen_dtc_rs.py    # regenerates src/dtc.rs from DDE30DS0.prg
+│   ├── gen_live_rs.py   # regenerates src/live.rs from the ADF CSV export
 │   └── monitor.py       # passive wire monitor (UART-LPT adapter)
 └── analysis/
     ├── frames.md        # extracted wire frames per job
@@ -155,6 +178,11 @@ dde3-toolkit checksum flash.bin --port /dev/ttyUSB1
 # Full write (requires typing WRITE to confirm)
 dde3-toolkit write flash.bin --port /dev/ttyUSB1
 dde3-toolkit write-cal cal.bin --port /dev/ttyUSB1
+
+# Break-entered service protocol probe (needs a prior DS2 unlock)
+dde3-toolkit break-probe --port /dev/ttyUSB1
+# take the 38.4 k path
+dde3-toolkit break-probe --port /dev/ttyUSB1 --fast
 
 # Headless bench
 dde3-toolkit bench --sim --read --out /tmp/full.bin
