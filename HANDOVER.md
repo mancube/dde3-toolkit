@@ -60,9 +60,9 @@ removed, live TX pacing 3→1 ms/byte (flash-write pacing untouched), and the
 protocol log is now timestamped (`[+Δs]` gap per line). Real-car baseline was
 2.50 Hz (steady 399 ms/cycle, 5 ids) with ~250 ms unexplained — **next live
 capture must read the TX→RX gap** to see whether the ECU itself is the
-bottleneck. Expected ≥3.2 Hz after this change; if ECU latency dominates,
-next levers are listening to the ECU's periodic live block and Tier 2
-(38.4 k break channel).
+bottleneck. Expected ≥3.2 Hz after this change; if ECU latency dominates, the only
+remaining lever is Tier 2 (38.4 k break channel) — the ECU transmits
+nothing spontaneously (2026-11-11 passive capture), so no listen mode.
 
 ### Remaining open items (after the above)
 

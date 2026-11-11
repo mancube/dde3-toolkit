@@ -172,9 +172,11 @@ car capture shows the TX→RX gap (ECU latency) vs. TX pacing vs. silence
 **Expected:** ~85 ms/cycle saved → ~3.2 Hz if the ECU really takes ~250 ms
 per reply; up to ~15–20 Hz if the missing time was tester-side after all.
 **Next capture to read:** TX→`RX` gap on the 5-id poll. If ECU latency is
-indeed ~250 ms, polling is ECU-capped and the remaining levers are the
-ECU's own periodic 16-byte live block (listen, don't poll — check its
-period in the timestamped log) and Tier 2 (38.4 k break-channel RAM reads).
+indeed ~250 ms, polling is ECU-capped and the only remaining lever is
+Tier 2 (38.4 k break-channel RAM reads). A "listen, don't poll" mode is
+dead: the 2026-11-11 passive capture proved the ECU transmits nothing
+spontaneously (key-on and engine running; one short event at the key
+turn, not saved) — the 16-byte block is simply the 5-id reply.
 
 ## 5. Known blind spots (honest list)
 

@@ -102,11 +102,23 @@ parse against the real car.
    (The earlier session had misread a truncated bare run as the reply.)
    `Kline::identify()` strips the envelope; `ident_valid()` checks the bare
    string (4–48 printable chars), `parse_ident()` splits it into fields.
-2. **The ECU emits a periodic ~16-byte live block** on the K-line that
-   interleaves with request/reply: `12 10 A0 10 00 00 00 00 00 03 DE 0B 26 02
-   4A` (DE/DF and 25/26 cycle each tick). This is the ECU's own polling of its
-   last-selected live set, NOT a reply to us. It must be skipped when selecting
-   the small fault/battery replies.
+2. **A ~16-byte live block `12 10 A0 10 00 00 00 00 00 03 DE 0B 26 02 4A`
+   was observed** (DE/DF and 25/26 cycling between sightings). **Unverified
+   whether it is spontaneous or merely the 5-id MW reply** — in
+   `dde3newlog.txt` every 16-byte frame directly followed our own `0B 10`
+   request (no SKIP lines, no unpaired RX), so the "ECU's own periodic
+   broadcast" reading is a hypothesis, not a capture fact. It must be
+   distinguishable from the small fault/battery replies (it is, by `len`),
+   which is why the length/`is_not_live_broadcast` filters exist.
+
+   **Settled 2026-11-11 by a real-car passive `capture` (ECU key-on and
+   engine running): the ECU transmits NOTHING spontaneously** — no periodic
+   live block; only one short event at the key turn (not saved). The DS2
+   link is strictly request/response. Consequences: a "listen, don't poll"
+   logger does not exist at 9600, the 16-byte block is the 5-id reply, and
+   the only speed levers are tester-side pacing (Tier 0) and the 38.4 k break
+   channel (Tier 2). If the key-turn event ever matters, re-run `capture`
+   with `--out` while cycling the key.
 3. **MW live reply** to `12 0F 0B 10 <5 ids>`: `12 10 A0 10 00 <u16 BE per id>
    ` — for ids `[0F83 0F10 0F40 0F00 0F65]` the values were `[0, 0, 990, 2854,
    586]` = PWG 0, N 0, boost 990 hPa, WTF 2854 (→12.3 °C), batt 586 (→11.9 V)
