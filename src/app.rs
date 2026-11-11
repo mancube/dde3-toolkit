@@ -350,12 +350,15 @@ impl App {
         ];
         self.battery_v = Some(13.9);
         self.sync_comp_edits();
+        // Demo log lines follow the verified real-car wire convention
+        // (docs/wire-protocol.md): the ECU replies with its own address
+        // 0x12, status byte at [2]; IDENT answers with a bare ASCII string.
         self.logs = vec![
             "DDE3 Toolkit started (demo mode)".into(),
             "TX 12 04 00 16".into(),
-            "RX 92 04 A0 44 44 45 33 2E 30 20 46 55 45 52 20 4D 34 37".into(),
+            "RX 44 44 45 33 2E 30 20 46 55 45 52 20 4D 34 37".into(),
             "TX 12 05 14 01 31".into(),
-            "RX 92 05 A0 03".into(),
+            "RX 12 05 A0 03".into(),
         ];
     }
 

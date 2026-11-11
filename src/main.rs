@@ -226,10 +226,10 @@ fn run() -> Result<()> {
                 let count = 0x80u32.min(IMAGE_SIZE as u32 - addr) as u8;
                 let req = crate::protocol::frame_flash_read(addr, count);
                 let r = k.request(&req, Duration::from_secs(5))?;
-                // Reply layout: 92 <len> A0 <data...> — status byte at [2],
-                // data from [3] (decompiled FLASH_LESEN: SB at S1[2],
-                // data copied from S1[3]).
-                if r.first() != Some(&0x92) || r.get(2) != Some(&0xA0) {
+                // Reply layout: 12 <len> A0 <data...> — the ECU answers
+                // with its OWN address 0x12 (2026-11-09 real-car capture),
+                // status byte at [2], data from [3].
+                if r.first() != Some(&protocol::ECU_ADDR) || r.get(2) != Some(&0xA0) {
                     anyhow::bail!(
                         "unexpected flash read reply at 0x{addr:06X}: {}",
                         protocol::hex(&r)
@@ -269,7 +269,7 @@ fn run() -> Result<()> {
                 let count = 0x80u32.min(cal_len as u32 - (addr - cal_start)) as u8;
                 let req = crate::protocol::frame_flash_read(addr, count);
                 let r = k.request(&req, Duration::from_secs(5))?;
-                if r.first() != Some(&0x92) || r.get(2) != Some(&0xA0) {
+                if r.first() != Some(&protocol::ECU_ADDR) || r.get(2) != Some(&0xA0) {
                     anyhow::bail!(
                         "unexpected flash read reply at 0x{addr:06X}: {}",
                         protocol::hex(&r)
