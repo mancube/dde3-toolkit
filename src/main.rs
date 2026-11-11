@@ -209,7 +209,17 @@ fn run() -> Result<()> {
                 k.set_sim(crate::sim::SimEcu::new());
             }
             let r = k.identify()?;
-            println!("IDENT reply: {}", protocol::hex(&r));
+            match protocol::parse_ident(&r) {
+                Some(i) => {
+                    println!("IDENT string: {}", String::from_utf8_lossy(&r));
+                    println!("  software:  {}", i.software);
+                    println!("  ECU code:  {}", protocol::format_pair(&i.ecu_code));
+                    println!("  SW date:   {} (week/year)", protocol::format_pair(&i.date));
+                    println!("  HW number: {}", i.hw_number);
+                    println!("  G code:    {}", i.g_code);
+                }
+                None => println!("IDENT reply: {}", protocol::hex(&r)),
+            }
             Ok(())
         }
         "read" => {

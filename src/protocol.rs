@@ -87,9 +87,11 @@ pub fn build_frame(payload: &[u8]) -> Vec<u8> {
 /// ```
 ///
 /// MW live data (`0B 10`) replies `12 <len> A0 10 00 <u16 BE per id ...>`
-/// (data from offset 5); IDENT replies with a bare ASCII string. The ECU also
-/// emits a periodic ~16-byte live block (`12 10 A0 10 …`) on the K-line that
-/// interleaves with request/reply — see [`is_not_live_broadcast`].
+/// (data from offset 5); IDENT replies `12 <len> A0 <ascii ident string>` —
+/// same envelope as everything else (2026-11-10 real-car capture: `12 2E A0
+/// 37 37 38 36 …`, see [`Kline::identify`]). The ECU also emits a periodic
+/// ~16-byte live block (`12 10 A0 10 …`) on the K-line that interleaves with
+/// request/reply — see [`is_not_live_broadcast`].
 /// [`request`] treats byte [2] as the JOBRESULT status byte when it is a
 /// known status (A0/A1/A2/B0–B2/FF/00): OKAY → Ok, BUSY → retry, else NRC.
 /// Any other byte at [2] means a data reply and is returned as-is.
@@ -886,10 +888,17 @@ impl Kline {
         }
     }
 
-    /// Send `12 04 00` ident and return the reply payload.
+    /// Send `12 04 00` ident and return the ident **string** (envelope
+    /// stripped, so the result is plain ASCII — see [`ident_valid`],
+    /// [`parse_ident`]).
+    ///
+    /// The real ECU answers with the normal `12 <len> A0 <ascii…>` envelope
+    /// (e.g. the captured `12 2E A0 37 37 38 36 …`); the in-process sim used
+    /// to answer with a bare string, which is still accepted here for
+    /// backwards compatibility.
     pub fn identify(&mut self) -> Result<Vec<u8>> {
         let r = self.request(&[0x12, 0x04, 0x00], Duration::from_millis(500))?;
-        Ok(r)
+        Ok(strip_reply_envelope(&r).to_vec())
     }
 
     /// Best-effort return to the 9600 application link. Returns true when the ECU
@@ -907,10 +916,10 @@ impl Kline {
         self.pending.clear();
         let start = Instant::now();
         while start.elapsed() < timeout {
-            if matches!(
-                self.request(&[0x12, 0x04, 0x00], Duration::from_millis(800)),
-                Ok(r) if ident_valid(&r)
-            ) {
+            // `identify()` strips the reply envelope; the raw `request()`
+            // result still carries `12 <len> A0` and would never pass
+            // `ident_valid()` (the 0x12 is not printable).
+            if matches!(self.identify(), Ok(r) if ident_valid(&r)) {
                 return true;
             }
             thread::sleep(Duration::from_millis(500));
@@ -1189,15 +1198,80 @@ impl Kline {
     }
 }
 
-/// True when `reply` is a plausible IDENT answer. The real M47 ECU answers
-/// the IDENT (`12 04 00`) with a bare ASCII string (e.g. `8875201`,
-/// `DDE 3.0 fuer M47`) — no `0x12` envelope, no trailing XOR in the payload
-/// we receive — so accept a short string of printable characters.
+/// Strip the `12 <len> <SB>` reply envelope from a reply payload when present.
+/// Only [`Kline::identify`] uses this: every other caller keeps the 3-byte
+/// header and slices data from offset 3. A bare-ASCII ident string can never
+/// collide with the check, since 0x12 is not printable.
+fn strip_reply_envelope(r: &[u8]) -> &[u8] {
+    if r.len() > 3 && r[0] == ECU_ADDR {
+        &r[3..]
+    } else {
+        r
+    }
+}
+
+/// True when `reply` is a plausible IDENT **string** — i.e. the envelope-free
+/// payload as returned by [`Kline::identify`]. The real M47 ECU answers the
+/// IDENT (`12 04 00`) with `12 <len> A0 <ascii>` where the string is
+/// ~33+ characters of digits and letters (version, codes, Bosch part number —
+/// see [`parse_ident`]); accept a printable string and reject envelope bytes.
 pub fn ident_valid(reply: &[u8]) -> bool {
     (4..=48).contains(&reply.len())
         && reply
             .iter()
             .all(|b| matches!(*b, 0x20..=0x7E | 0x09))
+}
+
+/// Parsed fields of the IDENT string, as confirmed against the live M47 ECU
+/// (2026-11-10 capture, 43-char reply zero-padded):
+///
+/// ```text
+///  1–7   software version        "7786887"
+///  8–11  ECU code (BMW docs)    "5201"  → 52/01
+/// 12–15  unknown (not parsed)   "1240"
+/// 16–19  software date          "4801"  → week 48 / 2001
+/// 20–29  Bosch hardware number  "0281001445"
+/// 30–33  G code                 "G521"
+/// 34–…  zero padding
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentInfo {
+    /// Software version, characters 1–7 (e.g. `7786887`).
+    pub software: String,
+    /// ECU code from the BMW docs, characters 8–11 (e.g. `5201` → 52/01).
+    pub ecu_code: String,
+    /// Software release date, characters 16–19 (e.g. `4801` → week 48 / 2001).
+    pub date: String,
+    /// Bosch hardware number, characters 20–29 (e.g. `0281001445`).
+    pub hw_number: String,
+    /// G code, characters 30–33 (e.g. `G521`).
+    pub g_code: String,
+}
+
+/// Parse an IDENT payload (bare ASCII, envelope stripped) into its fields.
+/// Returns `None` when the string is too short or non-ASCII — e.g. an
+/// erased/corrupt flash typically answers with a truncated or garbled string.
+pub fn parse_ident(reply: &[u8]) -> Option<IdentInfo> {
+    if reply.len() < 33 {
+        return None;
+    }
+    let s = std::str::from_utf8(reply).ok()?;
+    Some(IdentInfo {
+        software: s[0..7].to_string(),
+        ecu_code: s[7..11].to_string(),
+        date: s[15..19].to_string(),
+        hw_number: s[19..29].to_string(),
+        g_code: s[29..33].to_string(),
+    })
+}
+
+/// Format a 4-char ident pair for display: `"5201"` → `"52/01"`.
+pub fn format_pair(field: &str) -> String {
+    if field.len() == 4 {
+        format!("{}/{}", &field[..2], &field[2..])
+    } else {
+        field.to_string()
+    }
 }
 
 /// True when `f` is NOT the ECU's periodic MW live broadcast block
@@ -1332,19 +1406,31 @@ mod tests {
     }
 
     #[test]
-    fn real_car_ident_reply_is_raw_string() {
-        // Wire: echo of `12 04 00` + the bare ASCII ident "8875201" with its
-        // trailing XOR (0x31). The parser must return the 7-char string.
-        let wire: Vec<u8> = vec![
-            0x12, 0x04, 0x00, 0x16, // echo
-            b'8', b'8', b'7', b'5', b'2', b'0', b'1', 0x31, // "8875201" + XOR
-        ];
+    fn real_car_ident_reply_is_envelope_string() {
+        // Wire (2026-11-10 capture, dde3-toolkit/captures/dde3newlog.txt):
+        // the ECU wraps the ident string in the normal envelope,
+        // `12 2E A0 37 37 38 36 …` — status A0, ASCII data from [3].
+        let s = b"77868875201124048010281001445G5210000000000"; // 43 chars
+        assert_eq!(s.len(), 43, "len byte 0x2E = 3 header + 43 data");
+        let mut wire: Vec<u8> = vec![0x12, 0x04, 0x00, 0x16]; // echo
+        wire.extend_from_slice(&[0x12, 0x2E, 0xA0]);
+        wire.extend_from_slice(s);
+        wire.push(xor_cs(&wire));
         let mut p = FrameParser::default();
         p.feed(&wire);
         let _echo = p.take_frame().expect("echo");
         let ident = p.take_frame().expect("ident reply");
-        assert_eq!(&ident.payload[..], b"8875201");
-        assert!(ident_valid(&ident.payload));
+        assert_eq!(&ident.payload[..3], &[0x12, 0x2E, 0xA0], "envelope form");
+        // identify() contract: envelope stripped, bare string remains.
+        let stripped = strip_reply_envelope(&ident.payload);
+        assert_eq!(stripped, s);
+        assert!(ident_valid(stripped));
+        let info = parse_ident(stripped).expect("parses");
+        assert_eq!(info.software, "7786887");
+        assert_eq!(info.ecu_code, "5201");
+        assert_eq!(info.date, "4801");
+        assert_eq!(info.hw_number, "0281001445");
+        assert_eq!(info.g_code, "G521");
     }
 
     #[test]
@@ -1353,6 +1439,26 @@ mod tests {
         assert!(ident_valid(b"DDE 3.0 fuer M47"));
         assert!(!ident_valid(&[]), "empty rejected");
         assert!(!ident_valid(&[0x12, 0x04, 0x00]), "envelope is not a string");
+        // Envelope-prefixed reply must NOT validate — this is what used to
+        // trigger the spurious "ident looks erased/corrupt" warning.
+        let enveloped: Vec<u8> = vec![0x12, 0x2E, 0xA0, b'7', b'7', b'8', b'6'];
+        assert!(!ident_valid(&enveloped));
+        assert!(ident_valid(strip_reply_envelope(&enveloped)));
+    }
+
+    #[test]
+    fn parse_ident_fields() {
+        let s = b"77868875201124048010281001445G5210000000000";
+        let i = parse_ident(s).expect("parses the captured string");
+        assert_eq!(i.software, "7786887");
+        assert_eq!(i.ecu_code, "5201");
+        assert_eq!(i.date, "4801");
+        assert_eq!(i.hw_number, "0281001445");
+        assert_eq!(i.g_code, "G521");
+        assert!(parse_ident(b"8875201").is_none(), "short string not parseable");
+        assert!(parse_ident(&[0xFF; 40]).is_none(), "non-ASCII not parseable");
+        assert_eq!(format_pair("5201"), "52/01");
+        assert_eq!(format_pair("4801"), "48/01");
     }
 
     #[test]

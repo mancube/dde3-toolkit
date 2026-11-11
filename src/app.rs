@@ -104,8 +104,10 @@ impl Tab {
 
 #[derive(Clone)]
 struct EcuInfo {
+    /// Parsed IDENT string (software version, ECU code, date, Bosch HW
+    /// number, G code). `None` when the ident looked erased/corrupt.
+    ident: Option<protocol::IdentInfo>,
     hardware: String,
-    software: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -316,9 +318,17 @@ impl App {
     fn demo(&mut self) {
         self.connected = true;
         self.status = "Demo mode".into();
+        // Values from the 2026-11-10 real-car capture so the UI renders as
+        // it does with hardware.
         self.ecu = Some(EcuInfo {
+            ident: Some(protocol::IdentInfo {
+                software: "7786887".into(),
+                ecu_code: "5201".into(),
+                date: "4801".into(),
+                hw_number: "0281001445".into(),
+                g_code: "G521".into(),
+            }),
             hardware: "DDE3.0 SIM".into(),
-            software: "DDE 3.0 fuer M47 (demo)".into(),
         });
         self.port = "/dev/ttyUSB1".into();
         let mut img = vec![0u8; IMAGE_SIZE];
@@ -571,15 +581,20 @@ impl App {
                     let ident = k.identify();
                     match ident {
                         Ok(r) => {
-                            if !protocol::ident_valid(&r) {
+                            // identify() already stripped the `12 <len> A0`
+                            // envelope, so the validity check runs on the bare
+                            // string — it used to run on the envelope and fired
+                            // the warning on every healthy connect.
+                            let ident = protocol::parse_ident(&r);
+                            if ident.is_none() {
                                 let _ = tx.send(Msg::Log(
                                     "WARNING: ident looks erased/corrupt; the application may be incomplete".into(),
                                 ));
                             }
-                            let software = k
-                                .read_app(0x7BFB0, 10)
-                                .map(|b| ascii(&b))
-                                .unwrap_or_else(|_| "unknown".into());
+                            // Checksum-status link probe; its payload is no
+                            // longer used for the SW label — the ident string
+                            // is the source of truth.
+                            let _ = k.read_app(0x7BFB0, 10);
                             snapshot_battery(&mut k, &tx);
                             let logs = k.take_logs();
                             *guard = Some(k);
@@ -587,8 +602,8 @@ impl App {
                                 let _ = tx.send(Msg::Log(l));
                             }
                             let _ = tx.send(Msg::Connected(EcuInfo {
+                                ident,
                                 hardware: "DDE3.0".into(),
-                                software,
                             }));
                         }
                         Err(e) => {
@@ -1634,16 +1649,24 @@ impl App {
                     ui.label(RichText::new("EDC15 / DDE3.0").size(11.0).color(MUTED));
                     ui.separator();
                     if let Some(ecu) = &self.ecu {
-                        ui.label(
-                            RichText::new(format!("SW {}", ecu.software))
-                                .size(12.0)
-                                .color(ACCENT),
-                        );
-                        ui.label(
-                            RichText::new(format!("HW {}", ecu.hardware))
-                                .size(10.0)
-                                .color(MUTED),
-                        );
+                        if let Some(i) = &ecu.ident {
+                            ui.label(
+                                RichText::new(format!("SW {}", i.software))
+                                    .size(12.0)
+                                    .color(ACCENT),
+                            );
+                            ui.label(
+                                RichText::new(format!("HW {}", i.hw_number))
+                                    .size(10.0)
+                                    .color(MUTED),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new(format!("HW {}", ecu.hardware))
+                                    .size(10.0)
+                                    .color(MUTED),
+                            );
+                        }
                     }
                 });
             });
@@ -1729,9 +1752,34 @@ impl App {
                 .num_columns(2)
                 .spacing([12.0, 5.0])
                 .show(ui, |ui| {
-                    ui.label(RichText::new("Software").size(11.0).color(MUTED));
-                    ui.label(RichText::new(&ecu.software).size(12.0).color(TEXT));
-                    ui.end_row();
+                    if let Some(i) = &ecu.ident {
+                        ui.label(RichText::new("Software").size(11.0).color(MUTED));
+                        ui.label(RichText::new(&i.software).size(12.0).color(TEXT));
+                        ui.end_row();
+                        ui.label(RichText::new("ECU code").size(11.0).color(MUTED));
+                        ui.label(
+                            RichText::new(protocol::format_pair(&i.ecu_code))
+                                .size(12.0)
+                                .color(TEXT),
+                        );
+                        ui.end_row();
+                        ui.label(RichText::new("SW date").size(11.0).color(MUTED));
+                        ui.label(
+                            RichText::new(format!(
+                                "{} (week/yr)",
+                                protocol::format_pair(&i.date)
+                            ))
+                            .size(12.0)
+                            .color(TEXT),
+                        );
+                        ui.end_row();
+                        ui.label(RichText::new("HW number").size(11.0).color(MUTED));
+                        ui.label(RichText::new(&i.hw_number).size(12.0).color(TEXT));
+                        ui.end_row();
+                        ui.label(RichText::new("G code").size(11.0).color(MUTED));
+                        ui.label(RichText::new(&i.g_code).size(12.0).color(TEXT));
+                        ui.end_row();
+                    }
                     ui.label(RichText::new("Hardware").size(11.0).color(MUTED));
                     ui.label(RichText::new(&ecu.hardware).size(12.0).color(TEXT));
                     ui.end_row();
@@ -3137,19 +3185,6 @@ fn report_error(tx: &Sender<Msg>, prefix: &str, err: &anyhow::Error) {
         let _ = tx.send(Msg::LinkLost(text));
     } else {
         let _ = tx.send(Msg::Error(text));
-    }
-}
-
-fn ascii(bytes: &[u8]) -> String {
-    let s: String = bytes
-        .iter()
-        .take_while(|b| **b >= 0x20 && **b != 0xC3 && **b != 0xFF)
-        .map(|b| *b as char)
-        .collect();
-    if s.is_empty() {
-        hex(bytes)
-    } else {
-        s
     }
 }
 

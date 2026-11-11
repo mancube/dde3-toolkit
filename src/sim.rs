@@ -18,7 +18,9 @@
 //!
 //! `SB` is the JOBRESULT status byte (0xA0 OKAY, 0xA1 BUSY, 0xFF NACK, …).
 //! MW live data (`0B 10`) replies `12 <len> A0 10 00 <u16 BE per id ...>`
-//! (data from offset 5), and IDENT replies with a bare ASCII string.
+//! (data from offset 5), and IDENT replies `12 <len> A0 <ascii string>` —
+//! the normal envelope, confirmed on the live ECU (2026-11-10 capture:
+//! `12 2E A0 37 37 38 36 …` = `7786887 5201 … 0281001445 G521 …`).
 //! The ECU also emits a periodic ~16-byte live block on the K-line; the
 //! toolkit's `is_not_live_broadcast` skips it for the small fault/battery
 //! replies.
@@ -91,9 +93,14 @@ impl SimEcu {
         let len_echo = p[1];
         let sid = p[2];
         match sid {
-            // IDENT: `12 04 00` — the real ECU answers with a bare ASCII
-            // string (no 0x12 envelope), e.g. `8875201` / `DDE 3.0 fuer M47`.
-            0x00 => b"8875201".to_vec(),
+            // IDENT: `12 04 00` — the real ECU wraps the ident string in the
+            // normal envelope (2026-11-10 capture: `12 2E A0 37 37 38 36 …`).
+            0x00 => {
+                let s = b"77868875201124048010281001445G5210000000000"; // 43 chars
+                let mut r = vec![0x12, 3u8 + s.len() as u8, SB_OK];
+                r.extend_from_slice(s);
+                r
+            }
             // UPROG_EIN: `12 04 0D` — enter programming mode.
             0x0D => {
                 self.in_prog = true;
@@ -341,9 +348,13 @@ mod tests {
     #[test]
     fn ident_and_status() {
         let mut s = SimEcu::new();
-        // IDENT replies with a bare ASCII string (no 0x12 envelope).
+        // IDENT replies with the ident string in the normal envelope
+        // (matches the live ECU: `12 2E A0 37 37 38 36 …`).
         let r = s.handle(&[0x12, 0x04, 0x00]);
-        assert_eq!(&r[..], b"8875201");
+        assert_eq!(&r[..3], &[0x12, 0x2E, 0xA0]);
+        let info = crate::protocol::parse_ident(&r[3..]).expect("sim ident parses");
+        assert_eq!(info.software, "7786887");
+        assert_eq!(info.hw_number, "0281001445");
         let r = s.handle(&[0x12, 0x04, 0x9F]);
         assert_eq!(&r[..3], &[0x12, 0x04, 0xA0]);
         let r = s.handle(&[0x12, 0x04, 0x0D]);

@@ -94,9 +94,14 @@ parse against the real car.
 
 **Other real-wire facts discovered from the same capture:**
 
-1. **IDENT is a bare ASCII string**, not a `12 …` envelope. `TX 12 04 00 16`
-   → `RX 38 38 37 35 32 30 31` = `"8875201"` (XOR-terminated on the wire).
-   `ident_valid()` now accepts a 4–48 byte printable string.
+1. **IDENT replies in the normal envelope** with the ident string as data:
+   `TX 12 04 00 16` → `RX 12 2E A0 37 37 38 36 …` (2026-11-10 capture,
+   `captures/dde3newlog.txt`) — status A0, ASCII string from [3], 43 chars,
+   zero-padded: `7786887 5201 1240 4801 0281001445 G521 00…`
+   (software version / ECU code / ? / week-year / Bosch HW number / G code).
+   (The earlier session had misread a truncated bare run as the reply.)
+   `Kline::identify()` strips the envelope; `ident_valid()` checks the bare
+   string (4–48 printable chars), `parse_ident()` splits it into fields.
 2. **The ECU emits a periodic ~16-byte live block** on the K-line that
    interleaves with request/reply: `12 10 A0 10 00 00 00 00 00 03 DE 0B 26 02
    4A` (DE/DF and 25/26 cycle each tick). This is the ECU's own polling of its

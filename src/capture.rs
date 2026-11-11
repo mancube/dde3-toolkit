@@ -17,9 +17,10 @@
 //!   shown is the full wire frame, payload + XOR). Framing uses the same
 //!   shortest-XOR-prefix / 0x12-anchor semantics as
 //!   [`crate::protocol::FrameParser`].
-//! * `RAW` — bytes that never formed a complete frame: line noise, truncated
-//!   frames, and bare-ASCII replies (e.g. the IDENT string, which carries no
-//!   0x12 anchor). Kept verbatim so nothing is lost.
+//! * `RAW` — bytes that never formed a complete frame: line noise and
+//!   truncated frames. Kept verbatim so nothing is lost. (The IDENT reply is
+//!   NOT one of these — it arrives in the normal `12 <len> A0 <ascii>`
+//!   envelope like every other service.)
 //!
 //! Service names come from the frame catalog (HANDOVER.md §14–15); the
 //! leading `12 <len> <sid> [<sub>]` prefix is matched on (sid, sub).
@@ -527,8 +528,10 @@ mod tests {
     }
 
     #[test]
-    fn bare_ascii_reply_lands_in_raw() {
-        // The IDENT reply is a bare ASCII string — no 0x12 anchor.
+    fn unanchored_ascii_lands_in_raw() {
+        // Unanchored ASCII bytes (no 0x12 start) are kept as RAW. The real
+        // IDENT reply does not do this (it is enveloped, see protocol.rs) —
+        // this just pins the framer's verbatim RAW behaviour for such bytes.
         let ident = b"8875201";
         let mut wire = ident.to_vec();
         wire.push(crate::protocol::xor_cs(&ident[..]));
