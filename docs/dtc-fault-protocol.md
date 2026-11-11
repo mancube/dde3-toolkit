@@ -67,7 +67,7 @@ after the entry/shadow pair, reply carries the record tail and, when more
 faults remain, the next fault's 22-byte header inline). **Pending one real-car
 confirmation** — the wire log (`dde3newlog.txt`) will show it on the next run.
 
-### 50-byte fault record layout (matches `actual error.txt` M47 reference)
+### 50-byte fault record layout (matches `analysis/actual error.txt` M47 reference)
 
 | Off | Len | Field |
 |-----|-----|-------|
@@ -79,7 +79,7 @@ confirmation** — the wire log (`dde3newlog.txt`) will show it on the next run.
 | 26  | 11  | shadow chunk (SHADOWFEHLER freeze data) |
 | 37  | 13  | tail (counters / checksum tail) |
 
-Reference (M47, `actual error.txt`): `08 C8 3C 00 38 9C E3 00 37 9D DE C4 C1
+Reference (M47, `analysis/actual error.txt`): `08 C8 3C 00 38 9C E3 00 37 9D DE C4 C1
 04 00 48 00 99 03 00 76 DC 5B 03 4A 00 76 D1 7D 00 76 DC 5A 00 34 32 33 32 34
 00 30 21 00 00 00 31 C5 00 00 22` → ORT 0x08 Gluehanlage, mask 0xC8 → bits
 3,6,7 → FARTMATRIX[0x08] slots A4/A7/A8 = **0x32 "Gluehkerzen bzw.

@@ -46,6 +46,43 @@ cargo build --release
 # → target/release/dde3-toolkit
 ```
 
+## Releases
+
+Prebuilt binaries for Linux and Windows live in [`dist/`](dist) (committed to
+git, tagged `vX.Y.Z`), each with a `.sha256` file:
+
+- `dist/dde3-toolkit-linux-x86_64`
+- `dist/dde3-toolkit-windows-x86_64.exe`
+
+To install a release, check out the tag and verify the binary:
+
+```sh
+git clone https://git.nas.lan/ikac/dde3-toolkit.git
+cd dde3-toolkit && git checkout v0.2.0
+cd dist && sha256sum -c dde3-toolkit-*.sha256
+```
+
+To cut a new release (bumps `Cargo.toml`, builds both targets, updates
+`dist/`, commits, tags and pushes):
+
+```sh
+scripts/release.sh 0.3.0
+```
+
+## Windows build
+
+Cross-compiled from Linux with `cargo-xwin` and a static CRT (same recipe as
+dde4-toolkit):
+
+```sh
+rustup target add x86_64-pc-windows-msvc
+cargo install cargo-xwin --locked
+RUSTFLAGS="-C target-feature=+crt-static" \
+  cargo xwin build --release --target x86_64-pc-windows-msvc
+```
+
+On Windows use a COM port, e.g. `dde3-toolkit.exe --port COM3`.
+
 ## Quick start (no hardware)
 
 ```sh

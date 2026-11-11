@@ -47,7 +47,7 @@ One real-car confirmation is still pending. Steps:
    0x08) + ART texts "Gluehkerzen bzw. Gluehrelais defekt" /
    "Fehler momentan vorhanden" / "Fehler sporadisch" — **not**
    "Mengensteller".
-2. Check the wire log (`dde3newlog.txt`) for the **step-4 tail-count reply
+2. Check the wire log (`captures/dde3newlog.txt`) for the **step-4 tail-count reply
    shape** (`12 05 14 01` again → `<anz'> <rec 37..50> [<next header>]`).
    If it differs from the table in `docs/dtc-fault-protocol.md`, adjust only
    the tail slice in `read_dtcs()` — the rest of the pipeline is

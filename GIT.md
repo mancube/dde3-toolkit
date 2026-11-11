@@ -56,6 +56,20 @@ docs: README rewrite + HANDOVER §18 (2026-11-11 status)
    know, update `HANDOVER.md` (current status + "task at hand") **in the
    same commit**.
 
+## Releases
+
+Releases are **git-tagged binary bundles in `dist/`**, not CI artifacts:
+
+1. `scripts/release.sh <version>` does everything: bumps the `Cargo.toml`
+   version, builds the Linux and Windows release binaries into `dist/` with
+   `.sha256` files, commits `dist/` + `Cargo.toml`, tags `v<version>` and
+   pushes branch + tag.
+2. Release commit message is always `release: v<version>` — the changes
+   themselves are committed separately beforehand, per the rules above.
+3. Never hand-edit files in `dist/`; only the release script touches them.
+4. Prebuilt binaries consumers get by checking out the tag — see the
+   "Releases" section of `README.md`.
+
 ## Branches / pushing
 
 - `main` is the only branch; push with `git push origin main`.
