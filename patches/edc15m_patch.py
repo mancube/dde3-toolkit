@@ -151,12 +151,20 @@ def build(src, dst, edits, extra_free_writes=None, verbose=True):
     return buf, cks
 
 
+# Derived checksum fields: the applier recomputes these after the real edits, so
+# they must be tagged `kind: checksum` and never decide whether a patch fits.
+CHECKSUM_FIELDS = {0x13FFC, 0x3FBFC, 0x38B7C}
+
+
 def manifest(name, description, src, dst, orig, patched, hardware_tested=False):
     """A JSON patch manifest (dde-toolkit style) describing the byte edits."""
     import hashlib
     import json
-    changes = [{"what": "edit", "file_offset": f"0x{off:05X}", "length": len(o) // 2,
-                "before": o, "after": a} for off, o, a in diff_report(orig, patched)]
+    changes = []
+    for off, o, a in diff_report(orig, patched):
+        kind = "checksum" if off in CHECKSUM_FIELDS and len(a) == 8 else "edit"
+        changes.append({"what": kind, "kind": kind, "file_offset": f"0x{off:05X}",
+                        "length": len(o) // 2, "before": o, "after": a})
     return json.dumps({
         "patch": name,
         "version": 1,

@@ -59,11 +59,12 @@ fn print_usage() {
     eprintln!("    [--image <path>] [--out <path>] [--fast-baud 38400|125000] [--duration <s>]");
     eprintln!("    (--live polls the batched MW set; --fast-baud needs the baud patch flashed)");
     eprintln!("  checksum <image.bin>       Verify and optionally correct flash checksums");
-    eprintln!("  patches [list|show|apply|revert|verify] [name]");
+    eprintln!("  patches [list|show|apply|revert|verify|correct] [name]");
     eprintln!("                             Firmware patch manifests from ./patches (baud 0x91,");
     eprintln!("                             EWS delete). --image <in.bin> [--out <out.bin>]");
     eprintln!("                             apply/revert corrects every flash checksum, program");
-    eprintln!("                             chain included; nothing is sent to the ECU.");
+    eprintln!("                             chain included; `correct --image` just fixes checksums");
+    eprintln!("                             on an already-patched read. Nothing is sent to the ECU.");
     eprintln!("  uprog-ein                  Enter programming mode (12 04 0D)");
     eprintln!("  break-probe              Enter the break-entered service protocol, send one
                              probe byte, dump the response (--fast for 38.4k)");
@@ -786,20 +787,47 @@ fn patches_cmd(args: &[String], image: Option<String>, out: Option<String>) -> R
                 if p.hardware_tested { "yes" } else { "no" }
             );
             if let Some(h) = &p.target_sha256 {
-                println!("input sha256: {h}");
+                println!("reference read sha256: {h}  (informational; any read with matching edits works)");
             }
             if !p.checksum_note.is_empty() {
                 println!("checksums: {}", p.checksum_note);
             }
-            println!("changes ({} ranges, {} bytes):", p.changes.len(), p.changed_bytes());
+            println!(
+                "edits ({} ranges, {} bytes) — checksum fields are recomputed on apply:",
+                p.semantic_changes().len(),
+                p.changed_bytes()
+            );
             for c in &p.changes {
                 println!(
-                    "  0x{:05X}  {:<8} {:<16} -> {}",
+                    "  0x{:05X}  {:<8} {:<16} -> {}  {}",
                     c.offset,
                     format!("{} B", c.after.len()),
                     hex_prefix(&c.before),
-                    hex_prefix(&c.after)
+                    hex_prefix(&c.after),
+                    if c.is_checksum() { "(checksum)" } else { "" }
                 );
+            }
+            Ok(())
+        }
+        "correct" => {
+            let in_path = image
+                .as_deref()
+                .context("--image <in.bin> is required")?;
+            let img = read_image(in_path, IMAGE_SIZE)?;
+            let fixed = correct(&img);
+            let changed = fixed != img;
+            let out_path = out.unwrap_or_else(|| {
+                let stem = in_path.trim_end_matches(".bin").trim_end_matches(".BIN");
+                format!("{stem}.corrected.bin")
+            });
+            std::fs::write(&out_path, &fixed)
+                .with_context(|| format!("cannot write {out_path}"))?;
+            println!(
+                "checksums {} -> {out_path}",
+                if changed { "corrected" } else { "already valid" }
+            );
+            if !report_checksums(&fixed) {
+                anyhow::bail!("{out_path} still has a bad checksum");
             }
             Ok(())
         }
@@ -844,7 +872,7 @@ fn patches_cmd(args: &[String], image: Option<String>, out: Option<String>) -> R
             }
         }
         other => anyhow::bail!(
-            "unknown patches action {other:?}; use list | show <name> | apply <name> | revert <name> | verify <name>"
+            "unknown patches action {other:?}; use list | show <name> | apply <name> | revert <name> | verify <name> | correct"
         ),
     }
 }

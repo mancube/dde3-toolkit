@@ -147,6 +147,21 @@ bundle from `~/Desktop/edc15m/patches/` into `patches/` (self-contained):
 - Docs: `docs/patches.md`, rewritten `patches/README.md`, README feature/safety
   corrections (checksums *are* corrected on write; status reply *was* captured).
 
+Session 15b — patch fit is content-based, not file-locked (user report: a
+loaded image showed "target image differs" and a third-party EWS-off read was
+refused as "partially applied"):
+- The three checksum fields are tagged `"kind": "checksum"` and treated as
+  **derived**: `state()` only looks at the semantic edits, so `available` /
+  `applied` / `conflict` reflect the actual bytes. `input.sha256` is now the
+  *reference read*, informational only, and never gates a patch — any read of
+  the same calibration patches fine.
+- `apply()` on an already-applied image repairs the checksums instead of
+  returning early; new `patches correct --image` (and the GUI "Correct
+  checksums" button) recomputes TDI slots + program chain with no manifest.
+- Verified on the user's `e46_immo_off.bin` (7/7 edits applied, chain stale):
+  it now reads `applied`, and repair changes exactly the 4 chain bytes at
+  `0x38B7C` → all three checksums OK. Tests: 70 passing (+3).
+
 ### Remaining open items (after the above)
 
 1. ~~Checksum hardware confirmation~~ — **done**: `12 04 0A` → `12 05 A0 00`

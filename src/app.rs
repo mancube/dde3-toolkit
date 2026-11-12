@@ -2265,7 +2265,7 @@ impl App {
         if let Some(i) = selected {
             self.patch_selected = i;
             self.patch_notice = None;
-            self.patch_target_ok = image.as_ref().map(|img| self.patches[i].target_matches(img));
+            self.patch_target_ok = image.as_ref().map(|img| self.patches[i].reference_matches(img));
         }
 
         let Some(p) = self.patches.get(self.patch_selected).cloned() else {
@@ -2273,7 +2273,7 @@ impl App {
         };
         if self.patch_target_ok.is_none() {
             if let Some(img) = &image {
-                self.patch_target_ok = Some(p.target_matches(img));
+                self.patch_target_ok = Some(p.reference_matches(img));
             }
         }
         let state = self.patch_state(&p);
@@ -2326,25 +2326,33 @@ impl App {
                         ui.end_row();
                     }
                     if let Some(hash) = &p.target_sha256 {
-                        ui.label(RichText::new("Target image").size(11.0).color(MUTED));
+                        ui.label(RichText::new("Reference read").size(11.0).color(MUTED));
                         let text = if self.patch_target_ok == Some(true) {
-                            format!("{} (matches)", &hash[..hash.len().min(16)])
+                            format!("{} (the read this manifest was built from)", &hash[..hash.len().min(16)])
                         } else if self.patch_target_ok == Some(false) {
-                            format!("{} (loaded image differs)", &hash[..hash.len().min(16)])
+                            format!("{} (informational — any read with matching edits patches fine)", &hash[..hash.len().min(16)])
                         } else {
                             hash[..hash.len().min(16)].to_string()
                         };
                         ui.label(
                             RichText::new(text)
-                                .font(FontId::monospace(11.0))
-                                .color(if self.patch_target_ok == Some(false) {
-                                    WARN
-                                } else {
-                                    TEXT
-                                }),
+                                .font(FontId::monospace(10.0))
+                                .color(MUTED),
                         );
                         ui.end_row();
                     }
+                    ui.label(RichText::new("Content").size(11.0).color(MUTED));
+                    if let Some(img) = &image {
+                        let (matched, total) = p.edit_match(img);
+                        ui.label(
+                            RichText::new(format!("{matched}/{total} edits match the loaded image"))
+                                .size(11.0)
+                                .color(if matched == total { OK } else { WARN }),
+                        );
+                    } else {
+                        ui.label(RichText::new("load a 256 KB image to compare").size(11.0).color(MUTED));
+                    }
+                    ui.end_row();
                     if !p.sectors.is_empty() {
                         ui.label(RichText::new("Sectors").size(11.0).color(MUTED));
                         ui.label(
@@ -2456,6 +2464,16 @@ impl App {
                 self.revert_selected_patch();
             }
             if ui
+                .add_enabled(
+                    can_revert && !self.checks_ok(),
+                    egui::Button::new("Correct checksums")
+                        .min_size(Vec2::new(170.0, 34.0)),
+                )
+                .clicked()
+            {
+                self.correct_image_checksums();
+            }
+            if ui
                 .add_sized(Vec2::new(150.0, 34.0), egui::Button::new("Go to Write"))
                 .clicked()
             {
@@ -2486,7 +2504,7 @@ impl App {
             Ok(()) => {
                 self.image = Some(img);
                 self.refresh_checks();
-                self.patch_target_ok = self.image.as_ref().map(|i| p.target_matches(i));
+                self.patch_target_ok = self.image.as_ref().map(|i| p.reference_matches(i));
                 self.patch_notice = Some(format!(
                     "Applied {}; checksums corrected. Save the image, then write it.",
                     p.name
@@ -2514,7 +2532,7 @@ impl App {
             Ok(()) => {
                 self.image = Some(img);
                 self.refresh_checks();
-                self.patch_target_ok = self.image.as_ref().map(|i| p.target_matches(i));
+                self.patch_target_ok = self.image.as_ref().map(|i| p.reference_matches(i));
                 self.patch_notice = Some(format!(
                     "Reverted {}; checksums corrected. Save the image, then write it.",
                     p.name
@@ -2528,6 +2546,36 @@ impl App {
                 self.error = Some(format!("{e}"));
             }
         }
+    }
+
+    /// Recompute every checksum (TDI slots + program chain) on the loaded
+    /// image. This is the repair path for an image that is already patched but
+    /// carries a stale/bypassed program checksum (e.g. a third-party EWS-off
+    /// read) — no `before` bytes are needed.
+    fn correct_image_checksums(&mut self) {
+        if self.image_is_partial {
+            self.error = Some("Checksum correction needs a full 256 KB image".into());
+            return;
+        }
+        let Some(img) = self.image.take() else {
+            return;
+        };
+        let fixed = checksum::correct(&img);
+        let changed = fixed != img;
+        self.image = Some(fixed);
+        self.refresh_checks();
+        self.patch_target_ok = self.image.as_ref().and_then(|i| {
+            self.patches
+                .get(self.patch_selected)
+                .map(|p| p.reference_matches(i))
+        });
+        self.status = if changed {
+            "Checksums corrected".into()
+        } else {
+            "Checksums already valid".into()
+        };
+        self.error = None;
+        self.push_log(format!("PATCH checksums corrected (changed={changed})"));
     }
 
     fn open_patch_dialog(&mut self) {

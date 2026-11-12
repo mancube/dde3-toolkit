@@ -34,8 +34,11 @@ captures. All of that work is written up in [`docs/`](docs) — start with
 - **Break-entered service protocol** — UART break → 10.4 k → 38.4 k with the
   decoded byte-addressed command set (`breakmode.rs`)
 - **Firmware patches** — manifest-driven apply/revert of the shipped baud
-  (`0x91`) and EWS-delete patches, checksums corrected on apply; builders and
-  prebuilt images in [`patches/`](patches)
+  (`0x91`) and EWS-delete patches; fit is decided by the manifest's `before`
+  bytes (any read of the same calibration works), checksums — including the
+  program chain — are recomputed on apply, and an already-patched read with a
+  stale checksum is repaired; builders and prebuilt images in
+  [`patches/`](patches)
 - **Protocol log** — every frame with timing; per-operation or continuous,
   to file and CSV
 - **9-tab GUI** — Overview, Read, Write, Checksum, Patches, Fault codes,

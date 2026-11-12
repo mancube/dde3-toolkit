@@ -20,6 +20,7 @@
   "changes": [
     {
       "what": "edit",
+      "kind": "edit",
       "file_offset": "0x185C3",
       "length": 32,
       "before": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
@@ -27,13 +28,15 @@
     },
     {
       "what": "edit",
+      "kind": "edit",
       "file_offset": "0x293D0",
       "length": 4,
       "before": "ea00f295",
       "after": "fa01c385"
     },
     {
-      "what": "edit",
+      "what": "checksum",
+      "kind": "checksum",
       "file_offset": "0x38B7C",
       "length": 4,
       "before": "023352db",

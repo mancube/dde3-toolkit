@@ -6,6 +6,28 @@ image is only modified when every `before` range matches. Applying or
 reverting then corrects **all** flash checksums — both TDI V3.1 slots and the
 cold-start program chain (`docs/checksum.md` §5b).
 
+## What decides whether a patch fits
+
+Only the **semantic edits**. The three checksum fields
+(`0x13FFC`, `0x3FBFC`, `0x38B7C`) are *derived*: their value depends on the
+image's whole content, so they can never be used to decide whether a patch
+applies. Manifests tag them `"kind": "checksum"` (the loader also recognises
+the three offsets for older manifests) and they are excluded from the
+`available` / `applied` / `conflict` decision.
+
+Consequences:
+
+- **Any read of the same calibration works**, not just the exact file a
+  manifest was built from. The manifest's `input.sha256` is shown as the
+  *reference read* and is **informational only** — it never allows or refuses
+  a patch.
+- An image that is **already patched but has a stale/bypassed checksum** (a
+  common shape for third-party EWS-off images) reads as `applied`, and
+  `apply` **repairs** the checksums instead of refusing. `patches correct
+  --image` does the same without needing a manifest.
+- A genuine conflict — an edited range that matches neither the original nor
+  the patched bytes — is still refused.
+
 Nothing here is sent to the ECU. Patch in memory → save the image → write it
 from the Write flash tab (or `dde3-toolkit write <image.bin>`).
 
@@ -46,6 +68,10 @@ dde3-toolkit patches verify <name> --image <in.bin>
 with a bad checksum; the default output is `<in>.applied.bin` /
 `<in>.reverted.bin`.
 
+`patches correct --image <in.bin> [--out <out.bin>]` recomputes the checksums
+without applying anything — the repair path for an already-patched read whose
+program chain was bypassed or left stale.
+
 Exit status is non-zero on a conflict (neither the original nor the patched
 bytes at a range), a bad checksum, or `verify` finding the patch not applied.
 
@@ -83,6 +109,17 @@ Both sides are validated against each other: the Rust test
 to `e46_orig.bin` and asserts the result is byte-for-byte the shipped `.bin`,
 and the Python builders reproduce the same four images from the vendored
 `patches/tools/` reference implementations.
+
+Repairing a third-party EWS-off image (already patched, stale program chain):
+
+```sh
+dde3-toolkit patches list --image e46_immo_off.bin     # → applied (not "conflict")
+dde3-toolkit patches correct --image e46_immo_off.bin --out fixed.bin
+dde3-toolkit checksum fixed.bin                        # all three OK
+```
+
+Only the 4 chain bytes change; the image's own (possibly bypass-related) code
+edits and their code checksum are left as they are.
 
 ## Regenerating an image
 

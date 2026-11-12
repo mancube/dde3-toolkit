@@ -52,6 +52,27 @@ pub struct Change {
     pub offset: usize,
     pub before: Vec<u8>,
     pub after: Vec<u8>,
+    /// A checksum field (TDI code/calibration slot or the program chain), not a
+    /// semantic edit. These values are *derived*: the applier recomputes them
+    /// after the real edits, so they must never decide whether a patch fits.
+    pub checksum: bool,
+}
+
+impl Change {
+    /// True for the three derived checksum fields in a full read.
+    pub fn is_checksum(&self) -> bool {
+        if self.checksum {
+            return true;
+        }
+        // Offset fallback for manifests written before `kind` existed.
+        self.after.len() == 4
+            && matches!(
+                self.offset,
+                crate::checksum::CODE_CHECKSUM_POS
+                    | crate::checksum::CAL_CHECKSUM_POS
+                    | crate::checksum::PROG_CHAIN_POS
+            )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,6 +145,10 @@ struct RawOutput {
 struct RawChange {
     #[serde(default)]
     what: Option<String>,
+    /// "edit" (default) or "checksum" — derived fields are excluded from the
+    /// fit check and recomputed by the applier.
+    #[serde(default)]
+    kind: Option<String>,
     file_offset: String,
     #[serde(default)]
     before: String,
@@ -169,6 +194,7 @@ impl Patch {
                 offset,
                 before,
                 after,
+                checksum: c.kind.as_deref() == Some("checksum"),
             });
         }
         let name = raw.name.unwrap_or_else(|| "unnamed patch".into());
@@ -188,13 +214,19 @@ impl Patch {
         })
     }
 
+    /// Does the loaded image carry this patch? Decided **only** by the semantic
+    /// (non-checksum) ranges: a derived checksum field is expected to differ
+    /// whenever the image's content differs from the reference read, and the
+    /// applier recomputes it. This is what makes a manifest usable on any read
+    /// of the same calibration, not just the one it was built from.
     pub fn state(&self, image: &[u8]) -> PatchState {
         if image.len() != IMAGE_SIZE {
             return PatchState::Invalid("a patch needs a 256 KB full image".into());
         }
+        let edits: Vec<&Change> = self.semantic_changes();
         let mut before = 0usize;
         let mut after = 0usize;
-        for c in &self.changes {
+        for c in edits {
             if c.offset + c.after.len() > image.len() {
                 return PatchState::Invalid(format!(
                     "{} at 0x{:X} is outside the image",
@@ -212,21 +244,55 @@ impl Patch {
                 ));
             }
         }
-        if after == self.changes.len() {
+        let total = self.semantic_changes().len();
+        if after == total {
             PatchState::Applied
-        } else if before == self.changes.len() {
+        } else if before == total {
             PatchState::Available
         } else {
             PatchState::Conflict(format!(
-                "partially applied: {after} patched, {before} original, {} total",
-                self.changes.len()
+                "partially applied: {after} patched, {before} original, {total} edits"
             ))
         }
     }
 
+    /// The ranges that carry the actual patch. Checksum fields are derived and
+    /// therefore excluded (a manifest made only of checksum fields falls back
+    /// to all of them, so it still has a state).
+    pub fn semantic_changes(&self) -> Vec<&Change> {
+        let edits: Vec<&Change> = self.changes.iter().filter(|c| !c.is_checksum()).collect();
+        if edits.is_empty() {
+            self.changes.iter().collect()
+        } else {
+            edits
+        }
+    }
+
+    /// How many semantic ranges match `image` as patched (`after`) or as
+    /// original (`before`). Used for the informational "content" display; it
+    /// never gates anything.
+    pub fn edit_match(&self, image: &[u8]) -> (usize, usize) {
+        if image.len() != IMAGE_SIZE {
+            return (0, self.semantic_changes().len());
+        }
+        let edits = self.semantic_changes();
+        let matched = edits
+            .iter()
+            .filter(|c| {
+                image[c.offset..c.offset + c.after.len()] == c.after
+                    || image[c.offset..c.offset + c.before.len()] == c.before
+            })
+            .count();
+        (matched, edits.len())
+    }
+
     /// Does the loaded image hash match the manifest's `input.sha256`?
-    /// Manifests without that field match any image.
-    pub fn target_matches(&self, image: &[u8]) -> bool {
+    ///
+    /// **Informational only** — never used to allow or refuse a patch. The
+    /// hash identifies the reference read a manifest was generated from; any
+    /// other read of the same calibration still patches fine as long as the
+    /// semantic `before` ranges match (`state`).
+    pub fn reference_matches(&self, image: &[u8]) -> bool {
         match &self.target_sha256 {
             Some(h) => sha256(image) == *h,
             None => true,
@@ -234,17 +300,31 @@ impl Patch {
     }
 
     /// Apply to a full image and correct the flash checksums (TDI code +
-    /// calibration, then the cold-start program chain). The image is only
-    /// modified when every `before` range matches.
+    /// calibration, then the cold-start program chain).
+    ///
+    /// The semantic ranges must match their `before` bytes. Checksum fields are
+    /// *not* required to match anything: they are rewritten by `correct()`
+    /// afterwards, so an image that is already patched but carries a stale or
+    /// bypassed program checksum is repaired rather than refused.
     pub fn apply(&self, image: &mut Vec<u8>) -> Result<()> {
         match self.state(image) {
-            PatchState::Applied => return Ok(()),
-            PatchState::Available => {}
+            // Already patched: fall through so a stale checksum gets repaired.
+            PatchState::Applied => {}
+            PatchState::Available => {
+                for c in self.semantic_changes() {
+                    image[c.offset..c.offset + c.after.len()].copy_from_slice(&c.after);
+                }
+            }
             PatchState::Conflict(s) => bail!("cannot apply {}: {s}", self.name),
             PatchState::Invalid(s) => bail!("cannot apply {}: {s}", self.name),
         }
-        for c in &self.changes {
-            image[c.offset..c.offset + c.after.len()].copy_from_slice(&c.after);
+        // Best effort for a manifest's documented checksum value: keep it when
+        // the image still has the original one. `correct()` below is
+        // authoritative whenever the blocks are recognised.
+        for c in self.changes.iter().filter(|c| c.is_checksum()) {
+            if image[c.offset..c.offset + c.before.len()] == c.before {
+                image[c.offset..c.offset + c.after.len()].copy_from_slice(&c.after);
+            }
         }
         *image = crate::checksum::correct(image);
         Ok(())
@@ -254,12 +334,18 @@ impl Patch {
     pub fn revert(&self, image: &mut Vec<u8>) -> Result<()> {
         match self.state(image) {
             PatchState::Available => return Ok(()),
-            PatchState::Applied => {}
+            PatchState::Applied => {
+                for c in self.semantic_changes() {
+                    image[c.offset..c.offset + c.before.len()].copy_from_slice(&c.before);
+                }
+            }
             PatchState::Conflict(s) => bail!("cannot revert {}: {s}", self.name),
             PatchState::Invalid(s) => bail!("cannot revert {}: {s}", self.name),
         }
-        for c in &self.changes {
-            image[c.offset..c.offset + c.before.len()].copy_from_slice(&c.before);
+        for c in self.changes.iter().filter(|c| c.is_checksum()) {
+            if image[c.offset..c.offset + c.after.len()] == c.after {
+                image[c.offset..c.offset + c.before.len()].copy_from_slice(&c.before);
+            }
         }
         *image = crate::checksum::correct(image);
         Ok(())
@@ -464,6 +550,105 @@ mod tests {
         assert_eq!(outputs.len(), 4, "every manifest names its output image");
     }
 
+    /// The manifest generator tags derived checksum fields, and only those:
+    /// the fit check must see the real edits.
+    #[test]
+    fn checksum_fields_are_tagged_and_excluded_from_the_fit() {
+        let (patches, _) = load_all();
+        for p in &patches {
+            for c in &p.changes {
+                let derived = matches!(
+                    c.offset,
+                    crate::checksum::CODE_CHECKSUM_POS
+                        | crate::checksum::CAL_CHECKSUM_POS
+                        | crate::checksum::PROG_CHAIN_POS
+                );
+                assert_eq!(
+                    c.is_checksum(),
+                    derived,
+                    "{}: 0x{:05X} classified wrongly",
+                    p.name,
+                    c.offset
+                );
+            }
+            assert!(
+                p.semantic_changes().len() < p.changes.len(),
+                "{}: checksum fields must be excluded",
+                p.name
+            );
+        }
+    }
+
+    /// A third-party "already patched" read: every semantic edit applied, but
+    /// the program-chain word still holds the ORIGINAL value (a bypassed
+    /// checksum — the shape of the user's `e46_immo_off.bin`). It must read as
+    /// `applied`, and applying must repair the chain instead of refusing.
+    #[test]
+    fn already_patched_with_stale_chain_is_repaired_not_refused() {
+        let dir = patches_dir();
+        let orig = std::fs::read(dir.join("e46_orig.bin")).expect("reference image");
+        let p = load_all()
+            .0
+            .into_iter()
+            .find(|p| p.name == "edc15m_immo_off_full")
+            .expect("immo full manifest");
+        let mut img = orig.clone();
+        p.apply(&mut img).unwrap();
+        assert_eq!(p.state(&img), PatchState::Applied);
+
+        let chain = p
+            .changes
+            .iter()
+            .find(|c| c.is_checksum())
+            .expect("manifest carries the chain field");
+        img[chain.offset..chain.offset + 4].copy_from_slice(&chain.before);
+        assert_eq!(
+            p.state(&img),
+            PatchState::Applied,
+            "a stale checksum must not change whether the patch fits"
+        );
+        assert!(
+            !crate::checksum::verify(&img).iter().all(|c| c.ok),
+            "the stale chain really is invalid"
+        );
+
+        p.apply(&mut img).unwrap();
+        assert_eq!(
+            &img[chain.offset..chain.offset + 4],
+            &chain.after,
+            "apply must repair the program chain"
+        );
+        assert!(crate::checksum::verify(&img).iter().all(|c| c.ok));
+    }
+
+    /// The reference sha256 is informational only: a read that differs outside
+    /// the edited ranges still takes the patch.
+    #[test]
+    fn reference_hash_never_gates_apply() {
+        let dir = patches_dir();
+        let mut img = std::fs::read(dir.join("e46_orig.bin")).expect("reference image");
+        let p = load_all()
+            .0
+            .into_iter()
+            .find(|p| p.name == "edc15m_baud_0x91_125000")
+            .expect("baud manifest");
+        assert!(p.reference_matches(&img));
+        img[0x20000] ^= 0xFF; // a byte no patch range touches
+        assert!(
+            !p.reference_matches(&img),
+            "the hash differs — and that must not matter"
+        );
+        assert_eq!(p.state(&img), PatchState::Available);
+        assert_eq!(
+            p.edit_match(&img),
+            (2, 2),
+            "both semantic edits are present"
+        );
+        p.apply(&mut img).unwrap();
+        assert_eq!(p.state(&img), PatchState::Applied);
+        assert!(crate::checksum::verify(&img).iter().all(|c| c.ok));
+    }
+
     /// Every shipped manifest, applied to the shipped reference image, must
     /// reproduce the shipped output image byte for byte — checksums included.
     #[test]
@@ -479,7 +664,7 @@ mod tests {
             };
             let expected = std::fs::read(dir.join(out_name)).expect("shipped output image");
             assert!(
-                p.target_matches(&orig),
+                p.reference_matches(&orig),
                 "{}: reference image hash mismatch",
                 p.name
             );

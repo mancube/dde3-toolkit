@@ -50,6 +50,12 @@ Each run prints the exact byte edits, the three checksum values, and writes
 (`edc15m_baud_0x91_125000`, `edc15m_immo_off_gate`, …) so variants do not
 collide in the toolkit's patch list.
 
+Checksum fields (`0x13FFC`, `0x3FBFC`, `0x38B7C`) are written with
+`"kind": "checksum"`. The toolkit treats them as **derived** — it recomputes
+them on apply and never uses them to decide whether a patch fits, so a
+manifest works on any read of the same calibration, and an already-patched
+image with a stale program chain is repaired rather than refused.
+
 ## Apply / verify with the toolkit
 
 ```sh

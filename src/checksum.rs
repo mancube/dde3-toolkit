@@ -63,9 +63,14 @@ const CAL_SEEDS: (u16, u16, u16, u16) = (0x8631, 0xEFCD, 0x8631, 0xDF9B);
 /// Code block seeds
 const CODE_SEEDS: (u16, u16, u16, u16) = (0x0000, 0x0000, 0x8631, 0xDF9B);
 
+/// File offset of the TDI code checksum slot in a full read.
+pub const CODE_CHECKSUM_POS: usize = 0x13FFC;
+/// File offset of the TDI calibration checksum slot in a full read.
+pub const CAL_CHECKSUM_POS: usize = 0x3FBFC;
+
 /// The fixed-geometry code block in a full read.
 const CODE_BLOCK: (usize, usize, usize, (u16, u16, u16, u16)) =
-    (0x10000, 0x14000, 0x13FFC, CODE_SEEDS);
+    (0x10000, 0x14000, CODE_CHECKSUM_POS, CODE_SEEDS);
 
 /// A blank word is an unwritten or padded location, not a stale checksum
 const ERASED_0: u32 = 0xFFFF_FFFF;
