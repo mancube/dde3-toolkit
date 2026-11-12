@@ -79,8 +79,12 @@ bytes at a range), a bad checksum, or `verify` finding the patch not applied.
 
 **Patches** tab: manifest list with live state (`available` / `applied` /
 `conflict`), the changed ranges with before/after bytes, **Apply to image**,
-**Revert in image**, **Open patch…**, **Reload**, **Save image…**, and a
-"Go to Write" shortcut. Launch straight into it with `--tab patches`.
+**Revert in image**, **Correct checksums**, **Open image…** / **Close image**,
+**Load manifest…**, **Reload**, **Save image…**, and a "Go to Write"
+shortcut. The loaded image is summarised in a status strip at the top
+(name, size/kind, checksum state) with its own Close control; disabled
+buttons explain the missing precondition on hover. Launch straight into the
+tab with `--tab patches`.
 
 ## Shipped patches
 

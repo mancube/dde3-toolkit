@@ -1489,6 +1489,85 @@ impl App {
         self.status = "Corrected all checksums".into();
     }
 
+    /// Open-image dialog. One entry point for the buttons, the Overview quick
+    /// action and the Ctrl+O shortcut so they cannot drift apart.
+    fn open_image_dialog(&mut self) {
+        if self.busy {
+            return;
+        }
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("ECU image", &["bin"])
+            .pick_file()
+        {
+            self.load_image(path);
+        }
+    }
+
+    /// Drop the loaded image from the toolkit. Purely UI state — nothing is
+    /// sent to the ECU. Refused while an operation is running, because the
+    /// worker may still be using the image.
+    fn unload_image(&mut self) {
+        if self.busy {
+            self.error =
+                Some("Cannot unload the image while an operation is running.".into());
+            return;
+        }
+        self.image = None;
+        self.image_name.clear();
+        self.image_is_partial = false;
+        self.checks.clear();
+        self.comp_edit.clear();
+        self.patch_notice = None;
+        self.patch_target_ok = None;
+        self.status = "Image unloaded".into();
+        self.push_log("IMAGE unloaded".into());
+    }
+
+    /// The loaded-image status strip (name, size/kind, checksum state) plus the
+    /// Close control. Returns true when the user asked to unload the image.
+    fn image_status_row(&mut self, ui: &mut Ui) -> bool {
+        let Some(size) = self.image.as_ref().map(|i| i.len()) else {
+            return false;
+        };
+        let name = self.image_name.clone();
+        let partial = self.image_is_partial;
+        let ok = self.checks_ok();
+        let mut close = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Loaded").size(11.0).color(MUTED));
+            let shown = if name.is_empty() {
+                "(unnamed image)".to_string()
+            } else {
+                name.clone()
+            };
+            ui.label(RichText::new(short_name(&shown, 46)).size(12.0).color(TEXT))
+                .on_hover_text(&shown);
+            pill(
+                ui,
+                &format!("{size} B · {}", if partial { "calibration" } else { "full" }),
+                ACCENT,
+            );
+            if ok {
+                pill(ui, "checksums OK", OK);
+            } else {
+                pill(ui, "checksums need correction", WARN);
+            }
+            if centered_button_enabled(
+                ui,
+                !self.busy,
+                Vec2::new(120.0, 26.0),
+                egui::Button::new("Close image"),
+            )
+            .on_disabled_hover_text("An operation is running — wait for it to finish")
+            .on_hover_text("Unload the image from the toolkit (the ECU is not touched)")
+            .clicked()
+            {
+                close = true;
+            }
+        });
+        close
+    }
+
     fn save_image(&mut self) {
         let Some(img) = self.image.as_ref() else {
             return;
@@ -1610,6 +1689,8 @@ impl App {
                             egui::Button::new(RichText::new("Disconnect").color(DANGER))
                                 .fill(CARD_ALT),
                         )
+                        .on_disabled_hover_text("An operation is running")
+                        .on_hover_text("Close the K-line link")
                         .clicked()
                         {
                             self.disconnect();
@@ -1620,6 +1701,12 @@ impl App {
                         Vec2::new(100.0, 30.0),
                         egui::Button::new(RichText::new("Connect").color(BG)).fill(ACCENT),
                     )
+                    .on_disabled_hover_text(if self.port.is_empty() {
+                        "Select a serial port first"
+                    } else {
+                        "An operation is running"
+                    })
+                    .on_hover_text("Open the K-line link and identify the ECU")
                     .clicked()
                     {
                         self.connect();
@@ -1686,6 +1773,28 @@ impl App {
                         }
                     }
                     ui.add_space(4.0);
+                }
+                if self.image.is_some() {
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("IMAGE").size(9.0).color(MUTED));
+                    let name = if self.image_name.is_empty() {
+                        "(unnamed)".to_string()
+                    } else {
+                        self.image_name.clone()
+                    };
+                    ui.label(RichText::new(short_name(&name, 22)).size(11.0).color(ACCENT))
+                        .on_hover_text(&name);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} B · {}",
+                            self.image.as_ref().map(|i| i.len()).unwrap_or(0),
+                            if self.image_is_partial { "cal" } else { "full" }
+                        ))
+                        .size(10.0)
+                        .color(MUTED),
+                    );
                 }
                 ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
                     ui.add_space(6.0);
@@ -1876,14 +1985,10 @@ impl App {
                 Vec2::new(180.0, 34.0),
                 egui::Button::new("Load image…"),
             )
+            .on_hover_text("Open a 256 KB full or 32 KB calibration .bin (Ctrl+O)")
             .clicked()
             {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("ECU image", &["bin"])
-                    .pick_file()
-                {
-                    self.load_image(path);
-                }
+                self.open_image_dialog();
             }
             if centered_button_enabled(
                 ui,
@@ -1939,6 +2044,12 @@ impl App {
                     Vec2::new(180.0, 34.0),
                     egui::Button::new(RichText::new("Read full flash").color(BG)).fill(ACCENT),
                 )
+                .on_disabled_hover_text(if self.connected {
+                    "An operation is running"
+                } else {
+                    "Connect to the ECU first"
+                })
+                .on_hover_text("Read all 256 KB into memory and save to the path above")
                 .clicked()
                 {
                     self.start_read();
@@ -1987,6 +2098,12 @@ impl App {
                 Vec2::new(180.0, 34.0),
                 egui::Button::new(RichText::new("Read calibration").color(BG)).fill(ACCENT),
             )
+            .on_disabled_hover_text(if self.connected {
+                "An operation is running"
+            } else {
+                "Connect to the ECU first"
+            })
+            .on_hover_text("Read file 0x38000-0x3FFFF only")
             .clicked()
             {
                 self.start_read_cal();
@@ -2029,19 +2146,44 @@ impl App {
         card(ui, ui.available_width(), |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Image").color(MUTED));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.image_name)
-                        .desired_width(420.0)
-                        .hint_text("select a 256 KB or 32 KB .bin"),
-                );
-                if centered_button(ui, Vec2::new(90.0, 28.0), egui::Button::new("Open…")).clicked()
+                if self.image.is_some() {
+                    let name = if self.image_name.is_empty() {
+                        "(unnamed image)".to_string()
+                    } else {
+                        self.image_name.clone()
+                    };
+                    ui.label(RichText::new(short_name(&name, 52)).size(12.0).color(TEXT))
+                        .on_hover_text(&name);
+                } else {
+                    ui.label(
+                        RichText::new("no image loaded")
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                }
+                if centered_button_enabled(
+                    ui,
+                    !self.busy,
+                    Vec2::new(90.0, 28.0),
+                    egui::Button::new("Open…"),
+                )
+                .on_hover_text("Open a 256 KB full or 32 KB calibration .bin (Ctrl+O)")
+                .clicked()
                 {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("ECU image", &["bin"])
-                        .pick_file()
-                    {
-                        self.load_image(path);
-                    }
+                    self.open_image_dialog();
+                }
+                if self.image.is_some()
+                    && centered_button_enabled(
+                        ui,
+                        !self.busy,
+                        Vec2::new(90.0, 28.0),
+                        egui::Button::new("Close"),
+                    )
+                    .on_disabled_hover_text("An operation is running")
+                    .on_hover_text("Unload the image from the toolkit")
+                    .clicked()
+                {
+                    self.unload_image();
                 }
             });
             if let Some(img) = &self.image {
@@ -2107,6 +2249,14 @@ impl App {
                     Vec2::new(180.0, 34.0),
                     egui::Button::new(RichText::new("Erase and write").color(BG)).fill(WARN),
                 )
+                .on_disabled_hover_text(write_disabled_reason(
+                    self.image.is_some(),
+                    partial,
+                    self.connected,
+                    self.busy,
+                    ready,
+                ))
+                .on_hover_text("Erase program + calibration and write the full image")
                 .clicked()
                 {
                     self.start_write();
@@ -2118,6 +2268,14 @@ impl App {
                     egui::Button::new(RichText::new("Write calibration only").color(BG))
                         .fill(ACCENT),
                 )
+                .on_disabled_hover_text(write_disabled_reason(
+                    self.image.is_some(),
+                    false,
+                    self.connected,
+                    self.busy,
+                    ready,
+                ))
+                .on_hover_text("Erase + write file 0x38000-0x3FFFF only")
                 .clicked()
                 {
                     self.start_write_cal();
@@ -2171,6 +2329,12 @@ impl App {
             "Apply or revert firmware patches on the loaded image. Nothing is sent to the ECU here.",
         );
         ui.add_space(8.0);
+        if self.image.is_some() {
+            if self.image_status_row(ui) {
+                self.unload_image();
+            }
+            ui.add_space(6.0);
+        }
         card(ui, ui.available_width(), |ui| {
             ui.label(
                 RichText::new(
@@ -2186,13 +2350,22 @@ impl App {
         ui.add_space(10.0);
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_sized(Vec2::new(150.0, 30.0), egui::Button::new("Open patch…"))
+                .add_sized(Vec2::new(150.0, 30.0), egui::Button::new("Open image…"))
+                .on_hover_text("Open a 256 KB full read to apply patches to (Ctrl+O)")
+                .clicked()
+            {
+                self.open_image_dialog();
+            }
+            if ui
+                .add_sized(Vec2::new(150.0, 30.0), egui::Button::new("Load manifest…"))
+                .on_hover_text("Load an extra patch JSON manifest from disk")
                 .clicked()
             {
                 self.open_patch_dialog();
             }
             if ui
                 .add_sized(Vec2::new(110.0, 30.0), egui::Button::new("Reload"))
+                .on_hover_text("Re-scan ./patches and DDE3_PATCH_DIR")
                 .clicked()
             {
                 self.reload_patches();
@@ -2202,6 +2375,8 @@ impl App {
                     self.image.is_some(),
                     egui::Button::new("Save image…").min_size(Vec2::new(140.0, 30.0)),
                 )
+                .on_disabled_hover_text("Load an image first")
+                .on_hover_text("Save the patched image to disk (Ctrl+S)")
                 .clicked()
             {
                 self.save_image();
@@ -2222,6 +2397,30 @@ impl App {
             });
         }
         ui.add_space(12.0);
+        if self.image.is_none() {
+            card(ui, ui.available_width(), |ui| {
+                section_title(ui, "No image loaded");
+                ui.label(
+                    RichText::new(
+                        "Open a 256 KB full read to see each manifest's state and to apply or \
+                         revert a patch. Nothing is written to the ECU from this tab.",
+                    )
+                    .size(12.0)
+                    .color(MUTED),
+                );
+                ui.add_space(6.0);
+                if centered_button(
+                    ui,
+                    Vec2::new(150.0, 30.0),
+                    egui::Button::new("Open image…"),
+                )
+                .clicked()
+                {
+                    self.open_image_dialog();
+                }
+            });
+            ui.add_space(10.0);
+        }
         if self.patches.is_empty() {
             card(ui, ui.available_width(), |ui| {
                 section_title(ui, "No patches");
@@ -2255,8 +2454,10 @@ impl App {
                     {
                         selected = Some(i);
                     }
-                    if let Some(detail) = state.detail() {
-                        ui.label(RichText::new(detail).size(10.0).color(MUTED));
+                    if self.image.is_some() {
+                        if let Some(detail) = state.detail() {
+                            ui.label(RichText::new(detail).size(10.0).color(MUTED));
+                        }
                     }
                     ui.add_space(2.0);
                 }
@@ -2448,6 +2649,14 @@ impl App {
                         .fill(WARN)
                         .min_size(Vec2::new(170.0, 34.0)),
                 )
+                .on_disabled_hover_text(if self.image.is_none() {
+                    "Load a 256 KB full image first"
+                } else if can_revert {
+                    "Already applied — use Revert to remove it"
+                } else {
+                    "The image does not match this manifest's before-bytes"
+                })
+                .on_hover_text("Write the after-bytes and correct every checksum")
                 .clicked()
             {
                 self.apply_selected_patch();
@@ -2459,6 +2668,8 @@ impl App {
                         .fill(ACCENT)
                         .min_size(Vec2::new(170.0, 34.0)),
                 )
+                .on_disabled_hover_text("Only an applied patch can be reverted")
+                .on_hover_text("Write the before-bytes back and correct every checksum")
                 .clicked()
             {
                 self.revert_selected_patch();
@@ -2469,6 +2680,10 @@ impl App {
                     egui::Button::new("Correct checksums")
                         .min_size(Vec2::new(170.0, 34.0)),
                 )
+                .on_disabled_hover_text(
+                    "Checksums are already valid (or no patch is applied)",
+                )
+                .on_hover_text("Recompute TDI slots + program chain without changing any edit")
                 .clicked()
             {
                 self.correct_image_checksums();
@@ -2646,14 +2861,23 @@ impl App {
                 Vec2::new(140.0, 30.0),
                 egui::Button::new("Open image…"),
             )
+            .on_hover_text("Open a 256 KB full or 32 KB calibration .bin (Ctrl+O)")
             .clicked()
             {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("ECU image", &["bin"])
-                    .pick_file()
-                {
-                    self.load_image(path);
-                }
+                self.open_image_dialog();
+            }
+            if self.image.is_some()
+                && centered_button_enabled(
+                    ui,
+                    !self.busy,
+                    Vec2::new(120.0, 30.0),
+                    egui::Button::new("Close image"),
+                )
+                .on_disabled_hover_text("An operation is running")
+                .on_hover_text("Unload the image from the toolkit")
+                .clicked()
+            {
+                self.unload_image();
             }
             ui.label(
                 RichText::new("TDI V3.1 · 2-byte block id at 0xB7A")
@@ -2669,6 +2893,16 @@ impl App {
                     RichText::new("Load a 256 KB full image or a 32 KB calibration image.")
                         .color(MUTED),
                 );
+                ui.add_space(6.0);
+                if centered_button(
+                    ui,
+                    Vec2::new(150.0, 30.0),
+                    egui::Button::new("Open image…"),
+                )
+                .clicked()
+                {
+                    self.open_image_dialog();
+                }
             });
             return;
         }
@@ -3290,10 +3524,16 @@ impl App {
         );
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if centered_button(ui, Vec2::new(80.0, 28.0), egui::Button::new("Copy")).clicked() {
+            if centered_button(ui, Vec2::new(80.0, 28.0), egui::Button::new("Copy"))
+                .on_hover_text("Copy the whole log to the clipboard")
+                .clicked()
+            {
                 ui.ctx().copy_text(self.logs.join("\n"));
             }
-            if centered_button(ui, Vec2::new(80.0, 28.0), egui::Button::new("Clear")).clicked() {
+            if centered_button(ui, Vec2::new(80.0, 28.0), egui::Button::new("Clear"))
+                .on_hover_text("Clear the protocol log (the file, if logging, is untouched)")
+                .clicked()
+            {
                 self.logs.clear();
             }
             ui.label(
@@ -3335,6 +3575,16 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
+        // Ctrl+O open image, Ctrl+S save image. Skipped while a text field has
+        // focus so typing is never hijacked.
+        if !ctx.wants_keyboard_input() {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::O)) {
+                self.open_image_dialog();
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::S)) {
+                self.save_image();
+            }
+        }
         if self.busy || self.live_running {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -3487,6 +3737,40 @@ fn card(ui: &mut Ui, width: f32, add: impl FnOnce(&mut Ui)) {
             ui.set_width(inner);
             add(ui);
         });
+}
+
+/// Shorten a path/name from the left, keeping the tail visible.
+fn short_name(name: &str, max_chars: usize) -> String {
+    let n = name.chars().count();
+    if n <= max_chars {
+        return name.to_string();
+    }
+    let tail: String = name.chars().skip(n - max_chars.saturating_sub(1)).collect();
+    format!("…{tail}")
+}
+
+/// Why the write buttons are disabled — shown on hover so the user is never
+/// left guessing which precondition is missing.
+fn write_disabled_reason(
+    has_image: bool,
+    partial: bool,
+    connected: bool,
+    busy: bool,
+    ready: bool,
+) -> &'static str {
+    if busy {
+        "An operation is running"
+    } else if !connected {
+        "Connect to the ECU first"
+    } else if !has_image {
+        "Open an image first"
+    } else if partial {
+        "Calibration image loaded — use Write calibration only"
+    } else if !ready {
+        "Confirm the backup and type WRITE first"
+    } else {
+        "Not ready"
+    }
 }
 
 /// First `max` bytes as hex, with an ellipsis when truncated.

@@ -132,6 +132,13 @@ With no arguments the binary launches the GUI; it accepts the same
 dde4-toolkit. Full command list: see `HANDOVER.md` → docs, or just run the
 binary with no subcommand.
 
+### GUI
+
+The loaded image is shown in a status strip on the Write, Checksums and
+Patches tabs (name, size/kind, checksum state) with a **Close image** control,
+and in the side nav while it is loaded. Keyboard: **Ctrl+O** opens an image,
+**Ctrl+S** saves the loaded image. Disabled controls explain why on hover.
+
 ## Testing
 
 ```sh

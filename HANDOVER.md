@@ -162,6 +162,30 @@ refused as "partially applied"):
   it now reads `applied`, and repair changes exactly the 4 chain bytes at
   `0x38B7C` → all three checksums OK. Tests: 70 passing (+3).
 
+### Session 16 (2026-11-12) — GUI image lifecycle + control polish
+
+User report: in the Patches tab a loaded image could not be unloaded; general
+UI/UX polish requested, no behaviour changes.
+
+- New **Close image** control on the Write, Checksums and Patches tabs (and a
+  loaded-image status strip: name, size/kind, checksum state). `unload_image()`
+  clears image/name/partial/checks/comp-edit and is refused while `busy`
+  (a worker may still hold the image). Nothing is sent to the ECU.
+- Patches tab: **Open image…** added (it had no way to load an image), "Open
+  patch…" renamed **Load manifest…**, and a "No image loaded" empty-state card
+  with a CTA; the repeated per-manifest "load a 256 KB image first" detail is
+  suppressed when no image is loaded.
+- Write tab: the image name is now a read-only label (it was an editable text
+  field that did nothing) plus Open/Close.
+- Side nav shows the loaded image (short name, size, full/cal) while loaded.
+- Tooltips and **disabled reasons** (`on_disabled_hover_text`) on Connect/
+  Disconnect, Read, Erase+write, Write-cal, Apply/Revert/Correct, Copy/Clear,
+  Open/Save — e.g. "Connect to the ECU first", "Confirm the backup and type
+  WRITE first", "Already applied — use Revert".
+- Shortcuts: **Ctrl+O** open image, **Ctrl+S** save image (ignored while a text
+  field has focus). One `open_image_dialog()` entry point for all three call
+  sites so they cannot drift.
+
 ### Remaining open items (after the above)
 
 1. ~~Checksum hardware confirmation~~ — **done**: `12 04 0A` → `12 05 A0 00`
