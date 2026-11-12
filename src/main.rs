@@ -17,6 +17,7 @@ mod breakmode;
 mod checksum;
 mod dtc;
 mod live;
+mod patches;
 mod protocol;
 mod sim;
 
@@ -58,13 +59,18 @@ fn print_usage() {
     eprintln!("    [--image <path>] [--out <path>] [--fast-baud 38400|125000] [--duration <s>]");
     eprintln!("    (--live polls the batched MW set; --fast-baud needs the baud patch flashed)");
     eprintln!("  checksum <image.bin>       Verify and optionally correct flash checksums");
+    eprintln!("  patches [list|show|apply|revert|verify] [name]");
+    eprintln!("                             Firmware patch manifests from ./patches (baud 0x91,");
+    eprintln!("                             EWS delete). --image <in.bin> [--out <out.bin>]");
+    eprintln!("                             apply/revert corrects every flash checksum, program");
+    eprintln!("                             chain included; nothing is sent to the ECU.");
     eprintln!("  uprog-ein                  Enter programming mode (12 04 0D)");
     eprintln!("  break-probe              Enter the break-entered service protocol, send one
                              probe byte, dump the response (--fast for 38.4k)");
     eprintln!("  diagnose-ende              Leave session / end diagnostics (12 04 9F)");
     eprintln!("  baud [--rate 38400|125000] Switch the DS2 link up via service 0x91 (needs the baud patch)");
-    eprintln!("                             (requires the 0x91 flash patch; see");
-    eprintln!("                             ~/Desktop/edc15m_out/baud91_patch/PATCH_0x91.md)");
+    eprintln!("                             (requires the 0x91 flash patch: patches/e46_baud<rate>.bin,");
+    eprintln!("                             write it first; see patches/README.md)");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --port <path>              Serial port (default /dev/ttyUSB1 FT232R sender;");
@@ -77,8 +83,9 @@ fn print_usage() {
     eprintln!("                             (frames still go over the wire; the ECU reply");
     eprintln!("                             is simulated because the monitor adapter is passive)");
     eprintln!();
-    eprintln!("Safety: A write requires typing WRITE to confirm. Checksums are NOT");
-    eprintln!("auto-corrected for DDE3 yet — the algorithm is unverified.");
+    eprintln!("Safety: A write requires typing WRITE to confirm. Flash checksums are");
+    eprintln!("verified and corrected on write (TDI V3.1 + program chain), byte-for-byte");
+    eprintln!("parity with the verified edc15m-checksum-tool and progsum.py.");
 }
 
 fn parse_hex_u8(s: &str) -> Result<u8> {
@@ -449,6 +456,7 @@ fn run() -> Result<()> {
                 anyhow::bail!("checksums were bad and have been corrected in place");
             }
         }
+        "patches" => patches_cmd(&args, bench_image, bench_out),
         "uprog-ein" => {
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
@@ -647,4 +655,209 @@ fn main() {
         eprintln!("ERROR: {e:#}");
         std::process::exit(1);
     }
+}
+
+// ---------------------------------------------------------------------------
+// `patches` subcommand — firmware patch manifests (baud 0x91, EWS delete)
+// ---------------------------------------------------------------------------
+
+/// Positional words after `patches`, skipping the value-taking global flags.
+fn patch_positionals(args: &[String]) -> Vec<String> {
+    let mut pos = Vec::new();
+    let mut i = 2; // binary, "patches"
+    while i < args.len() {
+        match args[i].as_str() {
+            "--image" | "--out" | "--port" | "--baud" | "--data-delay" | "--duration"
+            | "--rate" | "--fast-baud" => i += 2,
+            s if s.starts_with("--") => i += 1,
+            s => {
+                pos.push(s.to_string());
+                i += 1;
+            }
+        }
+    }
+    pos
+}
+
+/// Resolve a patch by exact name, unique case-insensitive substring, or the
+/// 1-based index printed by `patches list`.
+fn find_patch<'a>(all: &'a [patches::Patch], needle: Option<&String>) -> Result<&'a patches::Patch> {
+    let Some(needle) = needle else {
+        anyhow::bail!("name a patch (see `dde3-toolkit patches list`)");
+    };
+    if let Some(p) = all.iter().find(|p| p.name == *needle) {
+        return Ok(p);
+    }
+    if let Ok(idx) = needle.parse::<usize>() {
+        if let Some(p) = all.get(idx.wrapping_sub(1)) {
+            return Ok(p);
+        }
+    }
+    let lower = needle.to_ascii_lowercase();
+    let hits: Vec<&patches::Patch> = all
+        .iter()
+        .filter(|p| p.name.to_ascii_lowercase().contains(&lower))
+        .collect();
+    match hits.len() {
+        1 => Ok(hits[0]),
+        0 => anyhow::bail!(
+            "no patch matches {needle:?}; available: {}",
+            all.iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => anyhow::bail!(
+            "{needle:?} is ambiguous; matches: {}",
+            hits.iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Print the checksum report for an image; returns whether every check passed.
+fn report_checksums(image: &[u8]) -> bool {
+    let checks = verify(image);
+    if checks.is_empty() {
+        println!("checksums: no EDC15M checksum block found in this image");
+        return false;
+    }
+    for c in &checks {
+        println!(
+            "checksum {:<14} 0x{:05X} stored {:08X} computed {:08X} {}",
+            c.name,
+            c.pos,
+            c.stored,
+            c.computed,
+            if c.ok { "OK" } else { "BAD" }
+        );
+    }
+    checks.iter().all(|c| c.ok)
+}
+
+fn patches_cmd(args: &[String], image: Option<String>, out: Option<String>) -> Result<()> {
+    let pos = patch_positionals(args);
+    let action = pos.first().map(String::as_str).unwrap_or("list");
+    let (all, warnings) = patches::load_all();
+    for w in &warnings {
+        eprintln!("warning: {w}");
+    }
+    if all.is_empty() {
+        anyhow::bail!("no patch manifests found (expected ./patches/*.json)");
+    }
+    let loaded = match &image {
+        Some(path) => Some(read_image(path, IMAGE_SIZE)?),
+        None => None,
+    };
+
+    match action {
+        "list" => {
+            for (i, p) in all.iter().enumerate() {
+                let state = loaded.as_ref().map(|img| p.state(img));
+                println!(
+                    "{:>2}. {:<28} v{}  {:<10} {}",
+                    i + 1,
+                    p.name,
+                    p.version,
+                    state.as_ref().map(|s| s.label()).unwrap_or("-"),
+                    p.description.lines().next().unwrap_or("")
+                );
+                if let Some(detail) = state.as_ref().and_then(|s| s.detail()) {
+                    println!("    {detail}");
+                }
+            }
+            Ok(())
+        }
+        "show" => {
+            let p = find_patch(&all, pos.get(1))?;
+            println!("{}  (v{})", p.name, p.version);
+            println!("source:  {}", p.source.label());
+            if let Some(o) = &p.output {
+                println!("output:  {o}");
+            }
+            println!("description: {}", p.description);
+            if !p.verified.is_empty() {
+                println!("verified: {}", p.verified);
+            }
+            println!(
+                "hardware tested: {}",
+                if p.hardware_tested { "yes" } else { "no" }
+            );
+            if let Some(h) = &p.target_sha256 {
+                println!("input sha256: {h}");
+            }
+            if !p.checksum_note.is_empty() {
+                println!("checksums: {}", p.checksum_note);
+            }
+            println!("changes ({} ranges, {} bytes):", p.changes.len(), p.changed_bytes());
+            for c in &p.changes {
+                println!(
+                    "  0x{:05X}  {:<8} {:<16} -> {}",
+                    c.offset,
+                    format!("{} B", c.after.len()),
+                    hex_prefix(&c.before),
+                    hex_prefix(&c.after)
+                );
+            }
+            Ok(())
+        }
+        "apply" | "revert" => {
+            let p = find_patch(&all, pos.get(1))?;
+            let in_path = image
+                .as_deref()
+                .context("--image <in.bin> is required")?;
+            let mut img = read_image(in_path, IMAGE_SIZE)?;
+            if action == "apply" {
+                p.apply(&mut img)?;
+            } else {
+                p.revert(&mut img)?;
+            }
+            let out_path = out.unwrap_or_else(|| {
+                let stem = in_path.trim_end_matches(".bin").trim_end_matches(".BIN");
+                format!("{stem}.{action}ed.bin")
+            });
+            std::fs::write(&out_path, &img)
+                .with_context(|| format!("cannot write {out_path}"))?;
+            println!("{action} {} -> {out_path}", p.name);
+            let ok = report_checksums(&img);
+            if !ok {
+                anyhow::bail!("{out_path} still has a bad checksum");
+            }
+            println!("all checksums OK — review the image, then write it from the Write tab");
+            Ok(())
+        }
+        "verify" => {
+            let p = find_patch(&all, pos.get(1))?;
+            let img = loaded.context("--image <in.bin> is required")?;
+            let state = p.state(&img);
+            println!("{}: {}", p.name, state.label());
+            let ok = report_checksums(&img);
+            match state {
+                patches::PatchState::Applied if ok => Ok(()),
+                patches::PatchState::Applied => anyhow::bail!("checksums are bad"),
+                patches::PatchState::Available => anyhow::bail!("the patch is not applied"),
+                patches::PatchState::Conflict(d) | patches::PatchState::Invalid(d) => {
+                    anyhow::bail!("{d}")
+                }
+            }
+        }
+        other => anyhow::bail!(
+            "unknown patches action {other:?}; use list | show <name> | apply <name> | revert <name> | verify <name>"
+        ),
+    }
+}
+
+fn hex_prefix(bytes: &[u8]) -> String {
+    const MAX: usize = 8;
+    let mut s: String = bytes
+        .iter()
+        .take(MAX)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if bytes.len() > MAX {
+        s.push('…');
+    }
+    s
 }

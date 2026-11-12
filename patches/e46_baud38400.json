@@ -1,0 +1,43 @@
+{
+  "patch": "edc15m_baud_0x91_38400",
+  "version": 1,
+  "description": "Add DS2 service 0x91; switches the K-line to 38400 baud (S0BG 0x0C) on `12 08 91 00 009600 03`. Revert = power cycle.",
+  "ecu": "Bosch EDC15M / BMW DDE3.0 (M47), prog 7786887 / cal 7789659",
+  "address_mapping": "file offset in the 256 KB full read; CPU address = file offset",
+  "input": {
+    "path": "e46_orig.bin",
+    "sha256": "e16bb3e3c46eb2d037be1a42b69e2e19456a73cb02ae054ce9bd2abfecd0bd7d",
+    "size": 262144
+  },
+  "output": {
+    "path": "e46_baud38400.bin",
+    "sha256": "50a6b55ad6cc80613764e0db7314da0c618f8da7c5621d2cd18f22fb53709a25",
+    "size": 262144
+  },
+  "checksum": "already-corrected",
+  "checksum_note": "code 0x13FFC, cal 0x3FBFC and program chain 0x38B7C are valid in the output image",
+  "hardware_tested": false,
+  "changes": [
+    {
+      "what": "edit",
+      "file_offset": "0x185C3",
+      "length": 32,
+      "before": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "after": "46f49100ea20cf85fa02f295da022c69e7faa000f7fafacbe65a0c00fa02f695"
+    },
+    {
+      "what": "edit",
+      "file_offset": "0x293D0",
+      "length": 4,
+      "before": "ea00f295",
+      "after": "fa01c385"
+    },
+    {
+      "what": "edit",
+      "file_offset": "0x38B7C",
+      "length": 4,
+      "before": "023352db",
+      "after": "915f90d3"
+    }
+  ]
+}

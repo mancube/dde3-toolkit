@@ -24,6 +24,7 @@ the knowledge base; don't re-derive or guess against it.
 | Wire facts | `docs/wire-protocol.md` |
 | Fault/DTC protocol | `docs/dtc-fault-protocol.md` |
 | Checksums / break-mode / 0x91 patch | `docs/checksum.md`, `docs/break-mode.md`, `docs/baud-0x91-patch.md` |
+| Firmware patches (manifests, builders, CLI/GUI) | `docs/patches.md`, `patches/README.md`, `src/patches.rs` |
 | RE background (VM, .prg, jobs) | `docs/reverse-engineering.md`, `tools/prg_vm.py` |
 | Historical context | `docs/session-log.md`, `docs/SESSION_2026-11-09.md` |
 

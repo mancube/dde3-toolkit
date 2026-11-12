@@ -1,0 +1,78 @@
+{
+  "patch": "edc15m_immo_off_full",
+  "version": 1,
+  "description": "EWS immobiliser delete (full); off-road use. EWS result/release flags forced to matched.",
+  "ecu": "Bosch EDC15M / BMW DDE3.0 (M47), prog 7786887 / cal 7789659",
+  "address_mapping": "file offset in the 256 KB full read; CPU address = file offset",
+  "input": {
+    "path": "e46_orig.bin",
+    "sha256": "e16bb3e3c46eb2d037be1a42b69e2e19456a73cb02ae054ce9bd2abfecd0bd7d",
+    "size": 262144
+  },
+  "output": {
+    "path": "e46_immo_off_full.bin",
+    "sha256": "28266f769b1588d798f6abc87f4137d90246e68e480ef54f39fb3044994e1bd6",
+    "size": 262144
+  },
+  "checksum": "already-corrected",
+  "checksum_note": "code 0x13FFC, cal 0x3FBFC and program chain 0x38B7C are valid in the output image",
+  "hardware_tested": false,
+  "changes": [
+    {
+      "what": "edit",
+      "file_offset": "0x300ED",
+      "length": 1,
+      "before": "8e",
+      "after": "8f"
+    },
+    {
+      "what": "edit",
+      "file_offset": "0x30161",
+      "length": 1,
+      "before": "8e",
+      "after": "8f"
+    },
+    {
+      "what": "edit",
+      "file_offset": "0x303BE",
+      "length": 1,
+      "before": "f3",
+      "after": "e7"
+    },
+    {
+      "what": "edit",
+      "file_offset": "0x303C0",
+      "length": 2,
+      "before": "3cc1",
+      "after": "0100"
+    },
+    {
+      "what": "edit",
+      "file_offset": "0x308BD",
+      "length": 1,
+      "before": "8e",
+      "after": "8f"
+    },
+    {
+      "what": "edit",
+      "file_offset": "0x31164",
+      "length": 1,
+      "before": "f3",
+      "after": "e7"
+    },
+    {
+      "what": "edit",
+      "file_offset": "0x31166",
+      "length": 2,
+      "before": "3cc1",
+      "after": "0100"
+    },
+    {
+      "what": "edit",
+      "file_offset": "0x38B7C",
+      "length": 4,
+      "before": "023352db",
+      "after": "1ff9e354"
+    }
+  ]
+}

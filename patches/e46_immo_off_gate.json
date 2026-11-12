@@ -1,0 +1,36 @@
+{
+  "patch": "edc15m_immo_off_gate",
+  "version": 1,
+  "description": "EWS immobiliser delete (gate); off-road use. Fuel gate 0x2A65E forced to use real quantity.",
+  "ecu": "Bosch EDC15M / BMW DDE3.0 (M47), prog 7786887 / cal 7789659",
+  "address_mapping": "file offset in the 256 KB full read; CPU address = file offset",
+  "input": {
+    "path": "e46_orig.bin",
+    "sha256": "e16bb3e3c46eb2d037be1a42b69e2e19456a73cb02ae054ce9bd2abfecd0bd7d",
+    "size": 262144
+  },
+  "output": {
+    "path": "e46_immo_off_gate.bin",
+    "sha256": "cb018430d79154cb0bc03c4098a1b296cc83998eff2b8a3278adbc709fe76fc8",
+    "size": 262144
+  },
+  "checksum": "already-corrected",
+  "checksum_note": "code 0x13FFC, cal 0x3FBFC and program chain 0x38B7C are valid in the output image",
+  "hardware_tested": false,
+  "changes": [
+    {
+      "what": "edit",
+      "file_offset": "0x2A65E",
+      "length": 2,
+      "before": "3d03",
+      "after": "0d06"
+    },
+    {
+      "what": "edit",
+      "file_offset": "0x38B7C",
+      "length": 4,
+      "before": "023352db",
+      "after": "0838d33a"
+    }
+  ]
+}

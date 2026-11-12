@@ -27,14 +27,19 @@ captures. All of that work is written up in [`docs/`](docs) — start with
   `DDE30DS0.prg`), DS2 and K-line clear
 - **Live data** — DDE3 MW service, batched into as few telegrams as the
   0x80-byte DS2 cap allows; variable list generated from the ECU's ADF table
-- **Checksum** — Bosch TDI V3.1 verify/correct (calibration + code blocks)
+- **Checksum** — Bosch TDI V3.1 verify/correct (calibration + code slots)
+  plus the cold-start **program chain** at `0x38B7C`, which any edit in the
+  program area invalidates
 - **Seed/key** — `12 08 90 42 4D 57 05 <Z>`, Z = seconds mod 46
 - **Break-entered service protocol** — UART break → 10.4 k → 38.4 k with the
   decoded byte-addressed command set (`breakmode.rs`)
+- **Firmware patches** — manifest-driven apply/revert of the shipped baud
+  (`0x91`) and EWS-delete patches, checksums corrected on apply; builders and
+  prebuilt images in [`patches/`](patches)
 - **Protocol log** — every frame with timing; per-operation or continuous,
   to file and CSV
-- **8-tab GUI** — Overview, Read, Write, Checksum, Fault codes, Live,
-  Logger, Log (egui)
+- **9-tab GUI** — Overview, Read, Write, Checksum, Patches, Fault codes,
+  Live, Logger, Log (egui)
 - **Headless bench** — `bench` subcommand for scripted runs
 - **In-process ECU simulator** — `--sim` on any subcommand, or `--demo` in
   the GUI (no hardware needed)
@@ -157,7 +162,8 @@ cargo test        # protocol frames, parser, checksum, DTC tables, break mode
 | Status + task at hand | [`HANDOVER.md`](HANDOVER.md) |
 | Wire protocol (framing, replies, timing) | [`docs/wire-protocol.md`](docs/wire-protocol.md) |
 | Fault/DTC protocol + record layout | [`docs/dtc-fault-protocol.md`](docs/dtc-fault-protocol.md) |
-| Checksums (TDI V3.1) | [`docs/checksum.md`](docs/checksum.md) |
+| Checksums (TDI V3.1 + program chain) | [`docs/checksum.md`](docs/checksum.md) |
+| Firmware patches (baud, EWS delete) | [`docs/patches.md`](docs/patches.md), [`patches/README.md`](patches/README.md) |
 | Break-entered service protocol | [`docs/break-mode.md`](docs/break-mode.md) |
 | Reverse-engineering notes (VM, jobs) | [`docs/reverse-engineering.md`](docs/reverse-engineering.md) |
 | Historical session log | [`docs/session-log.md`](docs/session-log.md) |
@@ -166,8 +172,9 @@ cargo test        # protocol frames, parser, checksum, DTC tables, break mode
 
 - No fault-**read** job exists in the stock tester program; fault reading
   uses the DS2 diagnostic program (`DDE30DS0.prg`) instead.
-- The real-ECU checksum-status reply has not been captured yet — confirm on
-  hardware before flashing checksum-corrected images.
+- The checksum-status reply was captured (`12 04 0A` → `12 05 A0 00`,
+  2026-11-10), but the program-chain correction and the patched images have
+  not been hardware-tested — bench-test before flashing a patched image.
 - The 38.4 k break-mode secondary commands are decoded from the firmware but
   still pending one hardware capture.
 
@@ -175,8 +182,10 @@ cargo test        # protocol frames, parser, checksum, DTC tables, break mode
 
 - ECU powered, engine stopped.
 - Writes require a verified full backup and typing `WRITE`.
-- Checksums are **not** auto-corrected on the write path (algorithm
-  hardware-unverified).
+- Checksums **are** corrected on the write path (TDI code + calibration,
+  then the cold-start program chain) with byte-for-byte parity against the
+  verified reference tools — but the corrected/patched images themselves are
+  bench-untested.
 - Do not interrupt power during erase or programming.
 
 ## Relationship to dde4-toolkit
@@ -185,4 +194,5 @@ cargo test        # protocol frames, parser, checksum, DTC tables, break mode
 dde3-toolkit mirrors its structure but uses DDE3 DS2 service codes instead of
 DDE4's UDS/KWP2000 codes, keeps the K-line at 9600 baud, and gets its DTC
 tables from the embedded `.prg` instead of external files. DDE4's
-`patches.rs` is deliberately not ported — no DDE3 patches exist.
+`patches.rs` design is mirrored in `src/patches.rs`, with DDE3's own manifests
+(baud `0x91`, EWS delete) and its three checksums.

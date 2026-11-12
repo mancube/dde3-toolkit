@@ -24,6 +24,7 @@ use eframe::egui::{
 
 use crate::checksum::{self, CAL_LEN, CAL_START, IMAGE_SIZE};
 use crate::live::{LiveVar, LIVE_VARS};
+use crate::patches::{self, Patch, PatchState};
 use crate::protocol::{self, Kline};
 
 const BG: Color32 = Color32::from_rgb(10, 14, 18);
@@ -55,6 +56,7 @@ pub enum Tab {
     Read,
     Write,
     Checksum,
+    Patches,
     Dtc,
     Live,
     Logger,
@@ -68,6 +70,7 @@ impl Tab {
             "read" => Tab::Read,
             "write" => Tab::Write,
             "checksum" => Tab::Checksum,
+            "patches" | "patch" => Tab::Patches,
             "live" => Tab::Live,
             "logger" => Tab::Logger,
             "log" => Tab::Log,
@@ -81,6 +84,7 @@ impl Tab {
             Tab::Read => "Read flash",
             Tab::Write => "Write flash",
             Tab::Checksum => "Checksums",
+            Tab::Patches => "Patches",
             Tab::Dtc => "Fault codes",
             Tab::Live => "Live data",
             Tab::Logger => "Value logger",
@@ -94,6 +98,7 @@ impl Tab {
             Tab::Read => "▤",
             Tab::Write => "▥",
             Tab::Checksum => "Σ",
+            Tab::Patches => "⊞",
             Tab::Dtc => "⚡",
             Tab::Live => "◉",
             Tab::Logger => "▦",
@@ -228,6 +233,12 @@ pub struct App {
     fast_baud: Option<u32>,
     /// The rate the DS2 link currently runs at once a 0x91 switch succeeded.
     fast_baud_active: Option<u32>,
+    /// Firmware patch manifests (built in + `patches/` + DDE3_PATCH_DIR).
+    patches: Vec<Patch>,
+    patch_selected: usize,
+    patch_warnings: Vec<String>,
+    patch_notice: Option<String>,
+    patch_target_ok: Option<bool>,
 }
 
 impl App {
@@ -251,6 +262,7 @@ impl App {
     ) -> Self {
         style(&cc.egui_ctx);
         let (tx, rx) = unbounded();
+        let (patches, patch_warnings) = patches::load_all();
         let mut app = Self {
             link: Arc::new(Mutex::new(None)),
             tx,
@@ -305,6 +317,11 @@ impl App {
             auto_write,
             fast_baud,
             fast_baud_active: None,
+            patches,
+            patch_selected: 0,
+            patch_warnings,
+            patch_notice: None,
+            patch_target_ok: None,
         };
         app.refresh_ports();
         if demo {
@@ -1640,6 +1657,7 @@ impl App {
                     Tab::Read,
                     Tab::Write,
                     Tab::Checksum,
+                    Tab::Patches,
                     Tab::Dtc,
                     Tab::Live,
                     Tab::Logger,
@@ -1739,6 +1757,7 @@ impl App {
                         Tab::Read => self.read_tab(ui),
                         Tab::Write => self.write_tab(ui),
                         Tab::Checksum => self.checksum_tab(ui),
+                        Tab::Patches => self.patches_tab(ui),
                         Tab::Dtc => self.dtc_tab(ui),
                         Tab::Live => self.live_tab(ui),
                         Tab::Logger => self.logger_tab(ui),
@@ -2129,6 +2148,424 @@ impl App {
         if !checks.is_empty() {
             checksum_card(ui, &checks);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Patches tab — firmware patch manifests (baud 0x91, EWS delete)
+    // -----------------------------------------------------------------------
+
+    /// Patch state for the loaded image. Patches need a full 256 KB image; a
+    /// 32 KB calibration read is rejected rather than sliced out of bounds.
+    fn patch_state(&self, p: &Patch) -> PatchState {
+        match &self.image {
+            Some(img) if !self.image_is_partial => p.state(img),
+            Some(_) => PatchState::Invalid("a patch needs a 256 KB full image".into()),
+            None => PatchState::Invalid("load a 256 KB image first".into()),
+        }
+    }
+
+    fn patches_tab(&mut self, ui: &mut Ui) {
+        heading(
+            ui,
+            "Patches",
+            "Apply or revert firmware patches on the loaded image. Nothing is sent to the ECU here.",
+        );
+        ui.add_space(8.0);
+        card(ui, ui.available_width(), |ui| {
+            ui.label(
+                RichText::new(
+                    "Patches edit the image in memory only. Review the changed bytes, save the \
+                     image, then write it from the Write flash tab. Every apply/revert also \
+                     corrects the TDI V3.1 slots and the cold-start program chain. Code patches \
+                     are experimental unless the manifest says they were hardware-tested.",
+                )
+                .size(12.0)
+                .color(WARN),
+            );
+        });
+        ui.add_space(10.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_sized(Vec2::new(150.0, 30.0), egui::Button::new("Open patch…"))
+                .clicked()
+            {
+                self.open_patch_dialog();
+            }
+            if ui
+                .add_sized(Vec2::new(110.0, 30.0), egui::Button::new("Reload"))
+                .clicked()
+            {
+                self.reload_patches();
+            }
+            if ui
+                .add_enabled(
+                    self.image.is_some(),
+                    egui::Button::new("Save image…").min_size(Vec2::new(140.0, 30.0)),
+                )
+                .clicked()
+            {
+                self.save_image();
+            }
+            ui.label(
+                RichText::new(format!("{} manifests", self.patches.len()))
+                    .size(11.0)
+                    .color(MUTED),
+            );
+        });
+        if !self.patch_warnings.is_empty() {
+            ui.add_space(8.0);
+            card(ui, ui.available_width(), |ui| {
+                section_title(ui, "Manifest warnings");
+                for w in &self.patch_warnings {
+                    ui.label(RichText::new(w).size(11.0).color(WARN));
+                }
+            });
+        }
+        ui.add_space(12.0);
+        if self.patches.is_empty() {
+            card(ui, ui.available_width(), |ui| {
+                section_title(ui, "No patches");
+                ui.label(
+                    RichText::new(
+                        "Put a patch JSON manifest in ./patches or set DDE3_PATCH_DIR, or use \
+                         Open patch….",
+                    )
+                    .size(12.0)
+                    .color(MUTED),
+                );
+            });
+            return;
+        }
+
+        let image = if self.image_is_partial {
+            None
+        } else {
+            self.image.clone()
+        };
+        let mut selected = None;
+        card(ui, ui.available_width(), |ui| {
+            section_title(ui, "Available patches");
+            ScrollArea::vertical().max_height(190.0).show(ui, |ui| {
+                for (i, p) in self.patches.iter().enumerate() {
+                    let state = self.patch_state(p);
+                    let text = format!("{}   ·   {}", p.name, state.label());
+                    if ui
+                        .selectable_label(i == self.patch_selected, RichText::new(text).size(13.0))
+                        .clicked()
+                    {
+                        selected = Some(i);
+                    }
+                    if let Some(detail) = state.detail() {
+                        ui.label(RichText::new(detail).size(10.0).color(MUTED));
+                    }
+                    ui.add_space(2.0);
+                }
+            });
+        });
+        if let Some(i) = selected {
+            self.patch_selected = i;
+            self.patch_notice = None;
+            self.patch_target_ok = image.as_ref().map(|img| self.patches[i].target_matches(img));
+        }
+
+        let Some(p) = self.patches.get(self.patch_selected).cloned() else {
+            return;
+        };
+        if self.patch_target_ok.is_none() {
+            if let Some(img) = &image {
+                self.patch_target_ok = Some(p.target_matches(img));
+            }
+        }
+        let state = self.patch_state(&p);
+        let can_apply = state == PatchState::Available;
+        let can_revert = state == PatchState::Applied;
+
+        ui.add_space(12.0);
+        card(ui, ui.available_width(), |ui| {
+            section_title(ui, &p.name);
+            ui.horizontal_wrapped(|ui| {
+                pill(ui, &format!("v{}", p.version), ACCENT);
+                pill(
+                    ui,
+                    state.label(),
+                    if can_apply {
+                        WARN
+                    } else if can_revert {
+                        OK
+                    } else {
+                        DANGER
+                    },
+                );
+                if p.hardware_tested {
+                    pill(ui, "hardware tested", OK);
+                } else {
+                    pill(ui, "not hardware tested", WARN);
+                }
+                if p.checksum == "auto" || p.checksum == "already-corrected" {
+                    pill(ui, "checksums corrected on apply", ACCENT);
+                }
+            });
+            ui.add_space(6.0);
+            if !p.description.is_empty() {
+                ui.label(RichText::new(&p.description).size(12.0).color(TEXT));
+            }
+            if !p.verified.is_empty() {
+                ui.label(RichText::new(&p.verified).size(11.0).color(MUTED));
+            }
+            ui.add_space(6.0);
+            egui::Grid::new("patch-meta")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Source").size(11.0).color(MUTED));
+                    ui.label(RichText::new(p.source.label()).size(11.0).color(TEXT));
+                    ui.end_row();
+                    if let Some(out) = &p.output {
+                        ui.label(RichText::new("Builder output").size(11.0).color(MUTED));
+                        ui.label(RichText::new(out).size(11.0).color(TEXT));
+                        ui.end_row();
+                    }
+                    if let Some(hash) = &p.target_sha256 {
+                        ui.label(RichText::new("Target image").size(11.0).color(MUTED));
+                        let text = if self.patch_target_ok == Some(true) {
+                            format!("{} (matches)", &hash[..hash.len().min(16)])
+                        } else if self.patch_target_ok == Some(false) {
+                            format!("{} (loaded image differs)", &hash[..hash.len().min(16)])
+                        } else {
+                            hash[..hash.len().min(16)].to_string()
+                        };
+                        ui.label(
+                            RichText::new(text)
+                                .font(FontId::monospace(11.0))
+                                .color(if self.patch_target_ok == Some(false) {
+                                    WARN
+                                } else {
+                                    TEXT
+                                }),
+                        );
+                        ui.end_row();
+                    }
+                    if !p.sectors.is_empty() {
+                        ui.label(RichText::new("Sectors").size(11.0).color(MUTED));
+                        ui.label(
+                            RichText::new(
+                                p.sectors
+                                    .iter()
+                                    .map(|s| format!("{s}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                            )
+                            .size(11.0)
+                            .color(TEXT),
+                        );
+                        ui.end_row();
+                    }
+                    ui.label(RichText::new("Changes").size(11.0).color(MUTED));
+                    ui.label(
+                        RichText::new(format!(
+                            "{} ranges, {} bytes",
+                            p.changes.len(),
+                            p.changed_bytes()
+                        ))
+                        .size(11.0)
+                        .color(TEXT),
+                    );
+                    ui.end_row();
+                });
+            if !p.checksum_note.is_empty() {
+                ui.add_space(6.0);
+                ui.label(RichText::new(&p.checksum_note).size(11.0).color(MUTED));
+            }
+            if let Some(detail) = state.detail() {
+                ui.add_space(6.0);
+                ui.label(RichText::new(detail).size(11.0).color(DANGER));
+            }
+            if let Some(note) = &self.patch_notice {
+                ui.add_space(6.0);
+                ui.label(RichText::new(note).size(12.0).color(OK));
+            }
+        });
+
+        ui.add_space(12.0);
+        card(ui, ui.available_width(), |ui| {
+            section_title(ui, "Changed ranges");
+            egui::Grid::new("patch-changes")
+                .num_columns(6)
+                .spacing([12.0, 5.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    for h in ["What", "Offset", "Len", "Before", "After", "State"] {
+                        ui.label(RichText::new(h).size(11.0).color(MUTED));
+                    }
+                    ui.end_row();
+                    for c in &p.changes {
+                        let (label, color) = match &image {
+                            Some(img) if img[c.offset..c.offset + c.after.len()] == c.after => {
+                                ("applied", OK)
+                            }
+                            Some(img) if img[c.offset..c.offset + c.before.len()] == c.before => {
+                                ("original", MUTED)
+                            }
+                            _ => ("conflict", DANGER),
+                        };
+                        ui.label(RichText::new(&c.what).size(11.0).color(TEXT));
+                        ui.label(
+                            RichText::new(format!("0x{:05X}", c.offset))
+                                .font(FontId::monospace(11.0))
+                                .color(TEXT),
+                        );
+                        ui.label(RichText::new(format!("{}", c.after.len())).size(11.0).color(MUTED));
+                        ui.label(
+                            RichText::new(short_hex(&c.before, 8))
+                                .font(FontId::monospace(10.0))
+                                .color(MUTED),
+                        );
+                        ui.label(
+                            RichText::new(short_hex(&c.after, 8))
+                                .font(FontId::monospace(10.0))
+                                .color(ACCENT),
+                        );
+                        ui.label(RichText::new(label).size(11.0).color(color));
+                        ui.end_row();
+                    }
+                });
+        });
+
+        ui.add_space(12.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    can_apply && self.image.is_some(),
+                    egui::Button::new(RichText::new("Apply to image").color(BG))
+                        .fill(WARN)
+                        .min_size(Vec2::new(170.0, 34.0)),
+                )
+                .clicked()
+            {
+                self.apply_selected_patch();
+            }
+            if ui
+                .add_enabled(
+                    can_revert && self.image.is_some(),
+                    egui::Button::new(RichText::new("Revert in image").color(BG))
+                        .fill(ACCENT)
+                        .min_size(Vec2::new(170.0, 34.0)),
+                )
+                .clicked()
+            {
+                self.revert_selected_patch();
+            }
+            if ui
+                .add_sized(Vec2::new(150.0, 34.0), egui::Button::new("Go to Write"))
+                .clicked()
+            {
+                self.tab = Tab::Write;
+            }
+        });
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(
+                "Apply writes the after-bytes and corrects all flash checksums (TDI code + \
+                 calibration, then the cold-start program chain). Revert writes the before-bytes. \
+                 The original image must match every before-range; a mismatch is refused.",
+            )
+            .size(11.0)
+            .color(MUTED),
+        );
+    }
+
+    fn apply_selected_patch(&mut self) {
+        let Some(p) = self.patches.get(self.patch_selected).cloned() else {
+            return;
+        };
+        let Some(mut img) = self.image.take() else {
+            self.error = Some("Load a 256 KB image first".into());
+            return;
+        };
+        match p.apply(&mut img) {
+            Ok(()) => {
+                self.image = Some(img);
+                self.refresh_checks();
+                self.patch_target_ok = self.image.as_ref().map(|i| p.target_matches(i));
+                self.patch_notice = Some(format!(
+                    "Applied {}; checksums corrected. Save the image, then write it.",
+                    p.name
+                ));
+                self.status = format!("Applied patch {}", p.name);
+                self.error = None;
+                self.push_log(format!("PATCH apply {}", p.name));
+            }
+            Err(e) => {
+                self.image = Some(img);
+                self.error = Some(format!("{e}"));
+            }
+        }
+    }
+
+    fn revert_selected_patch(&mut self) {
+        let Some(p) = self.patches.get(self.patch_selected).cloned() else {
+            return;
+        };
+        let Some(mut img) = self.image.take() else {
+            self.error = Some("Load a 256 KB image first".into());
+            return;
+        };
+        match p.revert(&mut img) {
+            Ok(()) => {
+                self.image = Some(img);
+                self.refresh_checks();
+                self.patch_target_ok = self.image.as_ref().map(|i| p.target_matches(i));
+                self.patch_notice = Some(format!(
+                    "Reverted {}; checksums corrected. Save the image, then write it.",
+                    p.name
+                ));
+                self.status = format!("Reverted patch {}", p.name);
+                self.error = None;
+                self.push_log(format!("PATCH revert {}", p.name));
+            }
+            Err(e) => {
+                self.image = Some(img);
+                self.error = Some(format!("{e}"));
+            }
+        }
+    }
+
+    fn open_patch_dialog(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Patch manifest", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        match patches::load_file(&path) {
+            Ok(p) => {
+                let name = p.name.clone();
+                if let Some(existing) = self.patches.iter_mut().find(|x| x.name == p.name) {
+                    *existing = p;
+                } else {
+                    self.patches.push(p);
+                }
+                self.patches.sort_by(|a, b| a.name.cmp(&b.name));
+                if let Some(i) = self.patches.iter().position(|x| x.name == name) {
+                    self.patch_selected = i;
+                }
+                self.patch_target_ok = None;
+                self.patch_notice = Some(format!("Loaded manifest {}", path.display()));
+                self.error = None;
+            }
+            Err(e) => self.error = Some(format!("{e}")),
+        }
+    }
+
+    fn reload_patches(&mut self) {
+        let (patches, warnings) = patches::load_all();
+        self.patches = patches;
+        self.patch_warnings = warnings;
+        self.patch_selected = self
+            .patch_selected
+            .min(self.patches.len().saturating_sub(1));
+        self.patch_target_ok = None;
+        self.patch_notice = Some("Patch manifests reloaded".into());
     }
 
     fn checksum_tab(&mut self, ui: &mut Ui) {
@@ -3002,6 +3439,19 @@ fn card(ui: &mut Ui, width: f32, add: impl FnOnce(&mut Ui)) {
             ui.set_width(inner);
             add(ui);
         });
+}
+
+/// First `max` bytes as hex, with an ellipsis when truncated.
+fn short_hex(bytes: &[u8], max: usize) -> String {
+    let mut s: String = bytes
+        .iter()
+        .take(max)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if bytes.len() > max {
+        s.push('…');
+    }
+    s
 }
 
 fn section_title(ui: &mut Ui, text: &str) {

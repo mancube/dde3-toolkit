@@ -21,6 +21,7 @@ chip, DDE 3.0 hardware name).
 | `docs/checksum.md` | TDI V3.1 checksum algorithm, block discovery, the false-BAD fix, the cold-start program chain |
 | `docs/break-mode.md` | Break-entered service protocol (10.4 k / 38.4 k) + decoded command set |
 | `docs/baud-0x91-patch.md` | DS2 0x91 baud-change ECU patch + `baud` command |
+| `docs/patches.md` | Manifest-driven firmware patches (CLI `patches` + GUI tab), builders, prebuilt images |
 | `docs/reverse-engineering.md` | .prg format, the 33 jobs, WinkFP VM status, DDE4 parallels, job re-scope |
 | `docs/session-log.md` | Historical status snapshots (superseded content) |
 | `docs/FINDINGS_*.md`, `docs/SESSION_2026-11-09.md`, `docs/handoff-fast-baud.md` | Earlier finding write-ups |
@@ -118,6 +119,33 @@ only (`progsum.py`), so a Rust-patched image (baud hook, EWS gate, any edit in
 - Tests (62 passing): `progsum.py` cross-check vector (`fc520cf8`), ordering
   test with a stale code slot, padded-partial no-chain test, idempotency.
   Real images `e46_orig.bin` + all four patch images verify all-OK.
+
+### Session 15 (2026-11-12) — firmware patches are part of the toolkit
+
+Ported dde4-toolkit's manifest-driven patching to DDE3 and vendored the patch
+bundle from `~/Desktop/edc15m/patches/` into `patches/` (self-contained):
+
+- `src/patches.rs` — JSON manifests (`before`/`after` byte ranges, refused
+  unless every range matches), built-in manifests via `include_str!`, extra
+  manifests from `DDE3_PATCH_DIR` / `./patches` / `<exe>/patches`. Apply and
+  revert call `checksum::correct`, so TDI code + calibration **and** the
+  cold-start program chain are corrected.
+- CLI: `patches list|show|apply|revert|verify` with `--image`/`--out`; prints
+  the checksum report and refuses to write a bad image.
+- GUI: new **Patches** tab (manifest list + state, changed ranges, apply /
+  revert / open / reload / save, "Go to Write"); `--tab patches` opens it.
+- `patches/`: 4 prebuilt images + manifests, `e46_orig.bin` reference, the
+  three builders, and the verified reference tools vendored in `patches/tools/`
+  so `python3 patches/patch_baud.py` works from a fresh clone.
+- The two baud manifests were renamed by rate (`edc15m_baud_0x91_125000` /
+  `_38400`; they shared one name before) and `patch_baud.py` now generates the
+  rate-specific name.
+- Tests (67 passing): every built-in manifest applied to `e46_orig.bin`
+  reproduces its shipped `.bin` byte-for-byte, revert restores the reference,
+  conflict/partial-image paths refused. Python builders reproduce the same
+  four images from the vendored tools.
+- Docs: `docs/patches.md`, rewritten `patches/README.md`, README feature/safety
+  corrections (checksums *are* corrected on write; status reply *was* captured).
 
 ### Remaining open items (after the above)
 
