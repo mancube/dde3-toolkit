@@ -1,0 +1,216 @@
+# Flash read/write framing + the fast-DS2 (38.4 k / 125 k) path — resolved
+
+Date: 2026-11-12. Grounds: `research/out/disasm.txt` (DS2 dispatcher + handlers),
+`logger/decompiled_winkfp.txt` (WinKFP tester job templates), the real-car
+capture `captures/dde3newlog.txt`, and the verified baud patch in
+`../../patches/`. This supersedes the "flash framing contradiction (T3)" and
+"Tier 3 rejected" notes with evidence.
+
+---
+
+## 1. The DS2 service dispatcher (verified from disasm 0x2932C–0x293D0)
+
+The service byte sits in `R4`. The dispatcher compares it and jumps to a
+handler; every handler ends at the common reply tail 0x295F6 → 0x29090.
+Replies are prefixed with the ECU address **0x12**, status at [2] (0xA0 = OKAY,
+0xA2 = refused, 0xFF = unsupported), `len` at [1] = total wire bytes incl. XOR.
+
+| svc | meaning | handler |
+|---|---|---|
+| 0x00 | IDENT | 0x2695C |
+| 0x02 | (info) | 0x26AFE |
+| 0x04 | fault / shadow read | 0x26C0C (sub0) / 0x26CBA (sub1) |
+| 0x05 | fault-related | 0x26D2C |
+| **0x06** | **flash/area read** | **0x26DA2 — NACK stub in app mode** |
+| **0x07** | **flash write/erase/end** | **0x26DBC — NACK stub in app mode** |
+| 0x0A | checksum status | 0x26DD6 |
+| 0x0B | live MW data | 0x29440 |
+| 0x0C | actuator control | 0x294B8 |
+| 0x0D | UPROG / programming-mode + test-code area | 0x2954C |
+| 0x0E/0x0F | test code | 0x29556 / 0x29560 |
+| 0x14 | fault read (chunked) | 0x2956A |
+| 0x40/0x41/0x42 | adjustment read/set/store | 0x29588 / 0x29592 / 0x2959C |
+| 0x53 | (test-bench) | 0x295A6 |
+| 0x6C/0x6D | EWS sync / status | 0x295AC / 0x295CA |
+| 0x90 | seed-key / K2 switch | 0x28B5E |
+| 0x9E/0x9F | session keep / end | 0x2900A / 0x295E8 |
+| else | unsupported → reply `12 04 FF` | 0x295F2 |
+
+## 2. Flash read/write only works in PROGRAMMING MODE — this resolves T3
+
+In the **normal application session** services 0x06 and 0x07 are stubs:
+
+```
+026DA2 (0x06):  CMP R0,FD86h ; stack-depth guard (reset 0x25 on overflow)
+                MOVB CBFAh,#A2h   ; reply status 0xA2 (refused), nothing read
+                RETS
+026DBC (0x07):  identical shape — status 0xA2, no write.
+```
+
+So a bare `12 09 06 …` in a normal session returns a refusal, not flash data.
+Real 256 KB read/write happens only after **programming mode** is entered with
+`UPROG_EIN` (`12 04 0D`). The real flash programmer dispatcher lives in the
+**boot block (file 0x0000–0x7FFF), which is not in any dump** — exactly the
+EDC15C4 situation. Its on-wire frames therefore come from the WinKFP job
+templates, not from static code.
+
+### WinKFP tester frames (ground truth, `decompiled_winkfp.txt`)
+
+All are issued **after** `UPROG_EIN` (`12 04 0D`). The job first sends an
+`xsetpar` line-timing descriptor (e.g. erase uses `06 00 80 25 … 64 00 14 00
+03 00`) — that is tester-side only, not an ECU frame.
+
+| job | template | fields |
+|---|---|---|
+| FLASH_LESEN (read) | `12 09 06 00 00 00 00 02` | svc 0x06, [3]=00, **addr @ [4..6]**, **count @ [6..7]** |
+| FLASH_LOESCHEN (erase) | `12 09 07 06 00 00 00 00` | svc 0x07, **subfn 0x06**, addr @ [4..6] |
+| FLASH_SCHREIBEN (write) | `12 09 07 02 <addr:3> <data…>` | svc 0x07, **subfn 0x02**, addr, then data (LEN recomputed) |
+| FLASH_SCHREIBEN_ENDE | `12 09 07 0F 00 00 00 00` | svc 0x07, **subfn 0x0F**, addr |
+| BLOCKLAENGE_MAX | `12 09 06 00 00 00 00 01` | returns 0xFFF7 = max write-block length |
+
+### RESOLVED: count = 1 byte, address big-endian (code now fixed)
+
+Settled by **running the WinKFP job VM** (`tools/prg_vm.py`) with real params,
+cross-checked against the job bytecode and reconciled adversarially (2026-11-12).
+The decisive step was an over-range probe: FLASH_LESEN with count `0x1234` emits
+`12 09 06 00 01 23 45 34` — only the low byte `0x34` reaches the wire, the frame
+stays 8 bytes, LEN stays `0x09`. Therefore:
+
+- **count is ONE byte** at offset 7;
+- the **address is 24-bit big-endian** at offsets 4,5,6 (offset 4 = MSB), proven
+  by the job's mask/shift constants (`AND 0xFF0000 >>16` to [4], `AND 0xFF00 >>8`
+  to [5], `AND 0xFF` to [6]);
+- offset 3 is a **constant 0x00** for read (service 0x06) and the **subfunction**
+  for the write family (0x02 write / 0x06 erase / 0x0F end).
+
+The old `frame_flash_read` was little-endian, dropped the offset-3 `00` byte
+(7 payload bytes), yet kept `LEN=0x09`. A conformant DS2 receiver completes a
+frame only when received-count == LEN, so it waited forever for a 9th byte and
+never replied — **exactly what the real car did**: `captures/dde3newlog.txt`
+shows `12 09 06 00 80 03 80 …` sent twice with no response. The "full 256 KB
+write once worked" was a **simulator artifact** — the old sim decoded the same
+wrong layout, so the round-trip was circular.
+
+**Fixed in code this session:** `frame_flash_read` (BE + offset-3 `00`),
+`frame_flash_write` (BE + 1-byte data-length at [7] + `LEN = 9+N`),
+`frame_flash_erase` (BE, no count), `frame_flash_write_end` (BE), and the
+matching `sim.rs` decoders (`addr_be` at [4..6], count/datalen at [7]).
+`read_range`'s 0x80 chunk is a valid 1-byte count and is unchanged. Unit tests
+assert the VM-extracted byte vectors.
+
+**Still worth one bench capture** (confirmation, not a blocker): a real
+`UPROG_EIN` + FLASH_LESEN round-trip of the *corrected* frame, to confirm the
+reply data offset and the programming receiver's max write block (the datalen
+field is 1 byte → ≤255 per frame; BLOCKLAENGE_MAX's 0xFFF7 is the max *aggregate*
+length, not a per-frame cap). The write path stays gated behind typing WRITE +
+a verified backup.
+
+## 3. Real-car capture confirms the rest (`captures/dde3newlog.txt`)
+
+```
+TX 12 04 00 16                         RX 12 2E A0 "7786887 5201 1240 4801 0281001445 G521 00…"   (IDENT)
+TX 12 04 0A 1C                         RX 12 05 A0 00            (checksum status — previously "never captured")
+TX 12 0F 0B 10 0F83 0F10 0F40 0F00 0F65 BF
+                                       RX 12 10 A0 10 00 <5×u16 BE>   (batched live, LEN=5+2n confirmed)
+TX 12 05 14 01 02                      RX 12 1B A0 …             (fault read)
+```
+
+So: the **0x12 reply prefix, the batched `LEN = 5 + 2n` live frame, and the
+checksum-status reply `12 05 A0 00`** are all confirmed on the real car. The
+earlier open items for those are closed.
+
+## 4. The baud ladder and the fast-DS2 patch
+
+The K-line is the C166 **S0** UART; baud = `9600 · 52 / (S0BG+1)` (anchored on
+the stock init `S0BG=0x33` → 9600 at 0x1E8F4). Only three values exist in stock
+firmware: `0x33`=9600, `0x2F`≈10.4 k, `0x0C`=38.4 k. DS2 is locked at 9600
+because the receive state machine (0x1E904, states 0–2) never touches S0BG and
+no stock service re-rates it.
+
+Clean fast rates reachable by writing S0BG:
+
+| rate | S0BG | actual | error |
+|---|---|---|---|
+| 38400 | 0x0C | 38400 | 0 % |
+| **125000** | **0x03** | **124800** | **−0.16 %** |
+
+125000 is the **N=3 divisor** that other C166/C167 BMW fast-loggers use; it is
+within UART tolerance. 57600/115200 are **not** cleanly reachable (non-integer
+divisor) and should not be attempted.
+
+### The patch (../../patches/patch_baud.py) — adds DS2 service 0x91
+
+It hooks the dispatcher fall-through (0x293D0) to a 32-byte trampoline+handler
+in the erased block at 0x185C3. On `12 08 91 00 <baud BE> 03` it ACKs and writes
+`S0BG` to the selected divisor. The DS2 protocol is otherwise unchanged, so the
+ECU answers DS2 at the new rate and **all existing toolkit DS2 code works once
+the port is reopened**. Revert = power cycle.
+
+Two corrections vs. the older `baud91_patch/` draft (which would have bricked /
+not switched):
+
+1. **Checksum:** the hook + trampoline lie in the cold-start **program-chain**
+   checksum region (0x10000–0x38B7F), not just the two TDI slots. The balancing
+   word at 0x38B7C must be recomputed. The builder does this
+   (`edc15m_patch.fix_checksums`); the old note's "no checksum impact" was wrong
+   and would have caused a reset-loop (reset code 9).
+2. **Jump encoding:** the dispatcher (segment 2) → trampoline (segment 1) jump
+   crosses segments and must be **JMPS** (`fa 01 c3 85`), not **JMPA**
+   (`ea 00 c3 18`, which lands at 0x0218C3 and crashes). Likewise the
+   trampoline's forwards to 0x295F2 / 0x295F6 are JMPS. All encodings were
+   verified with the project disassembler.
+
+Prebuilt, checksum-valid images: `../../patches/e46_baud38400.bin`,
+`../../patches/e46_baud125000.bin` (+ `.json` manifests).
+
+### Toolkit support (this change)
+
+`dde3-toolkit baud [--rate 38400|125000]`:
+- sends `12 08 91 00 <baud24 BE> 03` at 9600,
+- reopens the port at the ECU's actual divisor (125000 → **124800**),
+- drains the ACK (which arrives at the new rate — the S0BG write precedes the
+  ACK queue), and verifies with IDENT; on failure it falls back to 9600 to tell
+  "never switched" (stock/unpatched) from "dead" (power-cycle).
+
+## 5. Fastest live logging — the numbers
+
+At 9600 8E1 a byte is ~1.04 ms. The measured real-car baseline was **2.5 Hz**
+(400 ms/cycle, 5 ids) — dominated by the old 55 ms poll sleep + 3 ms/byte TX
+pacing, not the wire. Tier 0 (sleep removed, 1 ms/byte live TX) already helps.
+
+Per-cycle wire cost for a 5-id poll (TX 7 B + RX 16 B = 23 B):
+
+| rate | wire time | + ECU turnaround | plausible Hz |
+|---|---|---|---|
+| 9600 | ~24 ms | + ECU task latency | ~5–10 Hz (tester-paced today: 2.5) |
+| 38400 | ~6 ms | + ECU task latency | ~15–30 Hz |
+| **124800** | **~2 ms** | **+ ECU task latency** | **~30–50 Hz** |
+
+Above ~50 Hz the **ECU's own measurement loop** (order 5–20 ms, the 0x2EF4 task
+scalars) caps freshness no matter the baud — more wire speed then buys nothing.
+
+**Recommended logger flow (to implement on the build host):** add `--fast-baud
+<rate>` to the `bench`/GUI live path:
+1. open 9600, unlock (UPROG_EIN + seed/key), send IDENT to confirm;
+2. `baud --rate <rate>` inline (switch + reopen at the actual divisor);
+3. run the existing batched `0B 10` live loop at the new rate;
+4. on exit, leave the ECU (it reverts to 9600 on the next power cycle).
+
+This needs **the baud patch flashed** (`e46_baud125000.bin`). Without flashing,
+9600 Tier-0 (~5–10 Hz) is the ceiling — the stock ECU has no in-band DS2 baud
+change (service 0x91 absent) and transmits nothing spontaneously, so there is
+no listen-only fast path.
+
+## 6. Status checklist
+
+| item | status |
+|---|---|
+| DS2 service→handler map | verified (disasm) |
+| 0x06/0x07 are app-mode NACK stubs; flash needs programming mode | verified (disasm) |
+| WinKFP flash frame templates | extracted (job decompile) |
+| flash read/write frame layout (count width, endianness) | **RESOLVED (VM + bytecode): 1-byte count, big-endian addr; code fixed** |
+| batched live `LEN=5+2n`, 0x12 reply prefix, checksum status `12 05 A0 00` | confirmed on real car |
+| baud ladder + 125000 = S0BG 0x03 | verified (disasm + arithmetic) |
+| baud patch (38400 + 125000), checksum-valid, correct jump encoding | built + verified offline; **bench test pending** |
+| `baud --rate` toolkit support | code added (build on host) |
+| fast-baud logger flow | **implemented**: headless (`bench --live --fast-baud`) + GUI Live-tab "Fast baud (125k)" toggle (adversarially reviewed; builds on host) |

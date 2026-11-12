@@ -54,14 +54,15 @@ fn print_usage() {
     eprintln!("    [--out <file>] [--duration <secs>]");
     eprintln!("  bench                      Headless run: identify + optional read/write,");
     eprintln!("                             progress and timing on stderr, useful exit status");
-    eprintln!("    [--info|--read|--read-cal|--write|--write-cal]");
-    eprintln!("    [--image <path>] [--out <path>]");
+    eprintln!("    [--info|--read|--read-cal|--write|--write-cal|--live]");
+    eprintln!("    [--image <path>] [--out <path>] [--fast-baud 38400|125000] [--duration <s>]");
+    eprintln!("    (--live polls the batched MW set; --fast-baud needs the baud patch flashed)");
     eprintln!("  checksum <image.bin>       Verify and optionally correct flash checksums");
     eprintln!("  uprog-ein                  Enter programming mode (12 04 0D)");
     eprintln!("  break-probe              Enter the break-entered service protocol, send one
                              probe byte, dump the response (--fast for 38.4k)");
     eprintln!("  diagnose-ende              Leave session / end diagnostics (12 04 9F)");
-    eprintln!("  baud                       Switch the DS2 link to 38.4 kbaud via service 0x91");
+    eprintln!("  baud [--rate 38400|125000] Switch the DS2 link up via service 0x91 (needs the baud patch)");
     eprintln!("                             (requires the 0x91 flash patch; see");
     eprintln!("                             ~/Desktop/edc15m_out/baud91_patch/PATCH_0x91.md)");
     eprintln!();
@@ -126,6 +127,10 @@ fn run() -> Result<()> {
     let mut data_delay_ms: u64 = 3;
     let mut sim: bool = false;
     let mut fast: bool = false;
+    // Target DS2 rate for the `baud` command (the 0x91 patch). 38400 or 125000.
+    let mut target_rate: u32 = 38_400;
+    // `bench --fast-baud <rate>`: switch up right after IDENT (needs the patch).
+    let mut fast_baud: Option<u32> = None;
     let mut bench_image: Option<String> = None;
     let mut bench_out: Option<String> = None;
 
@@ -160,6 +165,23 @@ fn run() -> Result<()> {
                     .context("--data-delay requires a value")?
                     .parse::<u64>()
                     .with_context(|| format!("invalid data delay: {}", args[i]))?;
+            }
+            "--rate" => {
+                i += 1;
+                target_rate = args
+                    .get(i)
+                    .context("--rate requires a value")?
+                    .parse::<u32>()
+                    .with_context(|| format!("invalid rate: {}", args[i]))?;
+            }
+            "--fast-baud" => {
+                i += 1;
+                fast_baud = Some(
+                    args.get(i)
+                        .context("--fast-baud requires a value")?
+                        .parse::<u32>()
+                        .with_context(|| format!("invalid fast-baud rate: {}", args[i]))?,
+                );
             }
             "--sim" => sim = true,
             "--fast" => fast = true,
@@ -369,6 +391,7 @@ fn run() -> Result<()> {
                     "--read-cal" => mode = bench::Mode::ReadCal,
                     "--write" => mode = bench::Mode::Write,
                     "--write-cal" => mode = bench::Mode::WriteCal,
+                    "--live" => mode = bench::Mode::Live,
                     "--info" => mode = bench::Mode::Info,
                     _ => {}
                 }
@@ -381,6 +404,8 @@ fn run() -> Result<()> {
                 baud,
                 data_delay: data_delay_ms,
                 sim,
+                fast_baud,
+                duration,
             };
             bench::run(args)
         }
@@ -492,46 +517,21 @@ fn run() -> Result<()> {
             //     nothing to wait for at the old rate.
             //   * the ACK (92 04 A0) then rides the line at 38.4k and is
             //     drained below; IDENT proves the new rate end-to-end.
-            const TARGET: u32 = 38_400;
+            // `--rate` selects which 0x91 patch image is flashed:
+            //   38400  -> S0BG 0x0C (e46_baud38400.bin)
+            //   125000 -> S0BG 0x03, ECU actually runs 124800 (e46_baud125000.bin)
+            // The fixed-rate patch ignores the frame's baud field, but we send the
+            // matching 24-bit value for wire-compat with a field-honoring (V2) patch.
+            // The port must be REOPENED at the ECU's actual divisor, not the nominal.
             let old_baud = baud;
             let mut k = Kline::open(&port, old_baud)?;
             k.set_data_delay(data_delay_ms);
-            let frame = crate::protocol::frame_baud(TARGET, 0x03);
-            println!("sending 0x91 @ {old_baud}: {}", protocol::hex(&frame));
-            // No ACK expected at the old rate; a short window only.
-            let _ = k.request(&frame, Duration::from_millis(100));
-            std::thread::sleep(Duration::from_millis(100));
-            k.set_baud(TARGET)?;
-            // Drain the pending ECU ACK / any line noise at the new rate.
-            let drained = k.raw_read(256, Duration::from_millis(300))?;
-            if !drained.is_empty() {
-                println!("drained pending bytes @ {TARGET}: {}", protocol::hex(&drained));
-            }
-            // Verify the link at the new rate with IDENT.
-            let mut last_err = None;
-            for _ in 0..3 {
-                match k.request(&crate::protocol::frame_ident(), Duration::from_millis(500)) {
-                    Ok(r) => {
-                        println!("IDENT @ {TARGET}: {}", protocol::hex(&r));
-                        println!("DS2 link now runs at {TARGET} (revert to {old_baud} by power cycle)");
-                        return Ok(());
-                    }
-                    Err(e) => last_err = Some(e),
-                }
-                std::thread::sleep(Duration::from_millis(150));
-            }
-            // No reply at the new rate: check whether the ECU never switched.
-            let _ = k.set_baud(old_baud);
-            match k.request(&crate::protocol::frame_ident(), Duration::from_millis(500)) {
-                Ok(r) => anyhow::bail!(
-                    "ECU still answers @ {old_baud} ({}) — it never switched (stock firmware or patch not applied?)",
-                    protocol::hex(&r)
-                ),
-                Err(_) => anyhow::bail!(
-                    "no reply at {TARGET} ({}), also silent at {old_baud} — ECU unresponsive; power-cycle it",
-                    last_err.map(|e| format!("{e}")).unwrap_or_default()
-                ),
-            }
+            println!("sending 0x91 @ {old_baud}: target {target_rate}");
+            let reopen = k.switch_fast_baud(target_rate, old_baud)?;
+            let r = k.request(&crate::protocol::frame_ident(), Duration::from_millis(500))?;
+            println!("IDENT @ {reopen}: {}", protocol::hex(&r));
+            println!("DS2 link now runs at {reopen} (revert to {old_baud} by power cycle)");
+            Ok(())
         }
         _ => {
             eprintln!("unknown command: {command}");
@@ -580,6 +580,13 @@ fn main() {
         let auto_write_cal = args.iter().any(|a| a == "--auto-write-cal");
         let auto_write = args.iter().any(|a| a == "--auto-write");
         let fast_write = args.iter().any(|a| a == "--fast-write");
+        // GUI fast-baud target (takes effect when the GUI is launched via another
+        // flag, e.g. --autoconnect --auto-live); the Live tab also has a button.
+        let gui_fast_baud = args
+            .iter()
+            .position(|a| a == "--fast-baud")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse::<u32>().ok());
         let show_vars = args.iter().any(|a| a == "--show-vars");
         let port = args
             .iter()
@@ -630,6 +637,7 @@ fn main() {
                     auto_write_cal,
                     auto_write,
                     fast_write,
+                    gui_fast_baud,
                 )))
             }),
         );

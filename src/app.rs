@@ -166,6 +166,10 @@ enum Msg {
     Battery(f64),
     Live(Vec<(u16, u16)>),
     LogProgress(usize),
+    /// Fast-baud (0x91) switch succeeded; payload = the rate the port now runs at.
+    FastBaud(u32),
+    /// Fast-baud switch failed; payload = reason.
+    FastBaudFailed(String),
 }
 
 pub struct App {
@@ -220,6 +224,10 @@ pub struct App {
     auto_log: Option<PathBuf>,
     auto_write_cal: bool,
     auto_write: bool,
+    /// Requested fast-baud target from the CLI (`--fast-baud`), or None.
+    fast_baud: Option<u32>,
+    /// The rate the DS2 link currently runs at once a 0x91 switch succeeded.
+    fast_baud_active: Option<u32>,
 }
 
 impl App {
@@ -239,6 +247,7 @@ impl App {
         auto_write_cal: bool,
         auto_write: bool,
         fast_write: bool,
+        fast_baud: Option<u32>,
     ) -> Self {
         style(&cc.egui_ctx);
         let (tx, rx) = unbounded();
@@ -294,6 +303,8 @@ impl App {
             auto_log,
             auto_write_cal,
             auto_write,
+            fast_baud,
+            fast_baud_active: None,
         };
         app.refresh_ports();
         if demo {
@@ -398,27 +409,33 @@ impl App {
                     self.busy = false;
                     self.ecu = Some(info);
                     self.status = "Connected".into();
-                    if self.auto_write {
-                        self.tab = Tab::Write;
-                        self.backup_ok = true;
-                        self.write_confirm = "WRITE".into();
-                        self.start_write();
-                    } else if self.auto_write_cal {
-                        self.tab = Tab::Write;
-                        self.backup_ok = true;
-                        self.write_confirm = "WRITE".into();
-                        self.start_write_cal();
-                    } else if self.auto_read {
-                        self.tab = Tab::Read;
-                        self.start_read();
-                    } else if self.auto_cal {
-                        self.tab = Tab::Read;
-                        self.start_read_cal();
-                    } else if let Some(path) = self.auto_log.clone() {
-                        self.start_logging_to(path);
-                    } else if self.auto_live {
-                        self.start_live();
+                    // With a CLI --fast-baud target, switch first; the auto
+                    // actions run once Msg::FastBaud confirms the new rate.
+                    // Otherwise run them now. (The Live-tab button is a one-off
+                    // and does not set self.fast_baud, so it never re-fires here.)
+                    if let Some(rate) = self.fast_baud {
+                        self.switch_fast_baud_async(rate);
+                    } else {
+                        self.start_auto_actions();
                     }
+                }
+                Msg::FastBaud(rate) => {
+                    self.busy = false;
+                    self.fast_baud_active = Some(rate);
+                    self.status = format!("DS2 link at {rate} baud");
+                    self.push_log(format!("FASTBAUD {rate} (revert by power cycle)"));
+                    // Run any pending automation now that the link is fast.
+                    self.start_auto_actions();
+                }
+                Msg::FastBaudFailed(e) => {
+                    self.busy = false;
+                    self.fast_baud_active = None;
+                    self.error = Some(format!("fast-baud switch failed: {e}"));
+                    self.push_log(format!("FASTBAUD FAILED {e}"));
+                    // The link is back at 9600 (switch_fast_baud falls back on
+                    // failure). Still honor any requested automation, at 9600, so
+                    // --fast-baud --auto-live is not a silent no-op.
+                    self.start_auto_actions();
                 }
                 Msg::Error(e) => {
                     eprintln!("ERROR {e}");
@@ -435,6 +452,7 @@ impl App {
                     self.active_job = None;
                     self.progress_text = "Link lost".into();
                     self.stop_live();
+                    self.fast_baud_active = None;
                     *lock_or_recover(&self.link) = None;
                     self.connected = false;
                     self.error = Some(format!("K-line link lost: {e}. Check ECU power and the USB cable, then press Connect."));
@@ -566,6 +584,8 @@ impl App {
             return;
         }
         self.stop_live();
+        // The port always reopens at 9600; a prior fast session is gone.
+        self.fast_baud_active = None;
         let path = self.port.clone();
         let link = self.link.clone();
         let tx = self.tx.clone();
@@ -620,6 +640,65 @@ impl App {
         });
     }
 
+    /// Start the automated actions requested on the CLI (auto-write/read/cal/
+    /// log/live). Called on connect, or after a fast-baud switch completes.
+    fn start_auto_actions(&mut self) {
+        if self.auto_write {
+            self.tab = Tab::Write;
+            self.backup_ok = true;
+            self.write_confirm = "WRITE".into();
+            self.start_write();
+        } else if self.auto_write_cal {
+            self.tab = Tab::Write;
+            self.backup_ok = true;
+            self.write_confirm = "WRITE".into();
+            self.start_write_cal();
+        } else if self.auto_read {
+            self.tab = Tab::Read;
+            self.start_read();
+        } else if self.auto_cal {
+            self.tab = Tab::Read;
+            self.start_read_cal();
+        } else if let Some(path) = self.auto_log.clone() {
+            self.start_logging_to(path);
+        } else if self.auto_live {
+            self.start_live();
+        }
+    }
+
+    /// Switch the DS2 link up via service 0x91 (needs the baud patch flashed).
+    /// Runs on a worker so the UI stays responsive; the result arrives as
+    /// `Msg::FastBaud` / `Msg::FastBaudFailed`. `rate` is the requested target
+    /// (from the CLI `--fast-baud`, or 125000 from the Live-tab button).
+    fn switch_fast_baud_async(&mut self, rate: u32) {
+        if self.live_running {
+            self.stop_live();
+        }
+        self.status = format!("Switching DS2 link to {rate} baud");
+        self.start(move |link, tx| {
+            let mut guard = lock_or_recover(&link);
+            match guard.as_mut() {
+                Some(k) => {
+                    let res = k.switch_fast_baud(rate, 9600);
+                    for l in k.take_logs() {
+                        let _ = tx.send(Msg::Log(l));
+                    }
+                    match res {
+                        Ok(reopen) => {
+                            let _ = tx.send(Msg::FastBaud(reopen));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Msg::FastBaudFailed(format!("{e}")));
+                        }
+                    }
+                }
+                None => {
+                    let _ = tx.send(Msg::FastBaudFailed("link closed".into()));
+                }
+            }
+        });
+    }
+
     fn disconnect(&mut self) {
         if self.busy {
             self.error =
@@ -628,6 +707,7 @@ impl App {
         }
         self.stop_live();
         self.connected = false;
+        self.fast_baud_active = None;
         self.ecu = None;
         self.status = "Disconnecting".into();
         let link = self.link.clone();
@@ -1114,6 +1194,9 @@ impl App {
         let link = self.link.clone();
         let tx = self.tx.clone();
         let log = self.live_log.clone();
+        // At a fast baud the wire byte time is ~0.08 ms, so any per-byte pacing
+        // dominates TX — drop it to 0; at 9600 keep 1 ms (≈ the natural byte time).
+        let fast = self.fast_baud_active.is_some();
         thread::spawn(move || {
             let mut reported = false;
             while !stop.load(Ordering::Relaxed) {
@@ -1129,7 +1212,7 @@ impl App {
                             // continuous stream — exactly as fast as the ECU
                             // itself transmits, no new wire behaviour. The
                             // 3 ms default was an inherited WinKFP habit.
-                            k.set_write_delay(1);
+                            k.set_write_delay(if fast { 0 } else { 1 });
                             // DDE3 live data via MW_SELECT_LESEN (`12 <LEN> 0B 10 <id bytes>`).
                             // The selected set is batched into as FEW telegrams as the
                             // 0x80-byte DS2 cap allows (protocol::MW_BATCH_SIZE) — a
@@ -1733,7 +1816,11 @@ impl App {
                     ui.label(RichText::new(&ecu.hardware).size(12.0).color(TEXT));
                     ui.end_row();
                     ui.label(RichText::new("Link").size(11.0).color(MUTED));
-                    ui.label(RichText::new("K-line · 9600 8E1").size(12.0).color(TEXT));
+                    let link_label = match self.fast_baud_active {
+                        Some(rate) => format!("K-line · {rate} 8E1"),
+                        None => "K-line · 9600 8E1".to_string(),
+                    };
+                    ui.label(RichText::new(link_label).size(12.0).color(TEXT));
                     ui.end_row();
                     ui.label(RichText::new("Port").size(11.0).color(MUTED));
                     ui.label(RichText::new(&self.port).size(12.0).color(TEXT));
@@ -2527,6 +2614,32 @@ impl App {
             .clicked()
             {
                 self.show_graph = !self.show_graph;
+            }
+            // Fast-baud (0x91) toggle — needs the baud patch flashed. Once the
+            // switch succeeds the button turns into a non-clickable status chip;
+            // the link reverts to 9600 only on a power cycle / reconnect.
+            match self.fast_baud_active {
+                None => {
+                    if centered_button_enabled(
+                        ui,
+                        self.connected && !self.busy && !self.live_running,
+                        Vec2::new(150.0, 30.0),
+                        egui::Button::new(RichText::new("Fast baud (125k)").color(BG)).fill(ACCENT),
+                    )
+                    .clicked()
+                    {
+                        // One-off manual switch; does not set self.fast_baud, so a
+                        // later reconnect will not silently re-issue 0x91.
+                        self.switch_fast_baud_async(125_000);
+                    }
+                }
+                Some(rate) => {
+                    ui.label(
+                        RichText::new(format!("fast: {rate} baud"))
+                            .size(12.0)
+                            .color(ACCENT),
+                    );
+                }
             }
             ui.label(
                 RichText::new(if self.live_running {

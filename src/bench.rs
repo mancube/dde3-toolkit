@@ -17,12 +17,12 @@
 //!     calibration slice works via the marker-less block-id path
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
 use crate::checksum::{self, CAL_LEN, CAL_START};
-use crate::protocol::{hex, ident_valid, Kline, IMAGE_SIZE};
+use crate::protocol::{hex, ident_valid, Kline, MW_BATCH_SIZE, IMAGE_SIZE};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -31,6 +31,7 @@ pub enum Mode {
     ReadCal,
     Write,
     WriteCal,
+    Live,
 }
 
 pub struct BenchArgs {
@@ -41,6 +42,11 @@ pub struct BenchArgs {
     pub baud: u32,
     pub data_delay: u64,
     pub sim: bool,
+    /// Switch the DS2 link up via service 0x91 right after IDENT (needs the baud
+    /// patch flashed). 38400 or 125000; the port reopens at the actual divisor.
+    pub fast_baud: Option<u32>,
+    /// For `Mode::Live`: how long to log before stopping (seconds). None = ~10 s.
+    pub duration: Option<f64>,
 }
 
 pub fn run(args: BenchArgs) -> Result<()> {
@@ -62,9 +68,51 @@ pub fn run(args: BenchArgs) -> Result<()> {
         }
     );
 
+    // Optional fast-baud switch (service 0x91 — needs the baud patch flashed).
+    let fast_active = if let Some(rate) = args.fast_baud {
+        let reopen = k.switch_fast_baud(rate, args.baud)?;
+        eprintln!("FASTBAUD {reopen} (revert by power cycle)");
+        true
+    } else {
+        false
+    };
+
     let result = (|| -> Result<()> {
         match args.mode {
             Mode::Info => Ok(()),
+            Mode::Live => {
+                // Default-on live set, polled in batched 0B 10 telegrams.
+                let addrs: Vec<(u8, u8)> = crate::live::LIVE_VARS
+                    .iter()
+                    .filter(|v| v.default_on)
+                    .map(|v| ((v.id >> 8) as u8, v.id as u8))
+                    .collect();
+                if addrs.is_empty() {
+                    bail!("no default-on live variables");
+                }
+                if fast_active {
+                    k.set_write_delay(0); // wire, not pacing, dominates at fast baud
+                }
+                let secs = args.duration.unwrap_or(10.0);
+                let secs = if secs.is_finite() && secs > 0.0 { secs } else { 10.0 };
+                let mut cycles = 0u64;
+                // Anchor the window at the loop start (not fn entry), so port-open +
+                // IDENT + baud-switch latency does not eat into a short --duration.
+                let loop_start = Instant::now();
+                let deadline = loop_start + Duration::from_secs_f64(secs);
+                while Instant::now() < deadline {
+                    for chunk in addrs.chunks(MW_BATCH_SIZE) {
+                        let vals = k.live_values(chunk, false)?;
+                        cycles += 1;
+                        if cycles.is_multiple_of(10) {
+                            eprintln!("LIVE n={} first={:?}", vals.len(), vals.first());
+                        }
+                    }
+                }
+                let hz = cycles as f64 / loop_start.elapsed().as_secs_f64();
+                eprintln!("LIVE_DONE cycles={cycles} rate={hz:.1}Hz ids={}", addrs.len());
+                Ok(())
+            }
             Mode::Read => {
                 let out = args.out.clone().context("read needs --out <path>")?;
                 let mut progress = |done: usize, total: usize| {
@@ -123,13 +171,17 @@ pub fn run(args: BenchArgs) -> Result<()> {
         }
     })();
 
-    let recovered = k.recover_link();
+    // After a fast-baud session the ECU stays at the new rate until a power
+    // cycle, so the forced-9600 recover would misreport. Skip it then.
+    let recovered = if fast_active { true } else { k.recover_link() };
     if result.is_err() {
         for line in k.take_logs().iter().rev().take(120).rev() {
             eprintln!("TRACE {line}");
         }
     }
-    if !recovered {
+    if fast_active && result.is_ok() {
+        eprintln!("NOTE ECU remains at the fast baud until power cycle");
+    } else if !recovered {
         if result.is_ok() {
             eprintln!("NOTE ECU is still booting; wait about 30-60 s before reconnecting");
         } else {

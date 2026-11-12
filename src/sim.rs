@@ -124,7 +124,10 @@ impl SimEcu {
             }
             // SEED_KEY: `12 08 90 42 4D 57 05 <Z>` — accept, unlock.
             0x90 => Self::status(p, len_echo, SB_OK),
-            // FLASH_LESEN: `12 09 06 <A lo/mid/hi> <count>`.
+            // BAUD change (0x91 patch): `12 08 91 00 <baud BE> <p2>` — ACK so a
+            // `--sim` fast-baud switch verifies (real stock firmware NACKs this).
+            0x91 => Self::status(p, len_echo, SB_OK),
+            // FLASH_LESEN: `12 09 06 00 <A_hi A_mid A_lo> <count@7>` (addr big-endian).
             0x06 => self.flash_read(p, len_echo),
             // FLASH write family: `12 09 07 <sub> ...`.
             0x07 => match p.get(3).copied() {
@@ -240,21 +243,18 @@ impl SimEcu {
         Self::status(p, p.get(1).copied().unwrap_or(0), 0xFF)
     }
 
-    /// Address from a `12 09 06 <A lo/mid/hi> <n>` frame (FLASH_LESEN).
-    fn addr_of(p: &[u8]) -> Option<u32> {
-        let (a, b, c) = (*p.get(3)?, *p.get(4)?, *p.get(5)?);
-        Some(a as u32 | (b as u32) << 8 | (c as u32) << 16)
-    }
-
-    /// Address from a `12 09 07 <sub> <A lo/mid/hi> ...` frame (the sub-code
-    /// sits at p[3], so the address is shifted one byte right of FLASH_LESEN).
-    fn addr_of7(p: &[u8]) -> Option<u32> {
-        let (a, b, c) = (*p.get(4)?, *p.get(5)?, *p.get(6)?);
-        Some(a as u32 | (b as u32) << 8 | (c as u32) << 16)
+    /// 24-bit big-endian address at offsets 4,5,6 — the layout of BOTH the
+    /// read frame (`12 09 06 00 <A_hi A_mid A_lo> <n>`) and the write family
+    /// (`12 .. 07 <sub> <A_hi A_mid A_lo> ...`). Offset 3 is the const 0x00
+    /// (read) or the subfunction (write); the address never lives there.
+    fn addr_be(p: &[u8]) -> Option<u32> {
+        let (hi, mid, lo) = (*p.get(4)?, *p.get(5)?, *p.get(6)?);
+        Some((hi as u32) << 16 | (mid as u32) << 8 | lo as u32)
     }
 
     fn flash_read(&mut self, p: &[u8], len_echo: u8) -> Vec<u8> {
-        if let (Some(addr), Some(count)) = (Self::addr_of(p), p.get(6).copied()) {
+        // `12 09 06 00 <A_hi A_mid A_lo> <count@7>` — count is 1 byte at [7].
+        if let (Some(addr), Some(count)) = (Self::addr_be(p), p.get(7).copied()) {
             if addr + count as u32 > IMAGE_SIZE as u32 {
                 return Self::status(p, len_echo, 0xB0); // ERROR_SG_PARAMETER
             }
@@ -267,21 +267,16 @@ impl SimEcu {
     }
 
     fn flash_erase(&mut self, p: &[u8], len_echo: u8) -> Vec<u8> {
-        if let (Some(addr), Some(count)) = (Self::addr_of7(p), p.get(7).copied()) {
+        // `12 09 07 06 <A_hi A_mid A_lo> 00` — no count in the frame; the
+        // toolkit erases the whole writable area from `addr` to the end.
+        if let Some(addr) = Self::addr_be(p) {
             if !self.in_prog {
                 return Self::nack(p);
             }
-            // count 0x00 = "erase from addr to end of image" (matches the
-            // toolkit's write flow: erase(0,0) full, erase(0x38000,0) cal).
-            let end = if count == 0 {
-                IMAGE_SIZE as u32
-            } else {
-                (addr + count as u32).min(IMAGE_SIZE as u32)
-            };
             if addr >= IMAGE_SIZE as u32 {
                 return Self::status(p, len_echo, 0xB0);
             }
-            self.flash[addr as usize..end as usize].fill(0xFF);
+            self.flash[addr as usize..IMAGE_SIZE].fill(0xFF);
             Self::status(p, len_echo, SB_OK)
         } else {
             Self::nack(p)
@@ -289,11 +284,12 @@ impl SimEcu {
     }
 
     fn flash_write(&mut self, p: &[u8], len_echo: u8) -> Vec<u8> {
-        if let Some(addr) = Self::addr_of7(p) {
+        // `12 <LEN> 07 02 <A_hi A_mid A_lo> <N@7> <data@8..>`.
+        if let (Some(addr), Some(n)) = (Self::addr_be(p), p.get(7).copied()) {
             if !self.in_prog {
                 return Self::nack(p);
             }
-            let data = &p[7..];
+            let data = p.get(8..8 + n as usize).unwrap_or(&[]);
             let end = addr as usize + data.len();
             if end > IMAGE_SIZE {
                 return Self::status(p, len_echo, 0xB0);
@@ -367,17 +363,18 @@ mod tests {
     #[test]
     fn flash_read_round_trip() {
         let mut s = SimEcu::new();
-        let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x80]);
+        // read 0x80 bytes @ addr 0: 12 09 06 00 <A_hi A_mid A_lo> <count@7>
+        let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 0x80]);
         assert_eq!(&r[..3], &[0x12, 0x09, 0xA0]);
         assert_eq!(r.len(), 3 + 0x80);
-        // write needs programming mode
-        let r = s.handle(&[0x12, 0x09, 0x07, 0x02, 0x00, 0x00, 0x00, 0xAA, 0xBB]);
+        // write needs programming mode: 12 0B 07 02 <addr BE> <N=2> <AA BB>
+        let r = s.handle(&[0x12, 0x0B, 0x07, 0x02, 0x00, 0x00, 0x00, 0x02, 0xAA, 0xBB]);
         assert_eq!(r[2], 0xFF);
         // enter prog, write, read back
         s.handle(&[0x12, 0x04, 0x0D]);
-        let r = s.handle(&[0x12, 0x09, 0x07, 0x02, 0x00, 0x00, 0x00, 0xAA, 0xBB]);
+        let r = s.handle(&[0x12, 0x0B, 0x07, 0x02, 0x00, 0x00, 0x00, 0x02, 0xAA, 0xBB]);
         assert_eq!(r[2], 0xA0);
-        let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x02]);
+        let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 0x02]);
         assert_eq!(&r[3..5], &[0xAA, 0xBB]);
     }
 
@@ -387,7 +384,7 @@ mod tests {
         s.handle(&[0x12, 0x04, 0x0D]);
         let r = s.handle(&[0x12, 0x09, 0x07, 0x06, 0x00, 0x00, 0x00, 0x00]);
         assert_eq!(r[2], 0xA0);
-        let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x01]);
+        let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 0x01]);
         assert_eq!(r[3], 0xFF);
         // fault clear is a plain OK
         let r = s.handle(&[0x12, 0x09, 0x07, 0x0E, 0x42, 0x41, 0x50, 0x00]);

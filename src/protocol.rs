@@ -319,62 +319,95 @@ pub fn frame_baud(baud: u32, p2: u8) -> Vec<u8> {
     ]
 }
 
+/// The baud the tester must reopen the port at after a `0x91` switch. The ECU's
+/// S0BG divisor for a requested 125000 yields 124800 (−0.16 %, within tolerance);
+/// 38400/19200 are exact. Pure fn so it is unit-testable without hardware.
+pub fn reopen_divisor(requested: u32) -> u32 {
+    match requested {
+        125000 => 124_800,
+        other => other,
+    }
+}
+
 /// Seed/Key init: `12 08 90 42 4D 57 05 <Z>`.
 pub fn frame_seed_key(z: u8) -> Vec<u8> {
     vec![0x12, 0x08, 0x90, 0x42, 0x4D, 0x57, 0x05, z]
 }
 
-/// Flash read: `12 09 06 <A_lo> <A_mid> <A_hi> <count>`.
+/// Flash read (FLASH_LESEN, service 0x06): `12 09 06 00 <A_hi A_mid A_lo> <count> [XOR]`.
+///
+/// Verified against the WinKFP `10DDE30.prg` job VM (over-range count probe) and
+/// the job bytecode (`docs/FINDINGS_flash_and_fast_ds2.md`):
+///   - LEN (`[1]`) = 0x09 = total wire bytes incl. the trailing XOR (8 payload + XOR);
+///   - `[3]` = 0x00, a constant (the unused high byte of the address field);
+///   - `[4..6]` = 24-bit address, **big-endian** (`[4]` = MSB);
+///   - `[7]` = count, a **1-byte** byte-count (only the low byte reaches the wire).
+///
+/// The earlier builder was little-endian, omitted `[3]`, and kept LEN=0x09 for a
+/// 7-byte payload — so the real ECU waited for a 9th byte and never replied
+/// (confirmed: `captures/dde3newlog.txt` `12 09 06 00 80 03 80 …` → no response).
 pub fn frame_flash_read(addr: u32, count: u8) -> Vec<u8> {
     vec![
         0x12,
         0x09,
         0x06,
-        addr as u8,
-        (addr >> 8) as u8,
+        0x00,
         (addr >> 16) as u8,
+        (addr >> 8) as u8,
+        addr as u8,
         count,
     ]
 }
 
-/// Flash erase: `12 09 07 06 <A_lo> <A_mid> <A_hi> <count>`.
-pub fn frame_flash_erase(addr: u32, count: u8) -> Vec<u8> {
+/// Flash erase (FLASH_LOESCHEN, service 0x07 subfn 0x06):
+/// `12 09 07 06 <A_hi A_mid A_lo> 00 [XOR]`. The frame carries no count — the
+/// erased length comes back in the reply. (`_count` kept for call-site ABI.)
+pub fn frame_flash_erase(addr: u32, _count: u8) -> Vec<u8> {
     vec![
         0x12,
         0x09,
         0x07,
         0x06,
-        addr as u8,
-        (addr >> 8) as u8,
         (addr >> 16) as u8,
-        count,
+        (addr >> 8) as u8,
+        addr as u8,
+        0x00,
     ]
 }
 
-/// Flash write block: `12 09 07 02 <A_lo> <A_mid> <A_hi> <data...>`.
+/// Flash write block (FLASH_SCHREIBEN, service 0x07 subfn 0x02):
+/// `12 <LEN> 07 02 <A_hi A_mid A_lo> <NN> <data…> [XOR]`, LEN = 0x09 + NN,
+/// NN = data length (1-byte count), address big-endian.
 pub fn frame_flash_write(addr: u32, data: &[u8]) -> Vec<u8> {
-    let mut p = Vec::with_capacity(7 + data.len());
-    p.push(0x12);
-    p.push(0x09);
-    p.push(0x07);
-    p.push(0x02);
-    p.push(addr as u8);
-    p.push((addr >> 8) as u8);
-    p.push((addr >> 16) as u8);
+    // LEN = 0x09 + N must fit one byte, so N <= 0xF6. Callers chunk at 0x80.
+    assert!(data.len() <= 0xF6, "flash write block must be <= 246 bytes (LEN=9+N)");
+    let n = data.len() as u8;
+    let mut p = Vec::with_capacity(8 + data.len());
+    p.extend_from_slice(&[
+        0x12,
+        0x09 + n, // LEN = 9 + NN
+        0x07,
+        0x02,
+        (addr >> 16) as u8,
+        (addr >> 8) as u8,
+        addr as u8,
+        n, // data-length byte
+    ]);
     p.extend_from_slice(data);
     p
 }
 
-/// Flash write end: `12 09 07 0F <A_lo> <A_mid> <A_hi> <00>`.
+/// Flash write end (FLASH_SCHREIBEN_ENDE, service 0x07 subfn 0x0F):
+/// `12 09 07 0F <A_hi A_mid A_lo> 00 [XOR]`, address big-endian.
 pub fn frame_flash_write_end(addr: u32) -> Vec<u8> {
     vec![
         0x12,
         0x09,
         0x07,
         0x0F,
-        addr as u8,
-        (addr >> 8) as u8,
         (addr >> 16) as u8,
+        (addr >> 8) as u8,
+        addr as u8,
         0x00,
     ]
 }
@@ -642,6 +675,49 @@ impl Kline {
 
     pub fn take_logs(&mut self) -> Vec<String> {
         std::mem::take(&mut self.logs)
+    }
+
+    /// Switch the DS2 K-line up via service `0x91` (needs the baud patch flashed —
+    /// `../../patches/e46_baud{38400,125000}.bin`). Sends `12 08 91 00 <baud BE> 03`
+    /// at `from_baud`, reopens the port at the ECU's actual divisor
+    /// ([`reopen_divisor`]), drains the ACK (which arrives at the NEW rate — the
+    /// patch writes S0BG before queuing it), and confirms with IDENT. On failure it
+    /// falls back to `from_baud` to distinguish "never switched" (stock/unpatched)
+    /// from "dead" (power-cycle). Returns the rate the port now runs at.
+    ///
+    /// No ECU unlock is needed: `0x91` hooks the dispatcher fall-through (0x293D0)
+    /// with no session gate. Reply framing is unchanged at the new rate because the
+    /// receiver completes a frame by byte-count (LEN), not by line-silence timing.
+    pub fn switch_fast_baud(&mut self, requested: u32, from_baud: u32) -> Result<u32> {
+        let reopen = reopen_divisor(requested);
+        let frame = frame_baud(requested, 0x03);
+        // No ACK at the old rate — only a short settle window.
+        let _ = self.request(&frame, Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
+        self.set_baud(reopen)?;
+        let drained = self.raw_read(256, Duration::from_millis(300))?;
+        if !drained.is_empty() {
+            self.log(format!("drained pending bytes @ {reopen}: {}", hex(&drained)));
+        }
+        let mut last_err = None;
+        for _ in 0..3 {
+            match self.request(&frame_ident(), Duration::from_millis(500)) {
+                Ok(_) => return Ok(reopen),
+                Err(e) => last_err = Some(e),
+            }
+            thread::sleep(Duration::from_millis(150));
+        }
+        // Did not answer at the new rate — is the ECU still at the old one?
+        let _ = self.set_baud(from_baud);
+        match self.request(&frame_ident(), Duration::from_millis(500)) {
+            Ok(_) => bail!(
+                "ECU still answers @ {from_baud} — service 0x91 not honored (stock firmware or baud patch not flashed)"
+            ),
+            Err(_) => bail!(
+                "no reply @ {reopen} and silent @ {from_baud} — ECU unresponsive; power-cycle it ({})",
+                last_err.map(|e| format!("{e}")).unwrap_or_default()
+            ),
+        }
     }
 
     /// Raw byte write (no DS2 framing / XOR) — for the break-entered service
@@ -1511,27 +1587,39 @@ mod tests {
 
     #[test]
     fn parameterized_frames_match_vm_extraction() {
-        // FLASH_LESEN {1: 0x38000, 2: 0x80} -> 12 09 06 00 80 03 80 (frames.md)
+        // Verified against the WinKFP .prg VM (docs/FINDINGS_flash_and_fast_ds2.md):
+        // FLASH_LESEN addr=0x38000 count=0x80 -> 12 09 06 00 03 80 00 80 (addr BE @4..6)
         assert_eq!(
             frame_flash_read(0x38000, 0x80),
-            vec![0x12, 0x09, 0x06, 0x00, 0x80, 0x03, 0x80]
+            vec![0x12, 0x09, 0x06, 0x00, 0x03, 0x80, 0x00, 0x80]
         );
-        // FLASH_LOESCHEN -> 12 09 07 06 00 00 00 00 (frames.md @0xcaea)
+        // width probe: count is a single wire byte (high byte dropped)
         assert_eq!(
-            frame_flash_erase(0x000000, 0x00),
-            vec![0x12, 0x09, 0x07, 0x06, 0x00, 0x00, 0x00, 0x00]
+            frame_flash_read(0x12345, 0x34),
+            vec![0x12, 0x09, 0x06, 0x00, 0x01, 0x23, 0x45, 0x34]
         );
-        // FLASH_SCHREIBEN with one data byte -> 12 09 07 02 00 00 00 00 (frames.md @0xd379)
-        // (empty data produces 7 bytes; the 8th byte is patched from the response)
+        // FLASH_LOESCHEN addr=0x38000 -> 12 09 07 06 03 80 00 00 (no count)
         assert_eq!(
-            frame_flash_write(0x000000, &[0x00]),
-            vec![0x12, 0x09, 0x07, 0x02, 0x00, 0x00, 0x00, 0x00]
+            frame_flash_erase(0x38000, 0x00),
+            vec![0x12, 0x09, 0x07, 0x06, 0x03, 0x80, 0x00, 0x00]
         );
-        // FLASH_SCHREIBEN_ENDE -> 12 09 07 0F 00 00 00 00 (frames.md @0xda85)
+        // FLASH_SCHREIBEN 4 data bytes @0x38000 -> 12 0D 07 02 03 80 00 04 11 22 33 44
         assert_eq!(
-            frame_flash_write_end(0x000000),
-            vec![0x12, 0x09, 0x07, 0x0F, 0x00, 0x00, 0x00, 0x00]
+            frame_flash_write(0x38000, &[0x11, 0x22, 0x33, 0x44]),
+            vec![0x12, 0x0D, 0x07, 0x02, 0x03, 0x80, 0x00, 0x04, 0x11, 0x22, 0x33, 0x44]
         );
+        // FLASH_SCHREIBEN_ENDE @0x38000 -> 12 09 07 0F 03 80 00 00
+        assert_eq!(
+            frame_flash_write_end(0x38000),
+            vec![0x12, 0x09, 0x07, 0x0F, 0x03, 0x80, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn reopen_divisor_maps_125000_to_124800() {
+        assert_eq!(reopen_divisor(125000), 124_800);
+        assert_eq!(reopen_divisor(38400), 38_400);
+        assert_eq!(reopen_divisor(9600), 9_600);
     }
 
     #[test]
