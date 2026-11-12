@@ -17,6 +17,18 @@
 //! A full read's code slot exists only while its 4-byte field is not blank
 //! (0x00000000 / 0xFFFFFFFF): a 32 kB read padded out to 256 kB has no code
 //! area at all, and blank flash is not a checksum that went stale.
+//!
+//! A full read carries a **third, different** code-area check: the cold-start
+//! program chain. The boot self-test (0x11708-0x11736) walks DPP2 pages 4..0xD
+//! (0x10000-0x37FFF) and then 0x38000-0x38B7F through the 16-bit window,
+//! carrying the TDI step across pages, and resets (log 0x1F, code 9) unless the
+//! state ends at `PROG_TARGET`. The two balancing words at 0x38B7C make it end
+//! there; they sit right after the calibration block id 0x23A6 at 0x38B7A.
+//! Any edit in 0x10000-0x38B7F changes the chain — including the TDI code slot
+//! at 0x13FFC, which is inside that range — so the chain is always solved
+//! **after** the TDI slots (see `correct`). This is the trap that makes a
+//! hand-patched image boot into a reset loop with both TDI checksums valid.
+//! Ported from the verified `progsum.py`; see `docs/FINDINGS_flash_and_fast_ds2.md`.
 
 pub const BLOCK: usize = 0x8000; // block size, also the step of the block scan
 pub const ID_OFF: usize = 0xB7A; // offset of the 2-byte block id inside a block
@@ -30,6 +42,21 @@ const M16: u16 = 0xFFFF;
 pub const IMAGE_SIZE: usize = FULL_SIZE; // a full 256 KB read
 pub const CAL_START: usize = 0x38000; // calibration: 0x38000-0x3FFFF
 pub const CAL_LEN: usize = 0x8000; // 32 KB
+
+// Cold-start program chain (boot self-test over the program area).
+/// File offset of the 2-word (4-byte) program-chain balancing field.
+pub const PROG_CHAIN_POS: usize = 0x38B7C;
+/// File offset of the calibration block id that introduces the chain word.
+pub const PROG_CHAIN_ID_POS: usize = 0x38B7A;
+/// Calibration block id carried by every EDC15M/DDE3 release (31 BMW variants).
+pub const PROG_CHAIN_ID: [u8; 2] = [0x23, 0xA6];
+/// Required final (h, g) state of the boot self-test.
+pub const PROG_TARGET: (u16, u16) = (0x8631, 0xEFCD);
+const PROG_PAGE: usize = 0x4000; // one DPP2 page
+const PROG_FIRST_PAGE: usize = 4; // pages 4..0xD are hashed
+const PROG_LAST_PAGE: usize = 0xE; // exclusive
+const PROG_PAGE_Q: u16 = 0x8000; // window base for the page walk
+const PROG_CAL_Q: u16 = 0x0000; // window base for the 0x38000 tail
 
 /// Calibration block seeds: (h at entry, g at entry, subtracted from h, xored into g)
 const CAL_SEEDS: (u16, u16, u16, u16) = (0x8631, 0xEFCD, 0x8631, 0xDF9B);
@@ -68,7 +95,7 @@ type FoundChecksum = (usize, usize, usize, (u16, u16, u16, u16));
 /// in the buffer that was verified.
 #[derive(Clone, Copy, Debug)]
 pub struct Checksum {
-    /// "calibration" or "code"
+    /// "calibration", "code" or "program chain"
     pub name: &'static str,
     /// File offset of the 4-byte checksum value
     pub pos: usize,
@@ -235,10 +262,17 @@ pub fn find_checksums(buf: &[u8]) -> Vec<FoundChecksum> {
 }
 
 /// Verify all checksums in a buffer.
+///
+/// A full image whose TDI code block is present also gets the cold-start
+/// program-chain row. Its `computed` value is the balancing word that would
+/// make the chain valid for this exact buffer, so `ok` is still simply
+/// `stored == computed` — and it tells the truth about what the ECU's boot
+/// self-test would do with the image as it stands.
 pub fn verify(buf: &[u8]) -> Vec<Checksum> {
-    find_checksums(buf)
-        .into_iter()
-        .map(|(pos, start, end, seeds)| {
+    let found = find_checksums(buf);
+    let mut out: Vec<Checksum> = found
+        .iter()
+        .map(|&(pos, start, end, seeds)| {
             let stored = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]);
             let computed = checksum(buf, start, end, seeds);
             Checksum {
@@ -249,15 +283,31 @@ pub fn verify(buf: &[u8]) -> Vec<Checksum> {
                 ok: stored == computed,
             }
         })
-        .collect()
+        .collect();
+    if has_program_area(buf, &found) {
+        if let Some(chain) = program_chain(buf) {
+            out.push(chain);
+        }
+    }
+    out
 }
 
 /// Correct all discovered checksums in a buffer, returning a new buffer with
 /// the fixes applied. A buffer without a recognised block is returned as-is.
+///
+/// Order matters: the TDI slots are written first, then the program chain is
+/// solved over the corrected buffer, because the chain hashes the code slot
+/// at 0x13FFC along with the rest of 0x10000-0x38B7F.
 pub fn correct(buf: &[u8]) -> Vec<u8> {
+    let found = find_checksums(buf);
     let mut out = buf.to_vec();
-    for c in &verify(buf) {
-        out[c.pos..c.pos + 4].copy_from_slice(&c.computed.to_le_bytes());
+    for &(pos, start, end, seeds) in &found {
+        out[pos..pos + 4].copy_from_slice(&checksum(buf, start, end, seeds).to_le_bytes());
+    }
+    if has_program_area(buf, &found) {
+        if let Some(chain) = program_chain(&out) {
+            out[chain.pos..chain.pos + 4].copy_from_slice(&chain.computed.to_le_bytes());
+        }
     }
     out
 }
@@ -269,6 +319,116 @@ pub fn correct_at(buf: &[u8], pos: usize) -> Option<Vec<u8>> {
     let mut out = buf.to_vec();
     out[pos..pos + 4].copy_from_slice(&cs.computed.to_le_bytes());
     Some(out)
+}
+
+// ---------------------------------------------------------------------------
+// Cold-start program chain (ported from the verified `progsum.py`)
+// ---------------------------------------------------------------------------
+
+/// Segments the boot self-test walks: DPP2 pages 4..0xD, then 0x38000..`end_cal`.
+/// `q` is the 16-bit window base each segment starts from.
+fn prog_segments(end_cal: usize) -> Vec<(usize, usize, u16)> {
+    let mut segs: Vec<(usize, usize, u16)> = (PROG_FIRST_PAGE..PROG_LAST_PAGE)
+        .map(|p| (p * PROG_PAGE, p * PROG_PAGE + PROG_PAGE, PROG_PAGE_Q))
+        .collect();
+    segs.push((CAL_START, end_cal, PROG_CAL_Q));
+    segs
+}
+
+/// One pass of the boot self-test hash over `segments`. Returns `(h, g, q)`.
+fn prog_run(buf: &[u8], segments: &[(usize, usize, u16)]) -> (u16, u16, u16) {
+    let (mut h, mut g) = (0u16, 0u16);
+    let mut q = 0u16;
+    let mut phase = 0u8;
+    for &(start, end, q_start) in segments {
+        q = q_start;
+        let mut p = start;
+        while p + 1 < end {
+            let w = u16::from_le_bytes([buf[p], buf[p + 1]]);
+            p += 2;
+            q = q.wrapping_add(2);
+            match phase {
+                0 => h ^= w,
+                1 => {
+                    let mut flag = 0;
+                    if g & 0xF != 0 {
+                        h = rol(h, g & 0xF);
+                        flag = h & 1;
+                    }
+                    g = g.wrapping_sub(w).wrapping_sub(flag) ^ h;
+                }
+                2 => {
+                    h = h.wrapping_sub(w);
+                    h = q.wrapping_add(h).wrapping_sub(1);
+                }
+                _ => {
+                    g ^= w;
+                    if h & 0xF != 0 {
+                        g = ror(g, h & 0xF);
+                    }
+                }
+            }
+            phase = (phase + 1) & 3;
+        }
+    }
+    (h, g, q)
+}
+
+/// The four bytes that make the chain end at `PROG_TARGET`.
+fn prog_solve(buf: &[u8]) -> [u8; 4] {
+    let segs = prog_segments(PROG_CHAIN_POS);
+    let (h0, g0, q0) = prog_run(buf, &segs);
+    let words: usize = segs.iter().map(|(s, e, _)| (e - s) / 2).sum();
+    debug_assert_eq!(
+        words % 4,
+        2,
+        "the balancing words must land on hash phases 2 and 3"
+    );
+    let q1 = q0.wrapping_add(2);
+    let (th, tg) = PROG_TARGET;
+    // phase 2: h = q + (h - w) - 1  ->  h must become th
+    let w1 = h0.wrapping_add(q1).wrapping_sub(1).wrapping_sub(th);
+    // phase 3: g = ror(g ^ w, h & 0xF)  ->  g must become tg
+    let w2 = g0 ^ rol(tg, th & 0xF);
+    let mut out = [0u8; 4];
+    out[..2].copy_from_slice(&w1.to_le_bytes());
+    out[2..].copy_from_slice(&w2.to_le_bytes());
+    out
+}
+
+/// Verify the cold-start program chain, if this buffer carries one.
+///
+/// The chain is only present when the calibration block id 0x23A6 sits at
+/// 0x38B7A; `verify` additionally requires a discovered TDI code block so a
+/// 32 kB calibration read padded with 0xFF is never mistaken for a full image.
+pub fn program_chain(buf: &[u8]) -> Option<Checksum> {
+    if buf.len() < PROG_CHAIN_POS + 4 {
+        return None;
+    }
+    if buf[PROG_CHAIN_ID_POS..PROG_CHAIN_ID_POS + 2] != PROG_CHAIN_ID {
+        return None;
+    }
+    let stored = u32::from_le_bytes([
+        buf[PROG_CHAIN_POS],
+        buf[PROG_CHAIN_POS + 1],
+        buf[PROG_CHAIN_POS + 2],
+        buf[PROG_CHAIN_POS + 3],
+    ]);
+    let computed = u32::from_le_bytes(prog_solve(buf));
+    Some(Checksum {
+        name: "program chain",
+        pos: PROG_CHAIN_POS,
+        stored,
+        computed,
+        ok: stored == computed,
+    })
+}
+
+/// The chain is only meaningful for a full image that also has a real TDI code
+/// block: a padded 32 kB calibration read carries the 0x23A6 id but no program
+/// area, and a blank/foreign image has neither.
+fn has_program_area(buf: &[u8], found: &[FoundChecksum]) -> bool {
+    buf.len() == FULL_SIZE && found.iter().any(|f| f.0 == CODE_BLOCK.2)
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +531,81 @@ mod tests {
         assert!(find_checksums(&buf).is_empty());
     }
 
+    /// Known-answer cross-check against `progsum.py` (an independent Python
+    /// implementation) on the same LCG buffer: solving must produce `fc520cf8`
+    /// and the full walk — balancing words included — must end at the boot
+    /// self-test target.
+    #[test]
+    fn program_chain_vector_matches_progsum() {
+        let buf = vector(FULL_SIZE);
+        let words = prog_solve(&buf);
+        assert_eq!(words, [0xfc, 0x52, 0x0c, 0xf8], "progsum.py solve() cross-check");
+
+        let mut img = buf;
+        img[PROG_CHAIN_POS..PROG_CHAIN_POS + 4].copy_from_slice(&words);
+        let (h, g, _) = prog_run(&img, &prog_segments(PROG_CHAIN_POS + 4));
+        assert_eq!((h, g), PROG_TARGET, "the walk must end at the boot target");
+    }
+
+    /// A full image with the real EDC15M layout (id 0x23A6, stale TDI code
+    /// slot) must expose the program chain, and `correct` must fix it *after*
+    /// the code slot — solving over the raw image would leave the chain stale.
+    #[test]
+    fn program_chain_is_corrected_after_the_code_slot() {
+        let mut img = vec![0u8; FULL_SIZE];
+        img[0x10000..0x10004].copy_from_slice(&MARKER);
+        img[0x13FFA..0x13FFC].copy_from_slice(&PROG_CHAIN_ID);
+        img[0x13FFC..0x14000].copy_from_slice(&1u32.to_le_bytes());
+        img[PROG_CHAIN_ID_POS..PROG_CHAIN_ID_POS + 2].copy_from_slice(&PROG_CHAIN_ID);
+        img[0x3FBFA..0x3FBFC].copy_from_slice(&PROG_CHAIN_ID);
+        img[0x3FBFC..0x3FC00].copy_from_slice(&2u32.to_le_bytes());
+
+        let checks = verify(&img);
+        let chain = checks
+            .iter()
+            .find(|c| c.name == "program chain")
+            .expect("a full image with a code slot carries the chain");
+        assert_eq!(chain.pos, PROG_CHAIN_POS);
+        assert!(!chain.ok, "a blank balancing word must fail");
+        assert!(
+            !prog_solve(&img).eq(&prog_solve(&{
+                let mut tdi = img.clone();
+                for c in checks.iter().filter(|c| c.name != "program chain") {
+                    tdi[c.pos..c.pos + 4].copy_from_slice(&c.computed.to_le_bytes());
+                }
+                tdi
+            })),
+            "a stale code slot must change the solved chain (order matters)"
+        );
+
+        let fixed = correct(&img);
+        assert!(
+            verify(&fixed).iter().all(|c| c.ok),
+            "every checksum, chain included, must verify after correction"
+        );
+        assert_eq!(fixed, correct(&fixed), "correction must be idempotent");
+    }
+
+    /// A 32 kB calibration read padded with 0xFF carries the real 0x23A6 id
+    /// at 0x38B7A but has no program area: no chain row, no chain write.
+    #[test]
+    fn padded_partial_with_real_cal_id_has_no_program_chain() {
+        let mut img = vec![0xFFu8; FULL_SIZE];
+        img[PROG_CHAIN_ID_POS..PROG_CHAIN_ID_POS + 2].copy_from_slice(&PROG_CHAIN_ID);
+        img[0x3FBFA..0x3FBFC].copy_from_slice(&PROG_CHAIN_ID);
+        img[0x3FBFC..0x3FC00].copy_from_slice(&7u32.to_le_bytes());
+
+        let found = verify(&img);
+        assert_eq!(found.len(), 1, "only the calibration block");
+        assert_eq!(found[0].name, "calibration");
+        let fixed = correct(&img);
+        assert_eq!(
+            &fixed[PROG_CHAIN_POS..PROG_CHAIN_POS + 4],
+            &[0xFF; 4],
+            "the padded program area must never be written"
+        );
+    }
+
     #[test]
     fn rol_ror_are_inverses() {
         let v: u16 = 0xABCD;
@@ -405,12 +640,13 @@ mod marker_path {
         let pos: Vec<usize> = found.iter().map(|c| c.pos).collect();
         assert_eq!(
             pos,
-            vec![0x3FBFC, 0x13FFC],
-            "marker path must find both blocks"
+            vec![0x3FBFC, 0x13FFC, PROG_CHAIN_POS],
+            "marker path must find both TDI blocks and the program chain"
         );
         assert_eq!(found[0].name, "calibration");
         assert_eq!(found[1].name, "code");
-        assert!(!found[0].ok && !found[1].ok);
+        assert_eq!(found[2].name, "program chain");
+        assert!(found.iter().all(|c| !c.ok));
 
         let fixed = correct(&img);
         assert!(verify(&fixed).iter().all(|c| c.ok));

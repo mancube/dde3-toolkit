@@ -18,7 +18,7 @@ chip, DDE 3.0 hardware name).
 |---|---|
 | `docs/wire-protocol.md` | **Authoritative** on-the-wire facts: framing, reply convention (`0x12` prefix, not `0x92`), XOR checksum, timing, ECU identity |
 | `docs/dtc-fault-protocol.md` | 4-step fault-read protocol, 50-byte fault record layout, DTC text tables in `DDE30DS0.prg` |
-| `docs/checksum.md` | TDI V3.1 checksum algorithm, block discovery, the false-BAD fix |
+| `docs/checksum.md` | TDI V3.1 checksum algorithm, block discovery, the false-BAD fix, the cold-start program chain |
 | `docs/break-mode.md` | Break-entered service protocol (10.4 k / 38.4 k) + decoded command set |
 | `docs/baud-0x91-patch.md` | DS2 0x91 baud-change ECU patch + `baud` command |
 | `docs/reverse-engineering.md` | .prg format, the 33 jobs, WinkFP VM status, DDE4 parallels, job re-scope |
@@ -99,6 +99,25 @@ NEXT (hardware): flash `e46_baud125000.bin` on a bench ECU, `dde3-toolkit baud
 --rate 125000`, confirm IDENT at 124800; then the batched live loop logs at
 ~30–50 Hz (vs 2.5 Hz at 9600). Also capture one `UPROG_EIN`+FLASH_LESEN to pin
 the flash read count-width before touching `frame_flash_read`.
+
+### Session 14 (2026-11-12) — checksum module now covers the code-area program chain
+
+`src/checksum.rs` previously corrected only the two TDI V3.1 slots. A third
+code-area check — the **cold-start program chain** at `0x38B7C` — was Python
+only (`progsum.py`), so a Rust-patched image (baud hook, EWS gate, any edit in
+`0x10000-0x38B7F`) still reset-looped even with both TDI slots valid.
+
+- Ported `progsum.py` (`prog_run`/`prog_solve`) into `checksum.rs`;
+  `verify()` now returns a `program chain` row and `correct()` writes it
+  **after** the TDI slots (the code slot `0x13FFC` is inside the chain range).
+- Gated to full images that also have a real TDI code block, so a 32 KB
+  calibration read padded with `0xFF` is never treated as a full image and the
+  padded program area is never written.
+- CLI `checksum` and the GUI Checksum tab pick the row up unchanged (it is a
+  normal 4-byte slot for the Stored-edit/Apply/Fix path).
+- Tests (62 passing): `progsum.py` cross-check vector (`fc520cf8`), ordering
+  test with a stale code slot, padded-partial no-chain test, idempotency.
+  Real images `e46_orig.bin` + all four patch images verify all-OK.
 
 ### Remaining open items (after the above)
 

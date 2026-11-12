@@ -2132,7 +2132,7 @@ impl App {
     }
 
     fn checksum_tab(&mut self, ui: &mut Ui) {
-        heading(ui, "Checksums", "Bosch TDI V3.1 block checksums — EDC15M is the DDE3 (same ECU). Algorithm ported from the verified edc15m-checksum-tool.");
+        heading(ui, "Checksums", "Bosch TDI V3.1 block checksums + the cold-start program chain — EDC15M is the DDE3 (same ECU). Algorithms ported from the verified edc15m-checksum-tool and progsum.py.");
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
             if centered_button_enabled(

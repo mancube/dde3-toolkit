@@ -425,7 +425,7 @@ fn run() -> Result<()> {
             }
             for r in &results {
                 println!(
-                    "checksum {:<12} 0x{:05X} stored {:08X} computed {:08X} {}",
+                    "checksum {:<14} 0x{:05X} stored {:08X} computed {:08X} {}",
                     r.name,
                     r.pos,
                     r.stored,

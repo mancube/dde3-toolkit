@@ -62,3 +62,42 @@ mixup never happens again.
 
 ---
 
+
+## 5b. Cold-start program chain — the second code-area check (session 14)
+
+The TDI slots above are only half of the code-area story. The boot self-test
+(`0x11708-0x11736`, verified on `e46_orig.bin`) hashes **DPP2 pages 4..0xD**
+(`0x10000-0x37FFF`) and then `0x38000-0x38B7F` through the 16-bit window with
+the TDI step, carrying state across pages, and **resets (log 0x1F, code 9)**
+unless the final state is exactly `h=0x8631 g=0xEFCD`.
+
+The two balancing words at `0x38B7C` (directly after the calibration block id
+`23A6` at `0x38B7A`) make it end there. They are identical in all 31 BMW
+calibration releases. Consequences:
+
+- **Any edit in `0x10000-0x38B7F` changes the chain**, even when it is outside
+  both TDI slots — e.g. the `0x91` baud hook at `0x293D0`, the EWS gate at
+  `0x2A65E`. Correcting only the TDI slots leaves such an image in a reset
+  loop; this was the original baud-patch bug.
+- The TDI **code slot `0x13FFC` lies inside the chain range**, so the chain
+  must be solved **after** the TDI slots. `checksum::correct()` now enforces
+  that order; the three fields do not overlap, so it is not circular.
+
+`src/checksum.rs` ports `progsum.py` (`prog_run` / `prog_solve`) and exposes:
+
+- `program_chain(buf) -> Option<Checksum>` — `stored` is the 4 bytes at
+  `0x38B7C`, `computed` is the word that makes *this exact buffer* end at the
+  target, `ok` is `stored == computed` (what the ECU would do).
+- `verify()` appends the chain row for a full image that also has a real TDI
+  code block — so a 32 KB calibration read padded with `0xFF` (which carries
+  the `23A6` id) is never mistaken for a full image and never gets the padded
+  program area written.
+- `correct()` writes the TDI slots first, then solves the chain over the
+  corrected buffer. It is idempotent.
+
+Validation: `progsum.py` cross-check on the LCG test vector (`fc520cf8`), a
+stale-code-slot test proving order matters, a padded-partial test proving no
+chain row/write, and byte-for-byte `OK` on the real images (`e46_orig.bin` +
+all four shipped patch images). The CLI `checksum` subcommand and the GUI
+Checksum tab pick the row up with no changes — it is a normal 4-byte slot at
+`0x38B7C` for the "Stored (edit) / Apply / Fix" path.
