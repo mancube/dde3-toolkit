@@ -233,6 +233,11 @@ pub struct App {
     fast_baud: Option<u32>,
     /// The rate the DS2 link currently runs at once a 0x91 switch succeeded.
     fast_baud_active: Option<u32>,
+    /// "faster 9600" test switch (Live tab): back-to-back polling (1 ms gap)
+    /// + 1 ms/byte TX pacing. Off by default — the link runs the original
+    /// WinKFP timing (55 ms poll gap, 3 ms/byte). Shared with the live thread
+    /// so it can be flipped while live is running.
+    fast9600: Arc<AtomicBool>,
     /// Firmware patch manifests (built in + `patches/` + DDE3_PATCH_DIR).
     patches: Vec<Patch>,
     patch_selected: usize,
@@ -317,6 +322,7 @@ impl App {
             auto_write,
             fast_baud,
             fast_baud_active: None,
+            fast9600: Arc::new(AtomicBool::new(false)),
             patches,
             patch_selected: 0,
             patch_warnings,
@@ -725,6 +731,8 @@ impl App {
         self.stop_live();
         self.connected = false;
         self.fast_baud_active = None;
+        // Back to the default (original WinKFP) 9600 timing on the next session.
+        self.fast9600.store(false, Ordering::Relaxed);
         self.ecu = None;
         self.status = "Disconnecting".into();
         let link = self.link.clone();
@@ -1212,8 +1220,12 @@ impl App {
         let tx = self.tx.clone();
         let log = self.live_log.clone();
         // At a fast baud the wire byte time is ~0.08 ms, so any per-byte pacing
-        // dominates TX — drop it to 0; at 9600 keep 1 ms (≈ the natural byte time).
+        // dominates TX — drop it to 0. At 9600 the default is the original
+        // WinKFP timing (3 ms/byte); the "faster 9600" switch (Live tab) drops
+        // it to 1 ms (≈ the natural byte time). Shared atomic: the toggle can
+        // be flipped while this loop is running.
         let fast = self.fast_baud_active.is_some();
+        let fast9600 = self.fast9600.clone();
         thread::spawn(move || {
             let mut reported = false;
             while !stop.load(Ordering::Relaxed) {
@@ -1229,7 +1241,13 @@ impl App {
                             // continuous stream — exactly as fast as the ECU
                             // itself transmits, no new wire behaviour. The
                             // 3 ms default was an inherited WinKFP habit.
-                            k.set_write_delay(if fast { 0 } else { 1 });
+                            k.set_write_delay(if fast {
+                                0
+                            } else if fast9600.load(Ordering::Relaxed) {
+                                1
+                            } else {
+                                3
+                            });
                             // DDE3 live data via MW_SELECT_LESEN (`12 <LEN> 0B 10 <id bytes>`).
                             // The selected set is batched into as FEW telegrams as the
                             // 0x80-byte DS2 cap allows (protocol::MW_BATCH_SIZE) — a
@@ -1289,11 +1307,13 @@ impl App {
                     }
                     let _ = tx.send(Msg::Live(v));
                 }
-                // Back-to-back polling: the next request goes out as soon as
-                // the reply is parsed (the 55 ms WinKFP-style tester gap is
-                // gone). The transaction itself still costs ~50–100 ms of
-                // wire + silence time, so there is no busy-spin.
-                thread::sleep(Duration::from_millis(1));
+                // Poll gap: default 55 ms — the original WinKFP tester gap.
+                // Back-to-back (1 ms) was faster but is flaky in the car, so it
+                // is opt-in via the "faster 9600" switch; an active fast-baud
+                // link (patched ECU) always polls back-to-back. The transaction
+                // itself still costs ~50–100 ms of wire + silence time.
+                let gap_ms = if fast || fast9600.load(Ordering::Relaxed) { 1 } else { 55 };
+                thread::sleep(Duration::from_millis(gap_ms));
             }
         });
     }
@@ -3333,6 +3353,36 @@ impl App {
             .clicked()
             {
                 self.show_graph = !self.show_graph;
+            }
+            // "faster 9600" test switch — the faster 9600 timing (back-to-back
+            // polling, 1 ms/byte TX pacing). Off by default: the link runs the
+            // original WinKFP timing (55 ms gap, 3 ms/byte). Flipping it applies
+            // from the next poll, even while live is running. Deliberately
+            // separate from the fast-baud button below: that one switches the
+            // actual link rate via service 0x91 and needs the ECU patch.
+            {
+                let on = self.fast9600.load(Ordering::Relaxed);
+                if centered_button_enabled(
+                    ui,
+                    self.connected,
+                    Vec2::new(130.0, 30.0),
+                    egui::Button::new(
+                        RichText::new(if on { "faster 9600: ON" } else { "faster 9600" }).color(BG),
+                    )
+                    .fill(if on { ACCENT } else { CARD_ALT }),
+                )
+                .on_hover_text(
+                    "Faster 9600 timing: back-to-back polling (1 ms gap) + 1 ms/byte TX pacing, instead of the default 55 ms / 3 ms. Applies immediately.",
+                )
+                .clicked()
+                {
+                    self.fast9600.store(!on, Ordering::Relaxed);
+                    self.push_log(if on {
+                        "FAST9600 off — 55 ms poll gap, 3 ms/byte".into()
+                    } else {
+                        "FAST9600 on — back-to-back, 1 ms/byte".into()
+                    });
+                }
             }
             // Fast-baud (0x91) toggle — needs the baud patch flashed. Once the
             // switch succeeds the button turns into a non-clickable status chip;

@@ -57,7 +57,8 @@ fn print_usage() {
     eprintln!("                             progress and timing on stderr, useful exit status");
     eprintln!("    [--info|--read|--read-cal|--write|--write-cal|--live]");
     eprintln!("    [--image <path>] [--out <path>] [--fast-baud 38400|125000] [--duration <s>]");
-    eprintln!("    (--live polls the batched MW set; --fast-baud needs the baud patch flashed)");
+    eprintln!("    [--fast-9600] (--live only: back-to-back polling + 1 ms/byte pacing;");
+    eprintln!("    default is the original 55 ms / 3 ms timing; --fast-baud needs the patch)");
     eprintln!("  checksum <image.bin>       Verify and optionally correct flash checksums");
     eprintln!("  patches [list|show|apply|revert|verify|correct] [name]");
     eprintln!("                             Firmware patch manifests from ./patches (baud 0x91,");
@@ -139,6 +140,9 @@ fn run() -> Result<()> {
     let mut target_rate: u32 = 38_400;
     // `bench --fast-baud <rate>`: switch up right after IDENT (needs the patch).
     let mut fast_baud: Option<u32> = None;
+    // `bench --live --fast-9600`: the faster 9600 timing (back-to-back,
+    // 1 ms/byte) instead of the default WinKFP timing (55 ms gap, 3 ms/byte).
+    let mut fast9600: bool = false;
     let mut bench_image: Option<String> = None;
     let mut bench_out: Option<String> = None;
 
@@ -193,6 +197,7 @@ fn run() -> Result<()> {
             }
             "--sim" => sim = true,
             "--fast" => fast = true,
+            "--fast-9600" => fast9600 = true,
             "--image" => {
                 i += 1;
                 bench_image = Some(args.get(i).cloned().context("--image requires a value")?);
@@ -371,7 +376,17 @@ fn run() -> Result<()> {
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
             }
-            let dtcs = k.read_dtcs()?;
+            let dtcs = match k.read_dtcs() {
+                Ok(dtcs) => dtcs,
+                // Same trace dump as `bench`: the wire log is the only evidence
+                // of what the ECU actually replied on a failed fault read.
+                Err(e) => {
+                    for line in k.take_logs().iter().rev().take(120).rev() {
+                        eprintln!("TRACE {line}");
+                    }
+                    return Err(e);
+                }
+            };
             if dtcs.is_empty() {
                 println!("no stored fault codes");
                 return Ok(());
@@ -414,6 +429,7 @@ fn run() -> Result<()> {
                 sim,
                 fast_baud,
                 duration,
+                fast9600,
             };
             bench::run(args)
         }

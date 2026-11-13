@@ -56,14 +56,23 @@ One real-car confirmation is still pending. Steps:
 
 ### Fast-logger status (2026-11-11)
 
-Tier 0 of `docs/FINDINGS_faster_logger.md` is implemented: 55 ms poll sleep
-removed, live TX pacing 3→1 ms/byte (flash-write pacing untouched), and the
-protocol log is now timestamped (`[+Δs]` gap per line). Real-car baseline was
+Tier 0 of `docs/FINDINGS_faster_logger.md` (back-to-back polling, 1 ms/byte
+TX pacing) was **flaky in the car** — fault reads errored and live/logger
+returned nothing while it was the only timing. The link now defaults to the
+**original WinKFP timing (55 ms poll gap, 3 ms/byte)**; the Tier-0 timing is
+opt-in and can be A/B tested in-car (note: the fault-read path is paced the
+same in both modes — only the live loop's poll gap/pacing change):
+- GUI: **"faster 9600"** switch on the Live tab — flips live, applies from the
+  next poll. Off again on disconnect.
+- CLI: `bench --live --fast-9600` (default = the 55 ms / 3 ms timing).
+
+Live TX pacing is 1 ms only in fast mode (0 ms at fast baud); the fast-baud
+(0x91) button is separate and still requires the baud patch (untested).
+
+Protocol log is timestamped (`[+Δs]` gap per line). Real-car baseline was
 2.50 Hz (steady 399 ms/cycle, 5 ids) with ~250 ms unexplained — **next live
 capture must read the TX→RX gap** to see whether the ECU itself is the
-bottleneck. Expected ≥3.2 Hz after this change; if ECU latency dominates, the only
-remaining lever is Tier 2 (38.4 k break channel) — the ECU transmits
-nothing spontaneously (2026-11-11 passive capture), so no listen mode.
+bottleneck, and to see what the ECU does when polled back-to-back.
 
 ### Session 13 (2026-11-12) — flash framing resolved, fast-DS2 patch corrected
 

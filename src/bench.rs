@@ -17,6 +17,7 @@
 //!     calibration slice works via the marker-less block-id path
 
 use std::path::PathBuf;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -47,6 +48,10 @@ pub struct BenchArgs {
     pub fast_baud: Option<u32>,
     /// For `Mode::Live`: how long to log before stopping (seconds). None = ~10 s.
     pub duration: Option<f64>,
+    /// For `Mode::Live`: the faster 9600 timing (back-to-back polling,
+    /// 1 ms/byte TX pacing). Off by default — the original WinKFP timing
+    /// (55 ms poll gap, 3 ms/byte) is used, mirroring the GUI switch.
+    pub fast9600: bool,
 }
 
 pub fn run(args: BenchArgs) -> Result<()> {
@@ -90,9 +95,12 @@ pub fn run(args: BenchArgs) -> Result<()> {
                 if addrs.is_empty() {
                     bail!("no default-on live variables");
                 }
-                if fast_active {
-                    k.set_write_delay(0); // wire, not pacing, dominates at fast baud
-                }
+                // Timing: default is the original WinKFP values (3 ms/byte +
+                // 55 ms poll gap); `--fast-9600` tests the faster values
+                // (1 ms/byte, back-to-back). At a fast baud the wire
+                // dominates: pacing 0, back-to-back.
+                let gap_ms = if fast_active { 0 } else if args.fast9600 { 1 } else { 55 };
+                k.set_write_delay(if fast_active { 0 } else if args.fast9600 { 1 } else { 3 });
                 let secs = args.duration.unwrap_or(10.0);
                 let secs = if secs.is_finite() && secs > 0.0 { secs } else { 10.0 };
                 let mut cycles = 0u64;
@@ -107,6 +115,9 @@ pub fn run(args: BenchArgs) -> Result<()> {
                         if cycles.is_multiple_of(10) {
                             eprintln!("LIVE n={} first={:?}", vals.len(), vals.first());
                         }
+                    }
+                    if gap_ms > 0 {
+                        thread::sleep(Duration::from_millis(gap_ms));
                     }
                 }
                 let hz = cycles as f64 / loop_start.elapsed().as_secs_f64();
