@@ -94,7 +94,15 @@ pub enum Event {
     Raw(Vec<u8>),
 }
 
-const MAX_BUF: usize = 192;
+const MAX_BUF: usize = 512;
+
+/// Smallest/plausible frame lengths implied by the LEN byte (index 1):
+/// total wire length INCLUDING the trailing XOR. Minimum real frame is
+/// `12 04 A0 xx` (4 bytes); maximum is the u8 ceiling. A LEN outside this
+/// range marks a false anchor / corruption and hands back to the
+/// shortest-XOR-prefix resync.
+const MIN_LEN: usize = 4;
+const MAX_LEN: usize = 255;
 
 /// Silence after the last line byte that means "whatever is buffered will not
 /// be completed": comfortably above the ~50 ms gap WinKFP inserts before the
@@ -112,6 +120,7 @@ pub struct Framer {
     buf: Vec<u8>,
     garbage: Vec<u8>,
     last_rx: Option<Instant>,
+    anchor: u8,
 }
 
 impl Default for Framer {
@@ -122,10 +131,18 @@ impl Default for Framer {
 
 impl Framer {
     pub fn new() -> Self {
+        Self::with_anchor(crate::protocol::ECU_ADDR)
+    }
+
+    /// Framer anchored at a different first byte (default: the ECU address
+    /// 0x12). Used by the `respond` command, where the *peer's* frames
+    /// anchor at the ECU address just like in capture.
+    pub fn with_anchor(anchor: u8) -> Self {
         Self {
             buf: Vec::new(),
             garbage: Vec::new(),
             last_rx: None,
+            anchor,
         }
     }
 
@@ -181,8 +198,8 @@ impl Framer {
                 }
                 break;
             }
-            if self.buf[0] == crate::protocol::ECU_ADDR {
-                match xor_end(&self.buf) {
+            if self.buf[0] == self.anchor {
+                match self.frame_end() {
                     Some(k) => {
                         // Time order: any preceding garbage run goes first.
                         if !self.garbage.is_empty() {
@@ -206,6 +223,40 @@ impl Framer {
             }
         }
         out
+    }
+
+    /// Index of the trailing XOR byte for the frame anchored at `self.buf[0]`,
+    /// or `None` while the frame is still incomplete.
+    ///
+    /// Primary rule: the LEN byte at `buf[1]` is the TOTAL wire length
+    /// INCLUDING the trailing XOR (verified on every frame in
+    /// captures/dde3newlog.txt — IDENT `12 2E …` = 46 wire bytes, AIF
+    /// `12 32 …` = 50, flash write `12 49 …` = 73). While fewer than LEN
+    /// bytes have arrived the frame is incomplete and we WAIT — the old pure
+    /// shortest-XOR-prefix rule truncated a 73-byte `FLASH_SCHREIBEN` at
+    /// byte 21 because that payload happens to satisfy `xor(prefix) == next`
+    /// in-band (data-dependent coincidence), fragmenting the write into a
+    /// 22-byte frame + RAW runs.
+    ///
+    /// Fallback (resync): if the declared LEN is implausible, or LEN bytes
+    /// are present but the trailing XOR does not validate (corruption / false
+    /// 0x12 anchor), fall back to the shortest XOR-terminated prefix — the
+    /// original semantics, kept for passive-capture robustness.
+    fn frame_end(&self) -> Option<usize> {
+    let total = match self.buf.get(1).copied() {
+        Some(l) => l as usize,
+        None => return xor_end(&self.buf),
+    };
+    if (MIN_LEN..=MAX_LEN).contains(&total) {
+        if self.buf.len() < total {
+            return None; // mid-frame: must not cut early on an in-band XOR
+        }
+        let k = total - 1; // index of the declared trailing XOR byte
+        if crate::protocol::xor_cs(&self.buf[..k]) == self.buf[k] {
+            return Some(k);
+        }
+    }
+    xor_end(&self.buf)
     }
 }
 
@@ -291,10 +342,13 @@ impl Summary {
     }
 }
 
-static STOP: AtomicBool = AtomicBool::new(false);
+/// Shared Ctrl-C flag: set by the signal handler, polled by the `capture`
+/// and `respond` run loops (both are single-shot CLI commands, so one
+/// global is safe and simple).
+pub static STOP: AtomicBool = AtomicBool::new(false);
 
 #[cfg(unix)]
-fn install_sigint() {
+pub fn install_sigint() {
     extern "C" fn handler(_sig: libc::c_int) {
         STOP.store(true, Ordering::Relaxed);
     }
@@ -580,6 +634,66 @@ mod tests {
             matches!(ev, Some(Event::Raw(ref b)) if b == &full[..3]),
             "got {ev:?}"
         );
+    }
+
+    /// Regression: a 73-byte `FLASH_SCHREIBEN` whose payload contains an
+    /// in-band XOR coincidence (running XOR of the prefix equals the next
+    /// byte at index 21 — exactly the real-car write to 0x10100 from the
+    /// 2026-11-11 session) must NOT be truncated at 22 bytes. The LEN byte
+    /// (0x49 = 73 wire bytes) is authoritative.
+    #[test]
+    fn long_write_with_in_band_xor_collision_stays_intact() {
+        // Frame: 12 49 07 02 01 01 00 40 <64 data bytes> <xor> = 73 wire bytes.
+        // Header (8) + first 13 data bytes = 21 bytes (indices 0..20).
+        let mut f: Vec<u8> = vec![
+            0x12, 0x49, 0x07, 0x02, 0x01, 0x01, 0x00, 0x40,
+            0xAA, 0x55, 0xFB, 0x88, 0xE6, 0xF2, 0x00, 0x40, 0x46, 0xF6, 0xEE,
+            0x11, 0x22,
+        ];
+        assert_eq!(f.len(), 21, "header (8) + 13 data bytes = indices 0..20");
+        // Force the collision: byte 21 == XOR of bytes 0..21 (the in-band
+        // coincidence that truncated write #5 on the real car).
+        f.push(crate::protocol::xor_cs(&f[..21]));
+        // Remaining data bytes to reach 64 total: 64 - 13 - 1 = 50.
+        f.extend(std::iter::repeat(0x5A).take(50));
+        f.push(crate::protocol::xor_cs(&f[..])); // true trailing XOR, LEN 73
+        assert_eq!(f.len(), 73, "LEN byte 0x49 must equal the wire length");
+
+        // Fed all at once: one complete frame, zero RAW.
+        let mut fr = Framer::new();
+        let events = fr.feed(&f, Instant::now());
+        let frames: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Frame { payload } => Some(payload.clone()),
+                Event::Raw(_) => None,
+            })
+            .collect();
+        let raws: Vec<_> = events.iter().filter(|e| matches!(e, Event::Raw(_))).collect();
+        assert_eq!(frames.len(), 1, "one frame, got {events:?}");
+        assert!(raws.is_empty(), "no RAW runs, got {events:?}");
+        assert_eq!(frames[0].len(), 72, "payload = 73 wire bytes minus XOR");
+        assert_eq!(&frames[0][..4], &[0x12, 0x49, 0x07, 0x02]);
+
+        // Fed in small chunks (as the UART delivers them): still one frame,
+        // nothing truncated at the byte-21 collision while incomplete.
+        let mut fr = Framer::new();
+        let t = Instant::now();
+        let mut events = Vec::new();
+        for chunk in f.chunks(13) {
+            events.extend(fr.feed(chunk, t));
+        }
+        let frames: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Frame { payload } => Some(payload.clone()),
+                Event::Raw(_) => None,
+            })
+            .collect();
+        let raws: Vec<_> = events.iter().filter(|e| matches!(e, Event::Raw(_))).collect();
+        assert_eq!(frames.len(), 1, "reassembled across chunks, got {events:?}");
+        assert!(raws.is_empty(), "no RAW runs, got {events:?}");
+        assert_eq!(frames[0].len(), 72);
     }
 
     #[test]

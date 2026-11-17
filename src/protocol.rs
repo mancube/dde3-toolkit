@@ -768,7 +768,11 @@ impl Kline {
         self.logs.push(format!("[+{delta:6.3}s] {line}"));
     }
 
-    fn write_frame(&mut self, frame: &[u8]) -> Result<()> {
+    /// Transmit a full wire frame (payload + trailing XOR) with the
+    /// configured per-byte pacing — the same path every request goes out on.
+    /// Used by the `respond` command to send the simulated ECU replies on
+    /// the real wire.
+    pub fn write_frame(&mut self, frame: &[u8]) -> Result<()> {
         for (i, b) in frame.iter().enumerate() {
             self.port
                 .write_all(&[*b])
@@ -1314,7 +1318,7 @@ pub fn ident_valid(reply: &[u8]) -> bool {
 }
 
 /// Parsed fields of the IDENT string, as confirmed against the live M47 ECU
-/// (2026-11-10 capture, 43-char reply zero-padded):
+/// (2026-11-10 capture, 42-char reply zero-padded):
 ///
 /// ```text
 ///  1–7   software version        "7786887"
@@ -1499,8 +1503,10 @@ mod tests {
         // Wire (2026-11-10 capture, dde3-toolkit/captures/dde3newlog.txt):
         // the ECU wraps the ident string in the normal envelope,
         // `12 2E A0 37 37 38 36 …` — status A0, ASCII data from [3].
-        let s = b"77868875201124048010281001445G5210000000000"; // 43 chars
-        assert_eq!(s.len(), 43, "len byte 0x2E = 3 header + 43 data");
+        // LEN byte 0x2E = 46 = 3 header + 42 data + trailing XOR (the
+        // RX log line shows the 45-byte payload, XOR stripped by the parser).
+        let s = b"77868875201124048010281001445G521000000000"; // 42 chars
+        assert_eq!(s.len(), 42, "len byte 0x2E = 3 header + 42 data + XOR");
         let mut wire: Vec<u8> = vec![0x12, 0x04, 0x00, 0x16]; // echo
         wire.extend_from_slice(&[0x12, 0x2E, 0xA0]);
         wire.extend_from_slice(s);
@@ -1537,7 +1543,7 @@ mod tests {
 
     #[test]
     fn parse_ident_fields() {
-        let s = b"77868875201124048010281001445G5210000000000";
+        let s = b"77868875201124048010281001445G521000000000";
         let i = parse_ident(s).expect("parses the captured string");
         assert_eq!(i.software, "7786887");
         assert_eq!(i.ecu_code, "5201");

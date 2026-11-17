@@ -96,10 +96,14 @@ parse against the real car.
 
 1. **IDENT replies in the normal envelope** with the ident string as data:
    `TX 12 04 00 16` → `RX 12 2E A0 37 37 38 36 …` (2026-11-10 capture,
-   `captures/dde3newlog.txt`) — status A0, ASCII string from [3], 43 chars,
+   `captures/dde3newlog.txt`) — status A0, ASCII string from [3], 42 chars,
    zero-padded: `7786887 5201 1240 4801 0281001445 G521 00…`
    (software version / ECU code / ? / week-year / Bosch HW number / G code).
-   (The earlier session had misread a truncated bare run as the reply.)
+   The RX log line shows the 45-byte payload (the parser strips the trailing
+   XOR): LEN byte 0x2E = 46 = 3 header + 42 data + XOR on the wire.
+   (The earlier session had misread a truncated bare run as the reply, and
+   the 43-char variant had counted that trailing 0x30 XOR byte as a fourth
+   zero — foreign tools reject a 47-byte IDENT reply.)
    `Kline::identify()` strips the envelope; `ident_valid()` checks the bare
    string (4–48 printable chars), `parse_ident()` splits it into fields.
 2. **A ~16-byte live block `12 10 A0 10 00 00 00 00 00 03 DE 0B 26 02 4A`

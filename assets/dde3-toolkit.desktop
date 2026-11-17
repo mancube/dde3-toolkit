@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=DDE3 Toolkit
+Comment=DDE3.0 K-line flash and diagnostics
+Exec=dde3-toolkit
+Icon=dde3-toolkit
+Terminal=false
+Categories=Utility;Development;
+Keywords=ECU;EDC15;DDE3;K-line;flash;diagnostics;
+StartupWMClass=dde3-toolkit

@@ -37,8 +37,8 @@ XOR. `Kline` adds the XOR and the echo bookkeeping.
 
 | Telegram | Service | Reply data (offset [3] unless noted) |
 |---|---|---|
-| `12 04 00` | IDENT | ident ASCII string (43 chars, zero-padded) |
-| `12 05 02 FF` | AIF read (programming record) | 32-byte AIF record, data at [3] (AIF_LESEN reads from resp[3]) |
+| `12 04 00` | IDENT | ident ASCII string (42 chars, zero-padded) |
+| `12 05 02 00/FF` | AIF read (programming record) | **46-byte** AIF record from cal 0x7CB2 (first of 14 46-byte slots), data at [3..49]; reply `12 32 A0 <46 B>` + XOR (LEN 50). Param byte unused by the ECU. Empty slot (first byte 0xFF) → short `12 05 A0 FF` (AIF_NICHT_PROGRAMMIERT) |
 | `12 04 05` | clear fault memory | status only |
 | `12 05 14 01` / `12 05 04 00` / `12 05 04 01` | fault memory read (count+header / entry / shadow) | 4-step chunked protocol, see `docs/dtc-fault-protocol.md` |
 | `12 04 0A` | coding checksum (TDI V3.1) | u16 BE stored calibration checksum |
@@ -85,13 +85,37 @@ From the SEED_KEY job bytecode (`research/diag_jobs.md` §1, reconstructed):
    `T[i] = resp[0x12+i] + resp[Z+i]`, `K[i] = T[i] + resp[0x29+i]` (byte
    adds, i = 0..3).
 4. Tester sends `12 08 90 K0 K1 K2 K3`; ECU checks, answers status.
+5. **Measured on the wire** (DDE3 session 2026-11-17, Z=0x10): the key the
+   real job sends is `82 85 88 8B` — exactly **5 lower** than the
+   uncorrected formula (`87 8A 8D 90`) on all four bytes. The sim's seed
+   table is linear (slope 1), so the job's key-window offset from the
+   reconstructed indices shows up as a constant value offset; the sim
+   compensates with `SEED_KEY_BIAS = 5` (wrapping subtract on each key
+   byte), making the accepted key match the job's for every Z.
 
-The sim implements the ECU side of this exactly: it picks
-`K[i] = 0x3C ^ i ^ (Z & 0x0F)`, fills `A[i]` at `resp[0x12+i]`, `B[i]` at
-`resp[Z+i]`, and `C[i] = K[i] - A[i] - B[i] (mod 256)` at `resp[0x29+i]`,
-everything else deterministic. A wrong key is answered with `B0` and leaves
-the ECU locked. Note the real ECU's key material is unknown; the sim's key
-function only has to be consistent with the job's reconstruction.
+The sim implements the ECU side of this: the seed reply is a 46-byte seed
+telegram `12 2E A0 <42 data bytes> <XOR>` (LEN 0x2E = 46 wire, the ≥0x2D
+the job wants) whose data is a deterministic pattern seeded by Z. The
+expected key is then computed **on the final 45-byte payload** with the
+job's formula `K[i] = resp[0x12+i] + resp[Z+i] + resp[0x29+i]` (byte adds)
+minus the measured bias — so the key the sim will accept is exactly what a
+tester computing the job's formula on the bytes it actually receives will
+send, for **every** Z (including Z where the `resp[Z+i]` window overlaps the
+header or the other key windows; both sides read the same final bytes). The
+sim has **no "already unlocked" latch** (item 2 is the job's own check, not
+sim behaviour): every `BMW` seed request gets a fresh seed telegram + fresh
+expected key. An earlier build answered the short ack `12 05 A0 00` after
+the first unlock, but the flashing tool *retries the whole exchange* and
+does not stop on the short ack — it sent key `00 00 00 00`, got `B0` back
+and stalled (capture 2026-11-17). Always issuing a fresh telegram is what
+lets the retry proceed. The
+ECU-side algorithm is grounded in the M47 decomp `sub_028B5E` (see
+`research/out/disasm.txt`), which derives the accepted key from the bytes it
+just placed in the reply plus the request's Z. A wrong key is answered with
+`B0` and leaves the ECU locked (the ECU stays in the pending-key state until
+the correct key arrives). Note the real ECU's key *material* (the CC0A..CC0D
+/ CC21..CC24 constants in the decomp) is unknown; the sim's key only has to
+be consistent with the job's reconstruction so the round-trip closes.
 
 ## Variable model (`0B 10` / MW block / PSG)
 
@@ -131,7 +155,7 @@ partially known from the jobs):
 
 | Offset | Content |
 |---|---|
-| 0x00–0x1F | AIF programming record (returned by `02 FF`) |
+| 0x7CB2–0x7CE0 | AIF programming record slot 0 (46 B; the 0x02 handler's source — cal area, in the 256 KB `flash` model) |
 | 0x20–0x22 | Pruefstempel (`04 0E` / `07 0F`) |
 | 0x30–0x7F | adjustment items (word 0 of item NN at 0x30+16·index; the 12-word item 09 spans 24 bytes) |
 
@@ -173,5 +197,5 @@ protocol, flash read/write/erase telegrams, PRUEFCODE/UPROG_EIN `12 04 0D`.
 MW block header byte at [3] and 25-word order (order from cal 0x3AF04,
 header byte inferred), `0B 04` data at [4..8] (offsets from the
 STATUS_DIGITAL bytecode: 4 bytes copied from S2[4..8]), `0B 11` data at
-[5], adjustment reply "no header" assumption, AIF 32-byte record layout,
+[5], adjustment reply "no header" assumption,
 EEPROM layout, seed/key key-function, EGS ident string.

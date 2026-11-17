@@ -106,6 +106,17 @@ Bench wiring (dual adapter): `/dev/ttyUSB1` (FT232R) drives the K-line,
 `/dev/ttyUSB0` (QinHeng UART-LPT) taps it passively —
 `python3 tools/monitor.py` shows the real wire traffic on it.
 
+`respond` is the fake-ECU mode: full duplex on ONE port (default
+`/dev/ttyUSB0`) — it answers every received frame with the built-in
+simulator (IDENT, STATUS, SEED/KEY, flash, DTC, live data), so a flashing
+tool on the same K node talks to the sim while every frame and reply is
+logged. Own replies are matched on the wire and logged as `ECHO`.
+
+```sh
+# Fake ECU on the tap port, mirroring the session to a log file
+./target/release/dde3-toolkit respond --out fake_ecu.log
+```
+
 ```sh
 # Identify the ECU (→ "DDE 3.0 fuer M47")
 ./target/release/dde3-toolkit ident --port /dev/ttyUSB1
@@ -171,6 +182,7 @@ cargo test        # protocol frames, parser, checksum, DTC tables, break mode
 |---|---|
 | Status + task at hand | [`HANDOVER.md`](HANDOVER.md) |
 | Wire protocol (framing, replies, timing) | [`docs/wire-protocol.md`](docs/wire-protocol.md) |
+| Fake-ECU responder (`respond`) | [`docs/respond-mode.md`](docs/respond-mode.md) |
 | Fault/DTC protocol + record layout | [`docs/dtc-fault-protocol.md`](docs/dtc-fault-protocol.md) |
 | Checksums (TDI V3.1 + program chain) | [`docs/checksum.md`](docs/checksum.md) |
 | Firmware patches (baud, EWS delete) | [`docs/patches.md`](docs/patches.md), [`patches/README.md`](patches/README.md) |

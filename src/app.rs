@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use eframe::egui::{
@@ -125,6 +125,40 @@ struct LogWriter {
     rows: usize,
     start: Instant,
     ids: Vec<u16>,
+}
+
+/// Default log file name, matching the WinOLS/testo log naming
+/// `YYYY-MM-DD-HHMMSS.csv` (e.g. `2026-08-12-160605.csv`, see
+/// tuning/testing/logs/).
+fn default_log_file_name() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let time = secs;
+    let mut t = std::mem::MaybeUninit::<libc::tm>::uninit();
+    let ptr = unsafe { libc::localtime_r(&time, t.as_mut_ptr()) };
+    let ptr = if ptr.is_null() {
+        // localtime_r failed — fall back to UTC (practically impossible on Linux)
+        let mut u = std::mem::MaybeUninit::<libc::tm>::uninit();
+        let p = unsafe { libc::gmtime_r(&time, u.as_mut_ptr()) };
+        if p.is_null() {
+            return "log.csv".into();
+        }
+        p
+    } else {
+        ptr
+    };
+    let tm = unsafe { &*ptr };
+    format!(
+        "{:04}-{:02}-{:02}-{:02}{:02}{:02}.csv",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
 }
 
 impl LogWriter {
@@ -1136,7 +1170,7 @@ impl App {
             return;
         }
         let Some(path) = rfd::FileDialog::new()
-            .set_file_name("dde3_log.csv")
+            .set_file_name(default_log_file_name())
             .add_filter("CSV", &["csv"])
             .save_file()
         else {
@@ -3354,62 +3388,99 @@ impl App {
             {
                 self.show_graph = !self.show_graph;
             }
-            // "faster 9600" test switch — the faster 9600 timing (back-to-back
-            // polling, 1 ms/byte TX pacing). Off by default: the link runs the
-            // original WinKFP timing (55 ms gap, 3 ms/byte). Flipping it applies
-            // from the next poll, even while live is running. Deliberately
-            // separate from the fast-baud button below: that one switches the
-            // actual link rate via service 0x91 and needs the ECU patch.
-            {
-                let on = self.fast9600.load(Ordering::Relaxed);
-                if centered_button_enabled(
-                    ui,
-                    self.connected,
-                    Vec2::new(130.0, 30.0),
-                    egui::Button::new(
-                        RichText::new(if on { "faster 9600: ON" } else { "faster 9600" }).color(BG),
-                    )
-                    .fill(if on { ACCENT } else { CARD_ALT }),
-                )
-                .on_hover_text(
-                    "Faster 9600 timing: back-to-back polling (1 ms gap) + 1 ms/byte TX pacing, instead of the default 55 ms / 3 ms. Applies immediately.",
-                )
-                .clicked()
-                {
-                    self.fast9600.store(!on, Ordering::Relaxed);
-                    self.push_log(if on {
-                        "FAST9600 off — 55 ms poll gap, 3 ms/byte".into()
-                    } else {
-                        "FAST9600 on — back-to-back, 1 ms/byte".into()
-                    });
-                }
-            }
-            // Fast-baud (0x91) toggle — needs the baud patch flashed. Once the
-            // switch succeeds the button turns into a non-clickable status chip;
-            // the link reverts to 9600 only on a power cycle / reconnect.
-            match self.fast_baud_active {
-                None => {
-                    if centered_button_enabled(
-                        ui,
-                        self.connected && !self.busy && !self.live_running,
-                        Vec2::new(150.0, 30.0),
-                        egui::Button::new(RichText::new("Fast baud (125k)").color(BG)).fill(ACCENT),
-                    )
-                    .clicked()
-                    {
-                        // One-off manual switch; does not set self.fast_baud, so a
-                        // later reconnect will not silently re-issue 0x91.
-                        self.switch_fast_baud_async(125_000);
-                    }
-                }
-                Some(rate) => {
+            // Link-speed group — frames the "faster 9600" timing switch and the
+            // fast-baud (0x91) toggle as one unit instead of two loose buttons.
+            // The timing switch is rendered as a toggle (sunken dark when off,
+            // selected-accent when on) rather than a plain button: the old
+            // CARD_ALT fill matched egui's disabled widget fill, so it read as
+            // dead.
+            Frame::new()
+                .fill(CARD)
+                .stroke(Stroke::new(1.0_f32, BORDER))
+                .corner_radius(10)
+                .inner_margin(Margin::symmetric(10, 8))
+                .show(ui, |ui| {
                     ui.label(
-                        RichText::new(format!("fast: {rate} baud"))
-                            .size(12.0)
-                            .color(ACCENT),
+                        RichText::new("LINK SPEED").size(9.0).color(MUTED).strong(),
                     );
-                }
-            }
+                    ui.horizontal(|ui| {
+                        // "faster 9600" test switch — back-to-back polling +
+                        // 1 ms/byte TX pacing. Off by default: the link runs the
+                        // original WinKFP timing (55 ms gap, 3 ms/byte). Flipping
+                        // it applies from the next poll, even while live is
+                        // running. Deliberately separate from the fast-baud
+                        // toggle below: that one switches the actual link rate
+                        // via service 0x91 and needs the ECU patch.
+                        let on = self.fast9600.load(Ordering::Relaxed);
+                        let label = RichText::new(if on {
+                            "●  faster 9600"
+                        } else {
+                            "○  faster 9600"
+                        })
+                        .color(TEXT)
+                        .strong();
+                        if centered_button_enabled(
+                            ui,
+                            self.connected,
+                            Vec2::new(130.0, 30.0),
+                            egui::Button::new(label)
+                                .fill(if on { ACCENT_DIM } else { BG })
+                                .stroke(if on {
+                                    Stroke::new(1.0_f32, ACCENT)
+                                } else {
+                                    Stroke::new(1.0_f32, BORDER)
+                                }),
+                        )
+                        .on_hover_text(
+                            "Faster 9600 timing: back-to-back polling (1 ms gap) + 1 ms/byte TX pacing, instead of the default 55 ms / 3 ms. Applies immediately.",
+                        )
+                        .clicked()
+                        {
+                            self.fast9600.store(!on, Ordering::Relaxed);
+                            self.push_log(if on {
+                                "FAST9600 off — 55 ms poll gap, 3 ms/byte".into()
+                            } else {
+                                "FAST9600 on — back-to-back, 1 ms/byte".into()
+                            });
+                        }
+                        // Fast-baud (0x91) toggle — needs the baud patch flashed.
+                        // Once the switch succeeds it turns into a non-clickable
+                        // status chip; the link reverts to 9600 only on a power
+                        // cycle / reconnect.
+                        match self.fast_baud_active {
+                            None => {
+                                if centered_button_enabled(
+                                    ui,
+                                    self.connected && !self.busy && !self.live_running,
+                                    Vec2::new(150.0, 30.0),
+                                    egui::Button::new(RichText::new("Fast baud (125k)").color(BG))
+                                        .fill(ACCENT),
+                                )
+                                .clicked()
+                                {
+                                    // One-off manual switch; does not set
+                                    // self.fast_baud, so a later reconnect will
+                                    // not silently re-issue 0x91.
+                                    self.switch_fast_baud_async(125_000);
+                                }
+                            }
+                            Some(rate) => {
+                                Frame::new()
+                                    .fill(ACCENT_DIM)
+                                    .corner_radius(8)
+                                    .inner_margin(Margin::symmetric(8, 6))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(format!("● fast: {rate} baud"))
+                                                .size(12.0)
+                                                .color(ACCENT)
+                                                .strong(),
+                                        );
+                                    });
+                            }
+                        }
+                    });
+                });
             ui.label(
                 RichText::new(if self.live_running {
                     format!("polling at {:.1} Hz", self.live_rate)

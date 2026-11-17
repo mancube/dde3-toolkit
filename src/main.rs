@@ -19,6 +19,7 @@ mod dtc;
 mod live;
 mod patches;
 mod protocol;
+mod respond;
 mod sim;
 
 use anyhow::{Context, Result};
@@ -28,6 +29,20 @@ use std::time::Duration;
 
 use crate::checksum::{correct, verify, CAL_LEN, CAL_START, IMAGE_SIZE};
 use crate::protocol::Kline;
+
+const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
+
+fn load_icon() -> eframe::egui::IconData {
+    let image = image::load_from_memory(ICON_PNG)
+        .expect("assets/icon.png is a valid PNG")
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+    eframe::egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    }
+}
 
 fn print_usage() {
     eprintln!("dde3-toolkit v{}", env!("CARGO_PKG_VERSION"));
@@ -53,6 +68,15 @@ fn print_usage() {
     eprintln!("                             so no erase/write is possible in this mode.");
     eprintln!("                             Default port is the passive tap /dev/ttyUSB0.");
     eprintln!("    [--out <file>] [--duration <secs>]");
+    eprintln!("  respond                FAKE ECU: full duplex on ONE port — it answers every");
+    eprintln!("                             received frame like an EDC15 would (built-in sim:");
+    eprintln!("                             IDENT, STATUS, SEED/KEY, flash, DTC, live data).");
+    eprintln!("                             Use it as the ECU stand-in while a flashing tool");
+    eprintln!("                             drives the same K node; own replies are logged as ECHO.");
+    eprintln!("    [--out <file>] [--duration <secs>] [--data-delay <ms>]");
+    eprintln!("    [--reply-delay <ms>] [--dump <image.bin>]");
+    eprintln!("                             (default port /dev/ttyUSB0; --dump writes the");
+    eprintln!("                             reconstructed flash image the peer programmed)");
     eprintln!("  bench                      Headless run: identify + optional read/write,");
     eprintln!("                             progress and timing on stderr, useful exit status");
     eprintln!("    [--info|--read|--read-cal|--write|--write-cal|--live]");
@@ -134,6 +158,10 @@ fn run() -> Result<()> {
     let mut duration: Option<f64> = None;
     let mut baud: u32 = 9600;
     let mut data_delay_ms: u64 = 3;
+    let mut data_delay_set = false;
+    // `respond --reply-delay`: pause (ms) between the peer's last byte and the
+    // first reply byte of the fake ECU (default 5 ms, ECU-like latency).
+    let mut reply_delay_ms: u64 = 5;
     let mut sim: bool = false;
     let mut fast: bool = false;
     // Target DS2 rate for the `baud` command (the 0x91 patch). 38400 or 125000.
@@ -145,6 +173,9 @@ fn run() -> Result<()> {
     let mut fast9600: bool = false;
     let mut bench_image: Option<String> = None;
     let mut bench_out: Option<String> = None;
+    // `respond --dump <file>`: at run end, write the reconstructed flash
+    // image (everything the peer programmed) to this file.
+    let mut bench_dump: Option<String> = None;
 
     let mut i = 2;
     while i < args.len() {
@@ -177,6 +208,7 @@ fn run() -> Result<()> {
                     .context("--data-delay requires a value")?
                     .parse::<u64>()
                     .with_context(|| format!("invalid data delay: {}", args[i]))?;
+                data_delay_set = true;
             }
             "--rate" => {
                 i += 1;
@@ -198,6 +230,14 @@ fn run() -> Result<()> {
             "--sim" => sim = true,
             "--fast" => fast = true,
             "--fast-9600" => fast9600 = true,
+            "--reply-delay" => {
+                i += 1;
+                reply_delay_ms = args
+                    .get(i)
+                    .context("--reply-delay requires a value")?
+                    .parse::<u64>()
+                    .with_context(|| format!("invalid reply delay: {}", args[i]))?;
+            },
             "--image" => {
                 i += 1;
                 bench_image = Some(args.get(i).cloned().context("--image requires a value")?);
@@ -206,15 +246,25 @@ fn run() -> Result<()> {
                 i += 1;
                 bench_out = Some(args.get(i).cloned().context("--out requires a value")?);
             }
+            "--dump" => {
+                i += 1;
+                bench_dump = Some(args.get(i).cloned().context("--dump requires a value")?);
+            }
             _ => {}
         }
         i += 1;
     }
 
+    // The fake ECU transmits back-to-back like the real one (the 3 ms/byte
+    // WinKFP pacing is a master-side habit) unless the user set it explicitly.
+    if command == "respond" && !data_delay_set {
+        data_delay_ms = 0;
+    }
+
     // Resolve the port: explicit --port wins; otherwise the sender for the
     // driver commands and the passive tap for `capture` (read-only).
     let port: String = port.unwrap_or_else(|| {
-        if command == "capture" {
+        if command == "capture" || command == "respond" {
             "/dev/ttyUSB0".to_string()
         } else {
             "/dev/ttyUSB1".to_string()
@@ -230,6 +280,19 @@ fn run() -> Result<()> {
                 duration: duration.map(Duration::from_secs_f64),
             };
             capture::run(&opts)?;
+            Ok(())
+        }
+        "respond" => {
+            let opts = respond::RespondOptions {
+                port,
+                baud,
+                out: bench_out.clone().map(PathBuf::from),
+                duration: duration.map(Duration::from_secs_f64),
+                data_delay_ms,
+                reply_delay_ms,
+                dump: bench_dump.clone().map(PathBuf::from),
+            };
+            respond::run(&opts)?;
             Ok(())
         }
         "ident" => {
@@ -640,7 +703,9 @@ fn main() {
             viewport: eframe::egui::ViewportBuilder::default()
                 .with_inner_size([width, height])
                 .with_min_inner_size([940.0, 620.0])
-                .with_title("DDE3 Toolkit"),
+                .with_title("DDE3 Toolkit")
+                .with_app_id("dde3-toolkit")
+                .with_icon(load_icon()),
             ..Default::default()
         };
         let _ = eframe::run_native(
