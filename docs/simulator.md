@@ -72,6 +72,13 @@ XOR. `Kline` adds the XOR and the echo bookkeeping.
 
 Unknown service → `12 <len> FF` NACK (handler map 0x26900 in the decomp).
 
+**Coverage status (2026-11-17, MPPS follow-up):** every service row above is
+now answered by the fake ECU — including the previously-missing ones
+(test stamp `0E`/`0F`, actuator override `0C`, EWS sync `6C`/`6D`, adjustment
+values `40`/`41`/`42`, session keep `9E`, MW sub-services `03`/`04`/`11`/`12`,
+and STEUERN_TESTPLATZ `07 10`) — so a foreign tool (MPPS/Galletto) no longer
+hits a mid-session NACK and stalls waiting for a response it will never get.
+
 ## Seed/key (`0x90`)
 
 From the SEED_KEY job bytecode (`research/diag_jobs.md` §1, reconstructed):

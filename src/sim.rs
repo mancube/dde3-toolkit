@@ -25,6 +25,8 @@
 //! toolkit's `is_not_live_broadcast` skips it for the small fault/battery
 //! replies.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 
 use crate::protocol::{ECU_ADDR, IMAGE_SIZE};
@@ -72,6 +74,11 @@ pub struct SimEcu {
     fault_pos: usize,
     /// FS_LESEN step: 0=count, 1=entry, 2=shadow, 3=tail.
     fault_step: u8,
+    /// Test-stamp (Pruefstempel) bytes — DS2 cmd `0x0E` read / `0x0F` write.
+    test_stamp: [u8; 3],
+    /// Adjustment values by item id (DS2 cmd `0x40` read / `0x41` set /
+    /// `0x42` store; ids are the `NN` bytes of those jobs).
+    adjustments: BTreeMap<u8, u16>,
 }
 
 impl Default for SimEcu {
@@ -111,6 +118,8 @@ impl SimEcu {
             faults: Self::default_faults(),
             fault_pos: 0,
             fault_step: 0,
+            test_stamp: [0, 0, 0],
+            adjustments: BTreeMap::new(),
         }
     }
 
@@ -135,6 +144,8 @@ impl SimEcu {
             faults: Self::default_faults(),
             fault_pos: 0,
             fault_step: 0,
+            test_stamp: [0, 0, 0],
+            adjustments: BTreeMap::new(),
         })
     }
 
@@ -252,6 +263,15 @@ impl SimEcu {
                     self.fault_step = 0;
                     Self::status(p, len_echo, SB_OK)
                 }
+                // STEUERN_TESTPLATZ (cmd 07 write-type; the job sends it after
+                // an unlock) — status only, accepted if unlocked.
+                Some(0x10) => {
+                    if self.pending_key.is_none() {
+                        Self::status(p, len_echo, SB_OK)
+                    } else {
+                        Self::nack(p)
+                    }
+                }
                 _ => Self::nack(p),
             },
             // MW live data: `12 05 0B <sub> [ids...]`.
@@ -271,6 +291,58 @@ impl SimEcu {
                 self.fault_step = 0;
                 Self::status(p, len_echo, SB_OK)
             }
+            // ACTUATOR OVERRIDE ("Steuern", DS2 `0C`): `12 08 0C <idH> <idL>
+            // <v> <m>` — status only (m = 00 set / 55 hold / AA release).
+            // The selective-release (`…30 55`) and KWH-off (`…00 AA`) release
+            // codes ride longer frames handled at the job level; the fake ECU
+            // answers the override job with the plain JOBRESULT status.
+            0x0C => Self::status(p, len_echo, SB_OK),
+            // TEST STAMP read (DS2 `0E`, "Pruefstempel"): `12 04 0E` → status +
+            // the 3 test-stamp bytes (`12 <len> A0 <b0> <b1> <b2> <XOR>`,
+            // LEN = 7 = payload(6) + XOR).
+            0x0E => {
+                let mut r = Self::status(p, len_echo, SB_OK);
+                r.push(self.test_stamp[0]);
+                r.push(self.test_stamp[1]);
+                r.push(self.test_stamp[2]);
+                r
+            }
+            // TEST STAMP write (DS2 `0F`): status only, storing `b1 b2 b3` when
+            // the frame carries them (job-style `12 07 0F <b1> <b2> <b3>`).
+            0x0F => {
+                if p.len() >= 6 {
+                    self.test_stamp = [p[3], p[4], p[5]];
+                }
+                Self::status(p, len_echo, SB_OK)
+            }
+            // EWS SYNC START (DS2 `6C`): `12 05 6C 00` → status only.
+            0x6C => Self::status(p, len_echo, SB_OK),
+            // EWS SYNC STATUS (DS2 `6D`): `12 04 6D` → status byte(s).
+            0x6D => Self::status(p, len_echo, SB_OK),
+            // ADJUSTMENT VALUE READ (DS2 `40`): `12 05 40 <NN>` → status + the
+            // value (`12 <len> A0 <val> <XOR>`, LEN = 6 = payload(5) + XOR).
+            0x40 => {
+                let nn = *p.get(3).unwrap_or(&0);
+                let val = self.adjustments.get(&nn).copied().unwrap_or(0);
+                let mut r = Self::status(p, len_echo, SB_OK);
+                r.push((val >> 8) as u8);
+                r.push(val as u8);
+                r
+            }
+            // ADJUSTMENT VALUE SET, RAM copy (DS2 `41`): `12 07 41 <NN> <hi>
+            // <lo>` → status only.
+            0x41 => {
+                let nn = *p.get(3).unwrap_or(&0);
+                let hi = *p.get(4).unwrap_or(&0) as u16;
+                let lo = *p.get(5).unwrap_or(&0) as u16;
+                self.adjustments.insert(nn, (hi << 8) | lo);
+                Self::status(p, len_echo, SB_OK)
+            }
+            // ADJUSTMENT VALUE STORE → EEPROM (DS2 `42`): `12 05 42 <NN>` →
+            // status only.
+            0x42 => Self::status(p, len_echo, SB_OK),
+            // DS2 SESSION KEEP (9E): `12 04 9E` → status (refresh timer).
+            0x9E => Self::status(p, len_echo, SB_OK),
             _ => Self::nack(p),
         }
     }
@@ -552,30 +624,84 @@ impl SimEcu {
         self.written_span = Some((s, e));
     }
 
-    /// MW_SELECT_LESEN `12 <len> 0B 10 <id hi lo ...>` and MW status
-    /// `12 <len> 0B 03`. The real ECU replies
-    /// `12 <len> A0 10 00 <u16 BE per id ...>` (status at [2], a two-byte
-    /// `10 00` header at [3..5], one big-endian u16 per requested id from [5]).
+    /// MW live data. Sub-services (DS2 cmd `0x0B`):
+    ///   0x10 MW_SELECT_LESEN — batched `12 <LEN> 0B 10 <id hi lo…>`,
+    ///       reply `12 <LEN> A0 10 00 <u16 BE per id ...>` (status at [2], a
+    ///       two-byte `10 00` header at [3..5], one big-endian u16 per requested
+    ///       id from [5]);
+    ///   0x03 MW measurement block — `12 05 0B 03` → header byte at [3] +
+    ///       25 × u16 BE from [4..54] (id order = cal 0x3AF04 list);
+    ///   0x04 digital input block — `12 05 0B 04` → header byte at [3] +
+    ///       4 data bytes at [4..8];
+    ///   0x11 PSG value read — `12 05 0B 11` → 2-byte header `11 00` at
+    ///       [3..5] + u16 BE value;
+    ///   0x12 PSG value select — `12 06 0B 12 NN` → status only;
+    ///   0x07 STEUERN_TESTPLATZ — status only (accepted if unlocked).
     fn mw(&mut self, p: &[u8]) -> Vec<u8> {
         let sub = *p.get(3).unwrap_or(&0x00);
-        let mut vals: Vec<u16> = Vec::new();
         if sub == 0x10 {
+            let mut vals: Vec<u16> = Vec::new();
             for ch in p[4..].as_chunks::<2>().0 {
                 let id = ((ch[0] as u16) << 8) | ch[1] as u16;
                 vals.push(Self::mw_value(id));
             }
-        } else {
-            // MW status (0x03): a few representative values.
-            for id in [1u16, 2, 3, 4] {
-                vals.push(Self::mw_value(id));
+            let mut r: Vec<u8> = vec![ECU_ADDR, 0, SB_OK, 0x10, 0x00];
+            for v in &vals {
+                r.extend_from_slice(&v.to_be_bytes());
             }
+            r[1] = (5 + vals.len() * 2 + 1) as u8; // total wire length incl trailing XOR
+            return r;
         }
-        let mut r: Vec<u8> = vec![ECU_ADDR, 0, SB_OK, 0x10, 0x00];
-        for v in &vals {
-            r.extend_from_slice(&v.to_be_bytes());
+        match sub {
+            // MW measurement block (0x03).
+            0x03 => {
+                let mut data = vec![0x00u8]; // header byte at [3]
+                for i in 0..25usize {
+                    data.extend_from_slice(&Self::mw_block_value(i).to_be_bytes());
+                }
+                let mut r = vec![ECU_ADDR, 0, SB_OK];
+                r.extend_from_slice(&data);
+                r
+            }
+            // Digital input block (0x04).
+            0x04 => {
+                let mut data = vec![0x00u8]; // header byte at [3]
+                data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+                let mut r = vec![ECU_ADDR, 0, SB_OK];
+                r.extend_from_slice(&data);
+                r
+            }
+            // PSG value read (0x11): 2-byte header `11 00` at [3..5] + u16 BE.
+            0x11 => {
+                let v = Self::mw_value(0x0F65);
+                let mut r = vec![ECU_ADDR, 0, SB_OK];
+                r.push(0x11);
+                r.push(0x00);
+                r.push((v >> 8) as u8);
+                r.push(v as u8);
+                r
+            }
+            // PSG value select (0x12): status only.
+            0x12 => vec![ECU_ADDR, 0, SB_OK],
+            // STEUERN_TESTPLATZ (0x07): status only, accepted if unlocked.
+            0x07 => {
+                if self.pending_key.is_none() {
+                    vec![ECU_ADDR, 0, SB_OK]
+                } else {
+                    Self::nack(p)
+                }
+            }
+            _ => Self::nack(p),
         }
-        r[1] = (5 + vals.len() * 2 + 1) as u8; // total wire length incl trailing XOR
-        r
+    }
+
+    /// Deterministic measurement-block values (25 words, id order = cal
+    /// `0x3AF04` measurement list; the fake ECU has no engine, so values are
+    /// placeholder-but-plausible deterministic quantities).
+    fn mw_block_value(i: usize) -> u16 {
+        (0x1000u16)
+            .wrapping_add(i as u16)
+            .wrapping_mul(7919u16)
     }
 
     fn mw_value(id: u16) -> u16 {
@@ -896,5 +1022,86 @@ mod tests {
             assert_eq!(d.uw[0], exp[i].2);
             assert_eq!(d.uw[1], exp[i].3);
         }
+    }
+
+    #[test]
+    fn missing_ds2_responses_are_answered() {
+        // Every DS2 service the foreign tools use must get a well-formed
+        // reply (JOBRESULT status + LEN = payload + trailing XOR) instead of
+        // falling through to the `12 04 FF` NACK — a NACK mid-session made
+        // the flashing tool stall waiting for a response it will never get.
+        let mut s = SimEcu::new();
+
+        // DS2 session keep (9E) / end (9F): status only.
+        assert_eq!(s.handle(&[0x12, 0x04, 0x9E])[2], 0xA0);
+        assert_eq!(s.handle(&[0x12, 0x04, 0x9F])[2], 0xA0);
+
+        // DS2 test stamp read (0E): status + 3 bytes, LEN = payload + XOR = 7.
+        let r = s.handle(&[0x12, 0x04, 0x0E]);
+        assert_eq!(&r[..3], &[0x12, 0x07, 0xA0]);
+        assert_eq!(r.len(), 6);
+        assert_eq!(&r[3..6], &[0, 0, 0]);
+
+        // DS2 test stamp write (0F): status only.
+        let r = s.handle(&[0x12, 0x04, 0x0F]);
+        assert_eq!(&r[..3], &[0x12, 0x04, 0xA0]);
+
+        // DS2 actuator override (0C): status only.
+        let r = s.handle(&[0x12, 0x08, 0x0C, 0x0F, 0x65, 0x05, 0x00]);
+        assert_eq!(&r[..3], &[0x12, 0x04, 0xA0]);
+
+        // DS2 EWS sync start (6C) / status (6D): status only.
+        assert_eq!(s.handle(&[0x12, 0x05, 0x6C, 0x00])[2], 0xA0);
+        assert_eq!(s.handle(&[0x12, 0x04, 0x6D])[2], 0xA0);
+
+        // DS2 adjustment value read (40): status + u16 BE value, LEN = 6.
+        let r = s.handle(&[0x12, 0x05, 0x40, 0x07]);
+        assert_eq!(&r[..3], &[0x12, 0x06, 0xA0]);
+        assert_eq!(r.len(), 5);
+        assert_eq!(&r[3..5], &[0x00, 0x00]);
+
+        // DS2 adjustment value set (41): status only; the read returns the
+        // stored value.
+        assert_eq!(s.handle(&[0x12, 0x07, 0x41, 0x07, 0x00, 0x2A])[2], 0xA0);
+        let r = s.handle(&[0x12, 0x05, 0x40, 0x07]);
+        assert_eq!(&r[3..5], &[0x00, 0x2A]);
+        // DS2 adjustment value store → EEPROM (42): status only.
+        assert_eq!(s.handle(&[0x12, 0x05, 0x42, 0x07])[2], 0xA0);
+    }
+
+    #[test]
+    fn mw_subservices_answered() {
+        let mut s = SimEcu::new();
+
+        // MW measurement block (0x03): LEN = payload(54) + XOR = 55 = 0x37,
+        // header byte at [3] + 25 u16 BE from [4..54].
+        let r = s.handle(&[0x12, 0x05, 0x0B, 0x03]);
+        assert_eq!(&r[..3], &[0x12, 0x37, 0xA0]);
+        assert_eq!(r.len(), 54);
+        assert_eq!(r[3], 0x00);
+        assert_eq!(r.len(), 3 + 1 + 25 * 2);
+
+        // Digital input block (0x04): LEN = payload(8) + XOR = 9 = 0x09,
+        // header byte at [3] + 4 data bytes at [4..8].
+        let r = s.handle(&[0x12, 0x05, 0x0B, 0x04]);
+        assert_eq!(&r[..3], &[0x12, 0x09, 0xA0]);
+        assert_eq!(r.len(), 8);
+        assert_eq!(r.len(), 3 + 1 + 4);
+
+        // PSG value read (0x11): LEN = payload(7) + XOR = 8 = 0x08, 2-byte
+        // header `11 00` at [3..5] + u16 BE value.
+        let r = s.handle(&[0x12, 0x05, 0x0B, 0x11]);
+        assert_eq!(&r[..3], &[0x12, 0x08, 0xA0]);
+        assert_eq!(&r[3..5], &[0x11, 0x00]);
+
+        // PSG value select (0x12): status only.
+        let r = s.handle(&[0x12, 0x05, 0x0B, 0x12, 0x00]);
+        assert_eq!(&r[..3], &[0x12, 0x04, 0xA0]);
+
+        // STEUERN_TESTPLATZ: status only when unlocked (fresh sim has no
+        // pending seed → unlocked). Frame: `12 0B 07 10 …` (addr 12, len 0B,
+        // sid 07 write-type, sub 10).
+        let r = s.handle(&[0x12, 0x0B, 0x07, 0x10, 0x00, 0x00, 0x00, 0x02, 0x4B, 0x9A]);
+        assert_eq!(&r[..3], &[0x12, 0x04, 0xA0]);
     }
 }

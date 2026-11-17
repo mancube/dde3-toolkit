@@ -229,7 +229,34 @@ byte-for-byte (`0x10000..0x10080`, 128 B).
 | `src/main.rs` | `--dump` flag for `respond` |
 | `docs/wire-protocol.md`, `docs/simulator.md` | 42-char ident, LEN semantics, AIF 46-byte record, seed/key |
 | `src/sim.rs`, `src/respond.rs`, `src/main.rs` (2026-11-17) | **`--flash <image.bin>`**: `SimEcu::with_flash_image()` / `from_flash_file()` serve a real 256 KB dump verbatim (FLASH_LESEN + AIF read); `--flash` flag + header line; `SEED_KEY_BIAS` removed — unbiased formula `K[i] = resp[0x12+i] + resp[Z+i] + resp[0x29+i]` verified against all three wire vectors (`Z=0x07/0x10/0x16`); tests `flash_read_serves_file_image`, `flash_image_wrong_size_rejected` |
+| `src/sim.rs` (2026-11-17, MPPS follow-up) | **Missing DS2 responses implemented**: session keep `9E`, test stamp `0E`/`0F`, actuator override `0C`, EWS sync `6C`/`6D`, adjustment values `40`/`41`/`42`, MW sub-services `03`/`04`/`11`/`12`/`07`, flash-write-type `07 10` (STEUERN_TESTPLATZ) — all answered with well-formed JOBRESULT replies instead of falling through to NACK; tests `missing_ds2_responses_are_answered`, `mw_subservices_answered` |
 | `README.md` | `respond` documented |
 
 See also [`wire-protocol.md`](wire-protocol.md) (framing, LEN semantics,
 live block) and [`simulator.md`](simulator.md) (SimEcu services).
+
+## 8. Missing DS2 responses implemented (2026-11-17, MPPS follow-up)
+
+Testing the fake ECU against MPPS (`respond --dump …`) left the tool stalling
+right after the DTC read/clear round-trip: the responses for several DS2
+services the tool uses were still falling through to the `12 04 FF` NACK
+(handler map `0x26900` in the decomp). All of them are now implemented in
+`SimEcu::handle`:
+
+- DS2 session keep `9E` / end `9F` — status only;
+- DS2 test stamp read `0E` (status + 3 stamp bytes, LEN = payload + XOR = 7) /
+  write `0F` (status, stores `b1 b2 b3`);
+- DS2 actuator override `0C` — status only;
+- DS2 EWS sync start `6C` / status `6D` — status only;
+- DS2 adjustment value read `40` (status + u16 BE value, LEN = 6) / set `41`
+  (RAM copy, status) / store `42` (EEPROM, status);
+- DS2 MW sub-services `03` (measurement block: header + 25 u16), `04`
+  (digital inputs: header + 4 bytes), `11` (PSG value read: `11 00` header +
+  u16 BE), `12` (PSG select: status), `07` (STEUERN_TESTPLATZ: status, accepted
+  if unlocked) — previously the generic sub-dispatch answered every unknown sub
+  with the MW-select shape or NACK;
+- DS2 flash-write-type `07 10` (STEUERN_TESTPLATZ) — status only, accepted if
+  unlocked (was NACK via the flash sub-function chain).
+
+Regression tests: `sim::tests::missing_ds2_responses_are_answered`,
+`sim::tests::mw_subservices_answered`.

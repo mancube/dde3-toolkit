@@ -74,6 +74,26 @@ tool/fakewritegalleto.txt` + `testread.txt`) and applied:
 - Cal write/read region (0x38000..0x40000) already matched.
 - CLI `write` sim read-back compare now scoped to `[FLASH_WRITE_START, IMAGE_SIZE)`.
 
+### Session 18 (2026-11-17) — missing DS2 responses implemented (MPPS follow-up)
+
+MPPS against the fake ECU (`respond --dump writempps.bin …`) stalled right
+after the DTC read/clear round-trip: services the tool uses still fell through
+to the `12 04 FF` NACK (decomp handler map `0x26900`). Implemented in
+`SimEcu::handle`:
+
+- session keep `9E`, end `9F` — status only;
+- test stamp read `0E` / write `0F` — status (+ 3 stamp bytes / store);
+- actuator override `0C` — status only;
+- EWS sync start `6C` / status `6D` — status only;
+- adjustment values read `40` (status + u16 BE) / set `41` / store `42` — status;
+- MW sub-services `03`/`04`/`11`/`12`/`07` (measurement block, digital inputs,
+  PSG read/select, STEUERN_TESTPLATZ) — proper per-sub replies;
+- flash-write-type `07 10` (STEUERN_TESTPLATZ) — status, accepted if unlocked.
+
+Tests: `sim::tests::missing_ds2_responses_are_answered`,
+`sim::tests::mw_subservices_answered`. Docs: `docs/simulator.md` (coverage
+status), `docs/respond-mode.md` §8.
+
 ## ← CURRENT TASK (take over from here)
 
 **Real-car verification of the rewritten `read_dtcs()` (session 12).**
