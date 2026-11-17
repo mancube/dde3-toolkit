@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::checksum::{correct, verify, CAL_LEN, CAL_START, IMAGE_SIZE};
-use crate::protocol::Kline;
+use crate::protocol::{Kline, FLASH_WRITE_START};
 
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 
@@ -380,11 +380,22 @@ fn run() -> Result<()> {
             if sim {
                 println!("verifying read-back...");
                 let rb = k.read_full(&mut |_d, _t| {})?;
-                if rb == image {
-                    println!("read-back verified: 256 KB matches written image");
+                // The full write only programs [FLASH_WRITE_START, IMAGE_SIZE)
+                // (0x10000..0x40000); compare the written region, not the bytes
+                // below 0x10000 that were never touched.
+                if rb.len() == image.len() && rb[FLASH_WRITE_START..] == image[FLASH_WRITE_START..] {
+                    println!(
+                        "read-back verified: bytes 0x{:X}..0x{:X} of the image match the written region",
+                        FLASH_WRITE_START,
+                        image.len()
+                    );
                 } else {
-                    let m = rb.iter().zip(&image).position(|(a, b)| a != b).unwrap_or(0);
-                    anyhow::bail!("read-back mismatch at offset 0x{m:X}");
+                    let m = rb[FLASH_WRITE_START..]
+                        .iter()
+                        .zip(&image[FLASH_WRITE_START..])
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(0);
+                    anyhow::bail!("read-back mismatch at offset 0x{:X}", FLASH_WRITE_START + m);
                 }
             }
             Ok(())

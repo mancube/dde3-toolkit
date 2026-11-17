@@ -105,6 +105,25 @@ field is 1 byte → ≤255 per frame; BLOCKLAENGE_MAX's 0xFFF7 is the max *aggre
 length, not a per-frame cap). The write path stays gated behind typing WRITE +
 a verified backup.
 
+## 2.1 Full-write region — only `[0x10000, 0x40000)` (2026-11-17, Galletto)
+
+The fakewrite session against the fake ECU
+(`captures/galletto capture with respond tool/fakewritegalleto.txt`) shows the
+full write touching exactly the program+calibration span:
+
+- erase `12 09 07 06 01 00 00 00` @ 0x10000, then 3072 × 64-byte
+  `FLASH_SCHREIBEN` through 0x3FFC0 (program area `[0x10000, 0x38000)`);
+- erase `12 09 07 06 03 80 00 00` @ 0x38000, then 512 × 64-byte writes
+  through 0x3FFC0 (calibration area `[0x38000, 0x40000)`).
+- Reconstructed dump: **196608 bytes (`0x10000..0x40000`)** → `write.bin`.
+
+`Kline::write_full` therefore now erases/writes/writes-end at
+`FLASH_WRITE_START` = 0x10000 instead of 0x00000; the full read (`FLASH_LESEN`
+@0x0, 128-byte contiguous blocks, 2048 frames) and the calibration
+read/write (`0x38000..0x40000`) were verified to already match Galletto and
+were left alone. The CLI `--write` sim read-back compare is scoped to the
+written region `[FLASH_WRITE_START, IMAGE_SIZE)`.
+
 ## 3. Real-car capture confirms the rest (`captures/dde3newlog.txt`)
 
 ```

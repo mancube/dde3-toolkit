@@ -39,6 +39,15 @@ pub const ECU_ADDR: u8 = 0x12;
 /// DDE3 flash image size: 256 KB.
 pub const IMAGE_SIZE: usize = 0x40000;
 
+/// First flash offset the flashing tools program: the program area starts
+/// at 0x10000 (DPP2 page 4) and the calibration area ends the image at
+/// 0x40000 — i.e. the writable flash span of a full write is
+/// `[0x10000, 0x40000)` (Galletto erases/writes exactly this span;
+/// `fakewritegalleto.txt`: erase @0x10000, blocks through 0x3FFC0, cal erase
+/// @0x38000). Bytes below 0x10000 (boot block / gap) are not part of the
+/// writable image.
+pub const FLASH_WRITE_START: usize = 0x10000;
+
 // ---------------------------------------------------------------------------
 // Frame
 // ---------------------------------------------------------------------------
@@ -1101,6 +1110,11 @@ impl Kline {
     }
 
     /// Full flash write: erase → write blocks → end.
+    ///
+    /// Only the writable span `[FLASH_WRITE_START, IMAGE_SIZE)` —
+    /// `[0x10000, 0x40000)` — is erased and written; the image bytes below
+    /// 0x10000 (boot block / gap) are never programmed. Matches Galletto's
+    /// full-write flow (`fakewritegalleto.txt`).
     pub fn write_full(
         &mut self,
         image: &[u8],
@@ -1114,16 +1128,17 @@ impl Kline {
         self.set_write_delay(data_delay_ms);
         // Enter programming mode before touching flash.
         self.request(&frame_uprog_ein(), Duration::from_secs(3))?;
-        self.erase_flash(0x00000, 0x00)?;
+        self.erase_flash(FLASH_WRITE_START as u32, 0x00)?;
         thread::sleep(Duration::from_millis(100));
+        let region_len = IMAGE_SIZE - FLASH_WRITE_START;
         let mut done = 0usize;
-        for start in (0..IMAGE_SIZE).step_by(0x80) {
+        for start in (FLASH_WRITE_START..IMAGE_SIZE).step_by(0x80) {
             let len = 0x80.min(IMAGE_SIZE - start);
             self.write_block(start as u32, &image[start..start + len])?;
             done += len;
-            progress(done, IMAGE_SIZE);
+            progress(done, region_len);
         }
-        self.write_end(0x00000)?;
+        self.write_end(FLASH_WRITE_START as u32)?;
         Ok(())
     }
 

@@ -58,6 +58,22 @@ chip, DDE 3.0 hardware name).
   (`--flash`), README `respond` section. Goal doc:
   `~/Desktop/edc15m/research/exe_seedkey_goal.md` (closed).
 
+### Session 17 (2026-11-17) — full write now programs only `[0x10000, 0x40000)`
+
+Confirmed against the Galletto logs (`captures/galletto capture with respond
+tool/fakewritegalleto.txt` + `testread.txt`) and applied:
+
+- Full write (`Kline::write_full`) now erases + writes blocks + write-ends at
+  `FLASH_WRITE_START` = 0x10000, so it programs only `[0x10000, 0x40000)`
+  (program area + calibration) — **not** below 0x10000 (boot block / gap).
+  Previously it erased/wrote from 0x00000.
+- Galletto fakewrite: erase @0x10000, 3072 × 64-B writes → reconstructed dump
+  = 196608 bytes @ `0x10000..0x40000` (write.bin); toolkit now mirrors that.
+- Full read verified **matching** Galletto (`testread.txt`: 2048 × FLASH_LESEN
+  @128 B, contiguous from 0x0, no gaps, 256 KB) — unchanged, no edit needed.
+- Cal write/read region (0x38000..0x40000) already matched.
+- CLI `write` sim read-back compare now scoped to `[FLASH_WRITE_START, IMAGE_SIZE)`.
+
 ## ← CURRENT TASK (take over from here)
 
 **Real-car verification of the rewritten `read_dtcs()` (session 12).**
