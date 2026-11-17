@@ -37,6 +37,27 @@ chip, DDE 3.0 hardware name).
   headless bench, in-process ECU sim.
 - ⬜ Open: real-car verification of the items below.
 
+## Latest (2026-11-17): Galletto-compatible fake ECU + flash-dump serving
+
+- **Seed/key (`0x90`) fixed and wire-verified.** The `SEED_KEY_BIAS = 5`
+  assumption is gone: the unbiased job formula
+  `K[i] = resp[0x12+i] + resp[Z+i] + resp[0x29+i]` (byte adds, i = 0..3, on
+  the final 45-byte seed payload) matches all three captured Galletto
+  vectors — `Z=0x07 → 39 3C 3F 42`, `Z=0x10 → 82 85 88 8B`,
+  `Z=0x16 → B6 B9 BC BF`. The "bias" was a capture misread (the key frame's
+  last byte is the frame XOR). Galletto now unlocks on the first key send
+  for every Z, and the full **flash READ** flow runs (1665 FLASH_LESEN
+  frames, zero NACKs; see `captures/`).
+- **`respond --flash <image.bin>`**: the fake ECU serves a real 256 KB dump
+  verbatim — `FLASH_LESEN` (`12 09 06 …`) and the AIF read (`0x02`,
+  slot 0x7CB2) return the file's bytes, so an external tool reads exactly
+  the image you gave it (use `captures/actual_flash.bin`).
+  `SimEcu::with_flash_image()` / `from_flash_file()` in `src/sim.rs`;
+  tests `flash_read_serves_file_image`, `flash_image_wrong_size_rejected`.
+- Docs: `docs/simulator.md` (seed/key section), `docs/respond-mode.md`
+  (`--flash`), README `respond` section. Goal doc:
+  `~/Desktop/edc15m/research/exe_seedkey_goal.md` (closed).
+
 ## ← CURRENT TASK (take over from here)
 
 **Real-car verification of the rewritten `read_dtcs()` (session 12).**

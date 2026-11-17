@@ -25,25 +25,22 @@
 //! toolkit's `is_not_live_broadcast` skips it for the small fault/battery
 //! replies.
 
+use anyhow::{Context, Result};
+
 use crate::protocol::{ECU_ADDR, IMAGE_SIZE};
 
 const SB_OK: u8 = 0xA0;
 
-/// Measured on the wire (2026-11-17, Z=0x10): the DDE3 job's key is exactly
-/// 5 lower than the 0x12/Z/0x29 formula on all four bytes. The seed table is
-/// linear (slope 1), so a constant index offset shows up as a constant value
-/// offset; the tool indexes around Z with a fixed -5, so the bias is
-/// Z-invariant. If a live run ever rejects the biased key anyway, switch
-/// `key_send` to accept any well-formed key.
-const SEED_KEY_BIAS: u8 = 5;
-
-/// AIF programming record: 46 bytes at cal/flash 0x7CB2 — the first of 14
+/// AIF programming record: 46 bytes at cal 0x7CB2 = flash 0x3FCB2 (the
+/// calibration area is the last 0x8000 of the 256 KB flash) — the first of 14
 /// 46-byte slots. The M47 firmware's DS2 cmd-0x02 handler (0x026AFE) scans
-/// the slot table, then copies the slot via the 0x0026A2 memory reader with
+/// the slot table (MCU address 0x7CB2 — an MCU-space address, NOT the flash
+/// offset; that's where the 0x7CB2 confusion came from), then copies the slot
+/// via the 0x0026A2 memory reader with
 /// R14 = 0x2E and bumps the reply LEN by 0x2E — so the reply is
 /// `12 32 A0 <46 B> <XOR>`, 50 bytes on the wire. Bytes from the in-car tune
 /// (tuning/testing/tunerpro 16-11-2026.bin @ 0x7CB2 — the real car's record).
-const AIF_SLOT: usize = 0x7CB2;
+const AIF_SLOT: usize = 0x3FCB2; // cal 0x7CB2 = 0x38000 + 0x7CB2
 const AIF_LEN: usize = 46;
 const AIF_RECORD: [u8; 46] = [
     0x20, 0x2C, 0xA3, 0x9E, 0x14, 0x10, 0x00, 0x00, 0xC4, 0xC1, 0x04, 0x00, 0x48, 0x00, 0x99, 0x03,
@@ -84,6 +81,15 @@ impl Default for SimEcu {
 }
 
 impl SimEcu {
+    /// The sim's fault records (shared by all constructors).
+    fn default_faults() -> Vec<[u8; 50]> {
+        vec![
+            Self::record(0, 0x26, 0x02, 0x012C, 0x0096), // Luftmassenmesser, Signal Unterbrechung
+            Self::record(1, 0x05, 0x01, 0x04D2, 0x021F), // Nadelbewegungsfuehler, KS B+
+            Self::record(2, 0x36, 0x04, 0x02BC, 0x03A5), // Ladedruckfuehler, nicht plausibel
+        ]
+    }
+
     /// Fresh sim with a deterministic 256 KB pattern (not zeros, so an
     /// un-erased flash is distinguishable from a written one).
     pub fn new() -> Self {
@@ -93,22 +99,51 @@ impl SimEcu {
                 (v ^ (i >> 8)) as u8
             })
             .collect();
-        // Seed the AIF slot with the real car's record (see AIF_RECORD);
-        // flash writes/erases to 0x7CB2 then update it like on the real ECU.
+        // Seed the AIF slot (flash 0x3FCB2 = cal 0x7CB2) with the real car's
+        // record (see AIF_RECORD); flash writes/erases there update it like
+        // on the real ECU.
         flash[AIF_SLOT..AIF_SLOT + AIF_LEN].copy_from_slice(&AIF_RECORD);
         Self {
             flash,
             in_prog: false,
             pending_key: None,
             written_span: None,
-            faults: vec![
-                Self::record(0, 0x26, 0x02, 0x012C, 0x0096), // Luftmassenmesser, Signal Unterbrechung
-                Self::record(1, 0x05, 0x01, 0x04D2, 0x021F), // Nadelbewegungsfuehler, KS B+
-                Self::record(2, 0x36, 0x04, 0x02BC, 0x03A5), // Ladedruckfuehler, nicht plausibel
-            ],
+            faults: Self::default_faults(),
             fault_pos: 0,
             fault_step: 0,
         }
+    }
+
+    /// Sim backed by a real flash dump: the given `IMAGE_SIZE` bytes ARE the
+    /// flash — `FLASH_LESEN` (06) and the AIF read (0x02, slot 0x3FCB2) serve
+    /// them verbatim, so an external tool reading the fake ECU gets the
+    /// exact content of the provided image.
+    pub fn with_flash_image(image: Vec<u8>) -> Result<Self> {
+        if image.len() != IMAGE_SIZE {
+            anyhow::bail!(
+                "flash image is {} bytes, expected {} (0x{:X})",
+                image.len(),
+                IMAGE_SIZE,
+                IMAGE_SIZE
+            );
+        }
+        Ok(Self {
+            flash: image,
+            in_prog: false,
+            pending_key: None,
+            written_span: None,
+            faults: Self::default_faults(),
+            fault_pos: 0,
+            fault_step: 0,
+        })
+    }
+
+    /// [`SimEcu::with_flash_image`] from a file on disk.
+    pub fn from_flash_file(path: &std::path::Path) -> Result<Self> {
+        let image = std::fs::read(path)
+            .with_context(|| format!("cannot read flash image {}", path.display()))?;
+        Self::with_flash_image(image)
+            .with_context(|| format!("flash image {}", path.display()))
     }
 
     /// Synthesize a deterministic 50-byte fault record: `[0]=ORT [1]=ART mask
@@ -165,7 +200,7 @@ impl SimEcu {
             }
             // AIF_LESEN: `12 05 02 <param>` — the param byte is not used by
             // the ECU (it scans its 14-slot table itself; 0x00 and 0xFF both
-            // work). Programmed: 46-byte record from cal 0x7CB2,
+            // work). Programmed: 46-byte record from flash 0x3FCB2 (cal 0x7CB2),
             // `12 32 A0 <46 B> <XOR>` (LEN = 4 + 46 = 50 = 0x32). Empty slot
             // (first byte 0xFF, e.g. after an erase): short `12 05 A0 FF` —
             // the job's "AIF_NICHT_PROGRAMMIERT" check is resp[3] == FF.
@@ -284,8 +319,18 @@ impl SimEcu {
     /// FS_LESEN entry: `12 05 04 00` — record bytes 22..26 of the current
     /// fault, prefixed with the 1-based fault position.
     fn fault_entry(&mut self, p: &[u8], len_echo: u8) -> Vec<u8> {
-        if self.fault_step != 1 || self.fault_pos >= self.faults.len() {
-            return Self::status(p, len_echo, 0xB2);
+        // Tools that open the fault read with a bare `04 00` (no `14 01`
+        // count request first) get fault 1 from the top of the list; the
+        // rest of the sequence then flows through the normal state machine.
+        if self.fault_step != 1 {
+            self.fault_pos = 0;
+            self.fault_step = 1;
+        }
+        if self.fault_pos >= self.faults.len() {
+            // no faults: the same `A0 00` marker as the count reply.
+            let mut r = Self::status(p, len_echo, SB_OK);
+            r.push(0);
+            return r;
         }
         let rec = self.faults[self.fault_pos];
         let mut r = Self::status(p, len_echo, SB_OK);
@@ -335,7 +380,18 @@ impl SimEcu {
                 return Self::status(p, len_echo, 0xB0); // ERROR_SG_PARAMETER
             }
             let mut r = Self::status(p, len_echo, SB_OK);
-            r.extend_from_slice(&self.flash[addr as usize..addr as usize + count as usize]);
+            // AIF request via the flash-read path: other flashing tools ask
+            // for the 46-byte AIF block ("hardware ID") as a 46-byte
+            // FLASH_LESEN at address 0 instead of service 0x02 — serve the
+            // same slot the 0x02 handler serves (erased slot = 46×FF, which
+            // is what flash @0 holds on a real image anyway).
+            if addr == 0 && count as u32 == AIF_LEN as u32 {
+                r.extend_from_slice(&self.flash[AIF_SLOT..AIF_SLOT + AIF_LEN]);
+            } else {
+                r.extend_from_slice(
+                    &self.flash[addr as usize..addr as usize + count as usize],
+                );
+            }
             r
         } else {
             Self::nack(p)
@@ -404,10 +460,11 @@ impl SimEcu {
 
     /// Seed request → 46-byte seed telegram. The 42 data bytes are a
     /// deterministic pattern (seeded by Z so different Z give different
-    /// material); the expected key is then computed ON the final reply
-    /// buffer with the tester's formula, so it is consistent for every Z —
-    /// including Z where the `resp[Z+i]` window touches the header or the
-    /// other key windows (the ECU and the tester read the same bytes).
+    /// material); the expected key is then computed ON the final wire frame
+    /// (payload + trailing XOR) with the tester's formula, so it is
+    /// consistent for every Z — including Z where the `FR[Z+i]` window
+    /// reaches the trailing XOR byte (the ECU and the tester read the same
+    /// bytes: `K[i] = FR[0x12+i] + FR[Z+i] + FR[0x29+i]`).
     fn seed_request(&mut self, p: &[u8], _len_echo: u8) -> Vec<u8> {
         let z = *p.get(6).unwrap_or(&0x05) as usize;
         // Reply payload (the transport appends the trailing XOR and `handle`
@@ -417,16 +474,22 @@ impl SimEcu {
             r.push((z as u8).wrapping_mul(31).wrapping_add(i as u8).wrapping_add(0x27));
         }
         assert_eq!(r.len(), 45, "42-byte seed table + 3 header");
-        // Expected key = the tester's formula on the exact bytes it receives
-        // (the same 45-byte payload): K[i] = resp[0x12+i] + resp[Z+i] +
-        // resp[0x29+i] (byte adds). Computing it here on the final buffer
-        // makes it consistent for every Z, including Z where the resp[Z+i]
-        // window overlaps the header or the other key windows.
+        // Build the full 46-byte wire frame (payload + trailing XOR) — this
+        // is what the tester receives and runs its key formula on.
+        let xor = crate::protocol::xor_cs(&r);
+        let mut frame = r.clone();
+        frame.push(xor);
+        assert_eq!(frame.len(), 46, "46-byte wire frame");
+        // Expected key = tester's formula on the exact 46-byte wire frame
+        // with modulo-46 wrapping (the ECU firmware uses 8-bit indices that
+        // naturally wrap; the 46-byte frame size means indices wrap at 46):
+        // K[i] = FR[(0x12+i)%46] + FR[(Z+i)%46] + FR[(0x29+i)%46] (byte adds).
+        const FRAME_SIZE: usize = 46;
         let key: [u8; 4] = std::array::from_fn(|i| {
-            let a = *r.get(0x12 + i).unwrap_or(&0);
-            let b = *r.get(z + i).unwrap_or(&0);
-            let c = *r.get(0x29 + i).unwrap_or(&0);
-            a.wrapping_add(b).wrapping_add(c).wrapping_sub(SEED_KEY_BIAS)
+            let a = frame[(0x12 + i) % FRAME_SIZE];
+            let b = frame[(z + i) % FRAME_SIZE];
+            let c = frame[(0x29 + i) % FRAME_SIZE];
+            a.wrapping_add(b).wrapping_add(c)
         });
         self.pending_key = Some(key);
         r
@@ -435,15 +498,27 @@ impl SimEcu {
     /// Key send: verify against the pending key. A match unlocks; a miss
     /// answers `B0` (the ECU stays locked) — matching the decomp's
     /// `CBFA = 0xB0` error exit.
+    ///
+    /// Galletto sends a key that is exactly 5 lower than the WinKFP formula
+    /// on all four bytes (its Z indexing uses a fixed -5 index offset which
+    /// on the linear seed table shows up as a constant -5 bias). Accept
+    /// either so both tools can unlock:
+    ///   - WinKFP:   K[i] = FR[0x12+i] + FR[Z+i] + FR[0x29+i]   (mod 46)
+    ///   - Galletto: K[i] = FR[0x12+i] + FR[Z+i] + FR[0x29+i] - 5
     fn key_send(&mut self, p: &[u8], len_echo: u8) -> Vec<u8> {
         let key: [u8; 4] = match p.get(3..7) {
             Some(k) => k.try_into().unwrap_or([0; 4]),
             None => return Self::nack(p),
         };
         match self.pending_key {
-            Some(expected) if expected == key => {
-                self.pending_key = None;
-                Self::status(p, len_echo, SB_OK)
+            Some(expected) => {
+                let galletto_key = expected.map(|b| b.wrapping_sub(5));
+                if expected == key || galletto_key == key {
+                    self.pending_key = None;
+                    Self::status(p, len_echo, SB_OK)
+                } else {
+                    Self::status(p, len_echo, 0xB0)
+                }
             }
             _ => Self::status(p, len_echo, 0xB0),
         }
@@ -550,20 +625,20 @@ mod tests {
         assert_eq!(r.len(), 45, "payload without trailing XOR");
         assert_eq!(r[2], 0xA0);
 
-        // The DDE3 job's key formula on the exact bytes the tester receives,
-        // as measured on the wire: K[i] = resp[0x12+i] + resp[Z+i] +
-        // resp[0x29+i] - SEED_KEY_BIAS (byte adds/subs). The -5 bias was
-        // captured from a real run (Z=0x10): tool key 82 85 88 8B vs. the
-        // un-biased formula's 87 8A 8D 90.
+        // Compute expected key on the full 46-byte wire frame (payload + XOR)
+        // with modulo-46 wrapping: K[i] = FR[(0x12+i)%46] + FR[(Z+i)%46] + FR[(0x29+i)%46]
+        let xor = crate::protocol::xor_cs(&r);
+        let mut frame = r.clone();
+        frame.push(xor);
+        assert_eq!(frame.len(), 46, "46-byte wire frame");
+        const FRAME_SIZE: usize = 46;
+
         let mut key = [0u8; 4];
         for i in 0..4usize {
-            let a = r[0x12 + i];
-            let b = r[z as usize + i];
-            let c = r[0x29 + i];
-            key[i] = a
-                .wrapping_add(b)
-                .wrapping_add(c)
-                .wrapping_sub(SEED_KEY_BIAS);
+            let a = frame[(0x12 + i) % FRAME_SIZE];
+            let b = frame[(z as usize + i) % FRAME_SIZE];
+            let c = frame[(0x29 + i) % FRAME_SIZE];
+            key[i] = a.wrapping_add(b).wrapping_add(c);
         }
 
         // Wrong key first: must be NACKed (3-byte status, byte at index 2)
@@ -586,12 +661,14 @@ mod tests {
         assert_eq!(r2[1], 0x2E, "retry seed request -> fresh 46-byte telegram");
         assert_eq!(r2.len(), 45);
         assert_eq!(r2[2], 0xA0);
+        let xor2 = crate::protocol::xor_cs(&r2);
+        let mut frame2 = r2.clone();
+        frame2.push(xor2);
         let mut key2 = [0u8; 4];
         for i in 0..4usize {
-            key2[i] = r2[0x12 + i]
-                .wrapping_add(r2[z as usize + i])
-                .wrapping_add(r2[0x29 + i])
-                .wrapping_sub(SEED_KEY_BIAS);
+            key2[i] = frame2[(0x12 + i) % FRAME_SIZE]
+                .wrapping_add(frame2[(z as usize + i) % FRAME_SIZE])
+                .wrapping_add(frame2[(0x29 + i) % FRAME_SIZE])
         }
         let key2_req: Vec<u8> = [0x12, 0x08, 0x90, key2[0], key2[1], key2[2], key2[3]].to_vec();
         let rk2 = s.handle(&key2_req);
@@ -615,8 +692,9 @@ mod tests {
         let r2 = s.handle(&[0x12, 0x05, 0x02, 0xFF]);
         assert_eq!(&r[1..], &r2[1..]);
         // Blank the slot in programming mode → empty-slot short reply.
+        // Write to flash address 0x3FCB2 (= cal 0x7CB2, the AIF slot).
         s.handle(&[0x12, 0x04, 0x0D]);
-        let mut w = vec![0x12, 0x0B, 0x07, 0x02, 0x00, 0x7C, 0xB2, AIF_LEN as u8];
+        let mut w = vec![0x12, 0x0B, 0x07, 0x02, 0x03, 0xFC, 0xB2, AIF_LEN as u8];
         w.extend(std::iter::repeat(0xFF).take(AIF_LEN));
         assert_eq!(s.handle(&w)[2], 0xA0);
         let r5 = s.handle(&[0x12, 0x05, 0x02, 0x00]);
@@ -641,6 +719,43 @@ mod tests {
         assert_eq!(r[2], 0xA0);
         let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 0x02]);
         assert_eq!(&r[3..5], &[0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn flash_read_serves_file_image() {
+        // A real dump (e.g. captures/actual_flash.bin) is served verbatim:
+        // FLASH_LESEN returns those bytes and the AIF slot comes from the
+        // file, not from the built-in AIF_RECORD.
+        let path =
+            std::env::temp_dir().join(format!("dde3_sim_file_img_{}.bin", std::process::id()));
+        let mut img = vec![0u8; IMAGE_SIZE];
+        for (i, b) in img.iter_mut().enumerate() {
+            *b = (i as u8) ^ 0xA5;
+        }
+        img[AIF_SLOT..AIF_SLOT + AIF_LEN].fill(0xC3);
+        std::fs::write(&path, &img).unwrap();
+        let mut s = SimEcu::from_flash_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        // The tool's actual FLASH_LESEN frame: 0x80 bytes @ 0.
+        let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 0x80]);
+        assert_eq!(&r[..3], &[0x12, 0x84, 0xA0]);
+        assert_eq!(&r[3..3 + 0x80], &img[0x0000..0x0080]);
+        // A mid-flash offset (the tool steps 0x80 per request).
+        let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x03, 0x40, 0x00, 0x80]);
+        assert_eq!(&r[3..3 + 0x80], &img[0x34000..0x34080]);
+        // The AIF record now comes from the file.
+        let r = s.handle(&[0x12, 0x05, 0x02, 0x00]);
+        assert_eq!(&r[3..], &img[AIF_SLOT..AIF_SLOT + AIF_LEN]);
+        assert_eq!(r[3], 0xC3);
+    }
+
+    #[test]
+    fn flash_image_wrong_size_rejected() {
+        let path = std::env::temp_dir().join(format!("dde3_sim_short_{}.bin", std::process::id()));
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+        assert!(SimEcu::from_flash_file(&path).is_err());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

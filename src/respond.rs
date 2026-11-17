@@ -52,6 +52,10 @@ pub struct RespondOptions {
     /// Dump the reconstructed flash image (everything the peer wrote) to
     /// this file at the end of the run.
     pub dump: Option<std::path::PathBuf>,
+    /// Serve this real flash dump from the fake ECU: FLASH_LESEN (06) and the
+    /// AIF read (0x02) answer with the file's bytes. `None` = built-in
+    /// deterministic pattern.
+    pub flash: Option<std::path::PathBuf>,
 }
 
 pub struct Summary {
@@ -124,10 +128,20 @@ pub fn run(opts: &RespondOptions) -> Result<Summary> {
     let t0 = Instant::now();
     let deadline = opts.duration.map(|d| t0 + d);
 
+    let (mut sim, flash_desc) = match &opts.flash {
+        Some(p) => {
+            let sim = SimEcu::from_flash_file(p)
+                .with_context(|| format!("flash image {}", p.display()))?;
+            let n = crate::protocol::IMAGE_SIZE;
+            (sim, format!("{} ({} bytes, served verbatim)", p.display(), n))
+        }
+        None => (SimEcu::new(), "built-in deterministic pattern".to_string()),
+    };
+
     println!("dde3-toolkit respond — FAKE ECU (full duplex on one port)");
     println!(
-        "port={} baud={} 8E1  reply-delay={} ms  tx-pacing={} ms  (Ctrl-C to stop)",
-        opts.port, opts.baud, opts.reply_delay_ms, opts.data_delay_ms
+        "port={} baud={} 8E1  reply-delay={} ms  tx-pacing={} ms  flash={}  (Ctrl-C to stop)",
+        opts.port, opts.baud, opts.reply_delay_ms, opts.data_delay_ms, flash_desc
     );
     if let Some(f) = file.as_mut() {
         let _ = writeln!(
@@ -136,13 +150,11 @@ pub fn run(opts: &RespondOptions) -> Result<Summary> {
         );
         let _ = writeln!(
             f,
-            "# port={} baud={} 8E1",
-            opts.port, opts.baud
+            "# port={} baud={} 8E1  flash={}",
+            opts.port, opts.baud, flash_desc
         );
         let _ = f.flush();
     }
-
-    let mut sim = SimEcu::new();
     let mut framer = Framer::new();
     let mut last_tx: Option<Vec<u8>> = None;
     let mut frames: u64 = 0;

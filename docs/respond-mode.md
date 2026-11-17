@@ -7,12 +7,20 @@ that made foreign flashing tools reject the simulated IDENT reply.
 ```text
 dde3-toolkit respond [--port DEV] [--baud N] [--out FILE]
                      [--duration SECS] [--data-delay MS] [--reply-delay MS]
-                     [--dump IMAGE.BIN]
+                     [--dump IMAGE.BIN] [--flash IMAGE.BIN]
 ```
 
 `--dump` writes the **reconstructed flash image** (everything the peer
 programmed, contiguous first-to-last written byte) to the file at the end
 of the run.
+
+`--flash <image.bin>` loads a real 256 KB flash dump (0x40000 bytes) and
+the fake ECU **serves it verbatim**: `FLASH_LESEN` (`12 09 06 …`) returns
+the file's bytes at the requested address and the AIF read (`0x02`, slot
+0x7CB2) returns the file's record — so an external tool reading the fake
+ECU gets exactly what it would get from a real ECU holding that image
+(e.g. `captures/actual_flash.bin`). Without `--flash` the built-in
+deterministic pattern is served.
 
 Single-port **full duplex** on one UART (default `/dev/ttyUSB0`, the
 QinHeng UART-LPT): the adapter both *receives* the peer's frames (a
@@ -152,7 +160,9 @@ any next rejection is visible in the log. Status as of the §6 follow-up:
    46-byte record from cal `0x7CB2` (`12 32 A0 …`); empty slot → `12 05
    A0 FF`.
 2. **DS2 / mode change** (`12 04 0D`) and back — works.
-3. **Flash read** (`12 09 06 …`) — works (round-trips the sim image).
+3. **Flash read** (`12 09 06 …`) — works (round-trips the sim image; with
+   `--flash <file>` it round-trips the file's bytes, tested end-to-end with
+   Galletto reading 0x80-byte blocks across the first ~208 KB).
 4. ~~Flash write~~ — **done** (see §6): 73-byte blocks parse intact, the
    image is reconstructed and `--dump`ed.
 5. **Fault memory** (count / entry / shadow / tail) — LEN now matches
@@ -218,6 +228,7 @@ byte-for-byte (`0x10000..0x10080`, 128 B).
 | `src/protocol.rs` | `Kline::write_frame` made `pub`; IDENT tests/docs updated to 42 chars |
 | `src/main.rs` | `--dump` flag for `respond` |
 | `docs/wire-protocol.md`, `docs/simulator.md` | 42-char ident, LEN semantics, AIF 46-byte record, seed/key |
+| `src/sim.rs`, `src/respond.rs`, `src/main.rs` (2026-11-17) | **`--flash <image.bin>`**: `SimEcu::with_flash_image()` / `from_flash_file()` serve a real 256 KB dump verbatim (FLASH_LESEN + AIF read); `--flash` flag + header line; `SEED_KEY_BIAS` removed — unbiased formula `K[i] = resp[0x12+i] + resp[Z+i] + resp[0x29+i]` verified against all three wire vectors (`Z=0x07/0x10/0x16`); tests `flash_read_serves_file_image`, `flash_image_wrong_size_rejected` |
 | `README.md` | `respond` documented |
 
 See also [`wire-protocol.md`](wire-protocol.md) (framing, LEN semantics,

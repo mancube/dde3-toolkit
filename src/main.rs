@@ -75,8 +75,11 @@ fn print_usage() {
     eprintln!("                             drives the same K node; own replies are logged as ECHO.");
     eprintln!("    [--out <file>] [--duration <secs>] [--data-delay <ms>]");
     eprintln!("    [--reply-delay <ms>] [--dump <image.bin>]");
+    eprintln!("    [--flash <image.bin>]");
     eprintln!("                             (default port /dev/ttyUSB0; --dump writes the");
-    eprintln!("                             reconstructed flash image the peer programmed)");
+    eprintln!("                             reconstructed flash image the peer programmed;");
+    eprintln!("                             --flash serves a real 256 KB dump from the fake");
+    eprintln!("                             ECU: FLASH_LESEN + AIF read return the file's bytes)");
     eprintln!("  bench                      Headless run: identify + optional read/write,");
     eprintln!("                             progress and timing on stderr, useful exit status");
     eprintln!("    [--info|--read|--read-cal|--write|--write-cal|--live]");
@@ -176,6 +179,8 @@ fn run() -> Result<()> {
     // `respond --dump <file>`: at run end, write the reconstructed flash
     // image (everything the peer programmed) to this file.
     let mut bench_dump: Option<String> = None;
+    // `respond --flash <file>`: serve this real flash dump from the fake ECU.
+    let mut respond_flash: Option<String> = None;
 
     let mut i = 2;
     while i < args.len() {
@@ -250,6 +255,10 @@ fn run() -> Result<()> {
                 i += 1;
                 bench_dump = Some(args.get(i).cloned().context("--dump requires a value")?);
             }
+            "--flash" => {
+                i += 1;
+                respond_flash = Some(args.get(i).cloned().context("--flash requires a value")?);
+            }
             _ => {}
         }
         i += 1;
@@ -291,6 +300,7 @@ fn run() -> Result<()> {
                 data_delay_ms,
                 reply_delay_ms,
                 dump: bench_dump.clone().map(PathBuf::from),
+                flash: respond_flash.map(PathBuf::from),
             };
             respond::run(&opts)?;
             Ok(())

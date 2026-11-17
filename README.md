@@ -115,6 +115,11 @@ logged. Own replies are matched on the wire and logged as `ECHO`.
 ```sh
 # Fake ECU on the tap port, mirroring the session to a log file
 ./target/release/dde3-toolkit respond --out fake_ecu.log
+
+# Same, but serve a real flash dump: the tool's FLASH_LESEN requests are
+# answered with the file's bytes (256 KB / 0x40000 image required)
+./target/release/dde3-toolkit respond --out fake_ecu.log \
+    --flash captures/actual_flash.bin
 ```
 
 ```sh

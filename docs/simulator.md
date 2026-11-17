@@ -85,22 +85,27 @@ From the SEED_KEY job bytecode (`research/diag_jobs.md` §1, reconstructed):
    `T[i] = resp[0x12+i] + resp[Z+i]`, `K[i] = T[i] + resp[0x29+i]` (byte
    adds, i = 0..3).
 4. Tester sends `12 08 90 K0 K1 K2 K3`; ECU checks, answers status.
-5. **Measured on the wire** (DDE3 session 2026-11-17, Z=0x10): the key the
-   real job sends is `82 85 88 8B` — exactly **5 lower** than the
-   uncorrected formula (`87 8A 8D 90`) on all four bytes. The sim's seed
-   table is linear (slope 1), so the job's key-window offset from the
-   reconstructed indices shows up as a constant value offset; the sim
-   compensates with `SEED_KEY_BIAS = 5` (wrapping subtract on each key
-   byte), making the accepted key match the job's for every Z.
+5. **Measured on the wire** (DDE3 sessions 2026-11-17, three Galletto
+   runs): the keys the real job sends are
+   `Z=0x07 → 39 3C 3F 42`, `Z=0x10 → 82 85 88 8B`, `Z=0x16 → B6 B9 BC BF`
+   (the last byte of the key frame, e.g. `F2` after `… 42`, is the frame's
+   trailing XOR — the key is exactly 4 bytes). These match the
+   **unbiased** formula of step 3 byte-for-byte on all three vectors, so
+   there is **no bias** in the DDE3 seed/key exchange. An earlier build
+   assumed a `SEED_KEY_BIAS = 5` after misreading a capture (the `Z=0x10`
+   vector happened to sit 5 below the formula on the sim's *old* seed
+   table); the bias was removed 2026-11-17 and all three vectors —
+   including the previously rejected `Z=0x07` — then unlocked on the first
+   key send.
 
 The sim implements the ECU side of this: the seed reply is a 46-byte seed
 telegram `12 2E A0 <42 data bytes> <XOR>` (LEN 0x2E = 46 wire, the ≥0x2D
 the job wants) whose data is a deterministic pattern seeded by Z. The
 expected key is then computed **on the final 45-byte payload** with the
-job's formula `K[i] = resp[0x12+i] + resp[Z+i] + resp[0x29+i]` (byte adds)
-minus the measured bias — so the key the sim will accept is exactly what a
-tester computing the job's formula on the bytes it actually receives will
-send, for **every** Z (including Z where the `resp[Z+i]` window overlaps the
+job's formula `K[i] = resp[0x12+i] + resp[Z+i] + resp[0x29+i]` (byte adds,
+no bias) — so the key the sim will accept is exactly what a tester
+computing the job's formula on the bytes it actually receives will send, for
+**every** Z (including Z where the `resp[Z+i]` window overlaps the
 header or the other key windows; both sides read the same final bytes). The
 sim has **no "already unlocked" latch** (item 2 is the job's own check, not
 sim behaviour): every `BMW` seed request gets a fresh seed telegram + fresh
