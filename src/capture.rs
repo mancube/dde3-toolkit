@@ -359,7 +359,7 @@ pub fn install_sigint() {
 }
 
 #[cfg(not(unix))]
-fn install_sigint() {}
+pub fn install_sigint() {}
 
 pub fn run(opts: &CaptureOptions) -> Result<Summary> {
     let mut tap = Tap::open(&opts.port, opts.baud)?;
