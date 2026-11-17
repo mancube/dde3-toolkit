@@ -79,6 +79,9 @@ pub struct SimEcu {
     /// Adjustment values by item id (DS2 cmd `0x40` read / `0x41` set /
     /// `0x42` store; ids are the `NN` bytes of those jobs).
     adjustments: BTreeMap<u8, u16>,
+    /// Test hook: override the AIF (hardware-ID) programming record served
+    /// on the `FLASH_LESEN addr=0 count=46` read; `None` = serve from flash.
+    aif_override: Option<[u8; 46]>,
 }
 
 impl Default for SimEcu {
@@ -120,6 +123,7 @@ impl SimEcu {
             fault_step: 0,
             test_stamp: [0, 0, 0],
             adjustments: BTreeMap::new(),
+            aif_override: None,
         }
     }
 
@@ -146,7 +150,16 @@ impl SimEcu {
             fault_step: 0,
             test_stamp: [0, 0, 0],
             adjustments: BTreeMap::new(),
+            aif_override: None,
         })
+    }
+
+    /// Test hook: set the AIF (hardware-ID) programming record served on the
+    /// `FLASH_LESEN addr=0 count=46` read (content-matching tests against
+    /// foreign tools such as MPPS).
+    #[allow(dead_code)]
+    pub fn set_aif(&mut self, aif: [u8; 46]) {
+        self.aif_override = Some(aif);
     }
 
     /// [`SimEcu::with_flash_image`] from a file on disk.
@@ -458,7 +471,17 @@ impl SimEcu {
             // same slot the 0x02 handler serves (erased slot = 46×FF, which
             // is what flash @0 holds on a real image anyway).
             if addr == 0 && count as u32 == AIF_LEN as u32 {
-                r.extend_from_slice(&self.flash[AIF_SLOT..AIF_SLOT + AIF_LEN]);
+                let rec: [u8; 46] = self
+                    .aif_override
+                    .as_ref()
+                    .map(|o| *o)
+                    .unwrap_or_else(|| {
+                        let f = &self.flash[AIF_SLOT..AIF_SLOT + AIF_LEN];
+                        let mut o = [0u8; AIF_LEN];
+                        o.copy_from_slice(f);
+                        o
+                    });
+                r.extend_from_slice(&rec);
             } else {
                 r.extend_from_slice(
                     &self.flash[addr as usize..addr as usize + count as usize],
@@ -1103,5 +1126,25 @@ mod tests {
         // sid 07 write-type, sub 10).
         let r = s.handle(&[0x12, 0x0B, 0x07, 0x10, 0x00, 0x00, 0x00, 0x02, 0x4B, 0x9A]);
         assert_eq!(&r[..3], &[0x12, 0x04, 0xA0]);
+    }
+
+    #[test]
+    fn aif_override_serves_test_content() {
+        // The AIF (hardware-ID) content served on `FLASH_LESEN addr=0 count=46`
+        // is overridable (test hook) so a foreign tool's expectations can be
+        // exercised without touching the real-car AIF bytes.
+        let mut s = SimEcu::new();
+        let aif = {
+            let mut a = [0u8; 46];
+            for (i, b) in a.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_add(0x61);
+            }
+            a
+        };
+        s.set_aif(aif);
+        let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 46]);
+        assert_eq!(&r[..3], &[0x12, 0x32, 0xA0]);
+        assert_eq!(r.len(), 3 + AIF_LEN);
+        assert_eq!(&r[3..], &aif[..]);
     }
 }
