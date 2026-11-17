@@ -115,6 +115,33 @@ Tests: 79 passing. Released **v0.3.5** (commit `a5d7280`, tag, Gitea) — the
 Cargo.lock chore follow-up (`282ed31`) synced the version. Next: re-run MPPS
 against the v0.3.5 fake ECU and confirm the stall/hang is resolved.
 
+### Session 20 (2026-11-18) — Windows release startup fix (Win7 host)
+
+User report: the Windows release (`dist/dde3-toolkit-windows-x86_64.exe`)
+fails at startup with
+`the procedure entry point GetSystemTimePreciseAsFileTime could not be located
+in the dynamic link library KERNEL32.dll` — the host is **Windows 7** and the
+release must work there too.
+
+Diagnosis (PE import table of the shipped exe confirmed):
+- The eframe 0.31 / winit 0.30 / windows-sys GUI stack imports
+  `GetSystemTimePreciseAsFileTime` (Win8+) from `KERNEL32.dll`.
+- Windows 7's `KERNEL32.dll` does not export that entry point → loader fails at
+  startup.
+
+Fix (v0.3.6):
+- `scripts/release.sh` now cross-builds the Windows binary with
+  `RUSTFLAGS="-C target-feature=+crt-static -C link-arg=/DELAYLOAD:KERNEL32.dll
+  -C link-arg=/DEFAULTLIB:delayimp"` → the kernel32 import is delay-loaded
+  (via `delayimp.lib`) so resolution is deferred and the binary starts on
+  Win7. Verified locally: `cargo xwin build --release --target
+  x86_64-pc-windows-msvc` now links cleanly with the delay-load flags.
+- `README.md` "Windows build" section updated to the same RUSTFLAGS recipe.
+
+Tests: 79 passing (unchanged code). Released **v0.3.6** (commit `5d84fcc`, tag,
+Gitea). Next: run the v0.3.6 Windows release on the Win7 host and confirm it
+starts (GUI should come up; MPPS/fake-ECU testing continues thereafter).
+
 ## ← CURRENT TASK (take over from here)
 
 **Real-car verification of the rewritten `read_dtcs()` (session 12).**
