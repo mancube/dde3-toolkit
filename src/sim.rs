@@ -50,6 +50,12 @@ const AIF_RECORD: [u8; 46] = [
     0x32, 0x33, 0x32, 0x34, 0x00, 0x30, 0x21, 0x00, 0x00, 0x00, 0x31, 0xC5, 0x00, 0x00
 ];
 
+/// ASCII identification string served on the AIF/hardware-ID read
+/// (`FLASH_LESEN addr=0 count=46`): 42 chars, containing the Bosch hardware
+/// number (`0281001445`) and the ECU type fields "over that" — the string
+/// MPPS expects from the hardware-ID read (missing from the raw AIF record).
+const IDENT_STRING: &[u8] = b"77868875201124048010281001445G521000000000";
+
 pub struct SimEcu {
     flash: Vec<u8>,
     in_prog: bool,
@@ -471,17 +477,12 @@ impl SimEcu {
             // same slot the 0x02 handler serves (erased slot = 46×FF, which
             // is what flash @0 holds on a real image anyway).
             if addr == 0 && count as u32 == AIF_LEN as u32 {
-                let rec: [u8; 46] = self
+                let content: &[u8] = self
                     .aif_override
                     .as_ref()
-                    .map(|o| *o)
-                    .unwrap_or_else(|| {
-                        let f = &self.flash[AIF_SLOT..AIF_SLOT + AIF_LEN];
-                        let mut o = [0u8; AIF_LEN];
-                        o.copy_from_slice(f);
-                        o
-                    });
-                r.extend_from_slice(&rec);
+                    .map(|o| o.as_slice())
+                    .unwrap_or(IDENT_STRING);
+                r.extend_from_slice(content);
             } else {
                 r.extend_from_slice(
                     &self.flash[addr as usize..addr as usize + count as usize],
@@ -1146,5 +1147,19 @@ mod tests {
         assert_eq!(&r[..3], &[0x12, 0x32, 0xA0]);
         assert_eq!(r.len(), 3 + AIF_LEN);
         assert_eq!(&r[3..], &aif[..]);
+    }
+
+    #[test]
+    fn flash_read_aif_serves_ident_string() {
+        // Default served content for the AIF read (`FLASH_LESEN addr=0
+        // count=46`) is the ASCII identification string carrying the Bosch
+        // hardware number (`0281001445`) and the ECU type fields.
+        let mut s = SimEcu::new();
+        let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 46]);
+        // `12 2E A0 <42 string>`: LEN = 3 + 42 + XOR = 46 = 0x2E.
+        assert_eq!(&r[..3], &[0x12, 0x2E, 0xA0]);
+        assert_eq!(r.len(), 3 + IDENT_STRING.len());
+        assert_eq!(&r[3..], IDENT_STRING);
+        assert_eq!(IDENT_STRING.len(), 42);
     }
 }

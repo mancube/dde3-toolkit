@@ -94,6 +94,26 @@ Tests: `sim::tests::missing_ds2_responses_are_answered`,
 `sim::tests::mw_subservices_answered`. Docs: `docs/simulator.md` (coverage
 status), `docs/respond-mode.md` §8.
 
+### Session 19 (2026-11-18) — AIF/hardware-ID read serves ASCII ident string
+
+User finding (MPPS): the content returned by the FLASH_LESEN-based hardware-ID
+read was "wrong / not enough" — surely missing the `0281001445` hardware-number
+portion, and something over that for the ECU Type field. Adjusted the served
+content in `SimEcu::handle` → `flash_read`:
+
+- AIF read (`FLASH_LESEN addr=0x000000, count=46`) now serves the ASCII
+  identification string (`12 2E A0 <42 char> <XOR>` → LEN = 0x2E = 46) via the
+  new `IDENT_STRING` const (`77868875201124048010281001445G521000000000`,
+  42 chars, carries hw `0281001445` + ECU type fields) instead of the raw AIF
+  record bytes (`12 32 A0 <46 B> <XOR>`).
+- Test hook `SimEcu::set_aif([u8; 46])` preserved (override wins) so content-
+  matching tests remain possible; new tests `aif_override_serves_test_content`,
+  `flash_read_aif_serves_ident_string`.
+- Docs: `docs/respond-mode.md` §3 (flash read) + §7 files-touched updated.
+
+Tests: 79 passing. Release: not yet cut (pending user confirmation to re-run
+MPPS against the adjusted serve).
+
 ## ← CURRENT TASK (take over from here)
 
 **Real-car verification of the rewritten `read_dtcs()` (session 12).**
