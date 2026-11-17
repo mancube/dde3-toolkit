@@ -33,7 +33,13 @@ chmod +x "$LINUX"
 
 # 3. Windows (cross, static CRT — same recipe as dde4-toolkit).
 if command -v cargo-xwin >/dev/null 2>&1; then
-  RUSTFLAGS="-C target-feature=+crt-static" \
+  # Delay-load kernel32: the eframe/winit GUI stack imports
+  # `GetSystemTimePreciseAsFileTime` (Win8+) from KERNEL32.dll; on a Windows 7
+  # host that export is missing and the release dies at startup with
+  # "The procedure entry point GetSystemTimePreciseAsFileTime could not be
+  # located in the dynamic link library KERNEL32.dll". /DELAYLOAD + delayimp
+  # defers the resolution so the binary starts on Win7.
+  RUSTFLAGS="-C target-feature=+crt-static -C link-arg=/DELAYLOAD:KERNEL32.dll -C link-arg=/DEFAULTLIB:delayimp" \
     cargo xwin build --release --target x86_64-pc-windows-msvc
   cp "target/x86_64-pc-windows-msvc/release/$NAME.exe" "$WIN"
 elif [ -f "$WIN" ]; then
