@@ -173,6 +173,37 @@ Conclusion: the missing-import startup blockers appear resolved at the loader
 level; full GUI startup validation still pending (bare-metal Win7 host test
 remains the real acceptance check).
 
+### Session 23 (2026-11-19) — AIF/hardware-ID read serves flash content again
+
+User finding (MPPS via `respond --flash ../../captures/actual_flash.bin`):
+the `--flash` override of the FLASH_LESEN reply did **not** work — the VIN
+was no longer reported, the reply was missing the ECU type (`Bosch DDE3`),
+the hardware ID and the VIN the older version produced, so the tool did not
+pass the read/write buttons gate.
+
+Root cause: session 19 (commit `95066b5`, v0.3.5) replaced the AIF/hardware-ID
+read content (`FLASH_LESEN addr=0x000000, count=46`) with a hard-coded ASCII
+identification string (`IDENT_STRING`, `12 2E A0 <42> <XOR>`) — so the
+`--flash <file>` serve never reached the AIF read again and MPPS saw the
+built-in string instead of the real car's AIF record.
+
+Fix (`src/sim.rs` `flash_read`):
+- the AIF read again serves the flash image's AIF slot
+  (`self.flash[AIF_SLOT..AIF_SLOT + AIF_LEN]`, `AIF_SLOT = 0x3FCB2` = cal
+  `0x7CB2`), i.e. the real car's AIF record when running with
+  `respond --flash captures/actual_flash.bin` — restoring the pre-v0.3.5
+  behaviour where the actual flash read netted a properly-read VIN;
+- `SimEcu::set_aif()` override still wins (content-matched tool tests keep
+  working).
+- Removed the now-unused `IDENT_STRING` const; renamed the regression test
+  `flash_read_aif_serves_ident_string` → `flash_read_aif_serves_slot_content`
+  and extended `flash_read_serves_file_image` to also assert the
+  FLASH_LESEN-based AIF read serves the file's slot content.
+
+Tests: 79 passing, clippy clean (2 pre-existing warnings). Next: re-run MPPS
+against the fake ECU (`respond --flash captures/actual_flash.bin`) and
+confirm the VIN read + read/write buttons gate pass.
+
 ## ← CURRENT TASK (take over from here)
 
 **Real-car verification of the rewritten `read_dtcs()` (session 12).**

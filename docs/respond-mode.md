@@ -163,10 +163,13 @@ any next rejection is visible in the log. Status as of the §6 follow-up:
 3. **Flash read** (`12 09 06 …`) — works (round-trips the sim image; with
    `--flash <file>` it round-trips the file's bytes, tested end-to-end with
    Galletto reading 0x80-byte blocks across the first ~208 KB). The AIF/
-   hardware-ID read (`addr=0x000000`, `count=46`) now serves the ASCII
-   identification string (`12 2E A0 <42> <XOR>`) carrying the Bosch hardware
-   number (`0281001445`) and the ECU type fields — not the raw AIF record
-   bytes.
+   hardware-ID read (`addr=0x000000`, `count=46`) serves the flash image's AIF
+   slot content — the same 46 bytes the `12 05 02` programming-record handler
+   serves (`12 32 A0 <46 B> + XOR`, LEN 50; empty slot → short `12 05 A0 FF`) —
+   so with `respond --flash captures/actual_flash.bin` the real car's AIF
+   record (Bosch HW number `0281001445`, ECU type fields, VIN data) is
+   answered again instead of a hard-coded string; the `SimEcu::set_aif`
+   override still wins for content-matched tool tests.
 4. ~~Flash write~~ — **done** (see §6): 73-byte blocks parse intact, the
    image is reconstructed and `--dump`ed.
 5. **Fault memory** (count / entry / shadow / tail) — LEN now matches
@@ -234,7 +237,7 @@ byte-for-byte (`0x10000..0x10080`, 128 B).
 | `docs/wire-protocol.md`, `docs/simulator.md` | 42-char ident, LEN semantics, AIF 46-byte record, seed/key |
 | `src/sim.rs`, `src/respond.rs`, `src/main.rs` (2026-11-17) | **`--flash <image.bin>`**: `SimEcu::with_flash_image()` / `from_flash_file()` serve a real 256 KB dump verbatim (FLASH_LESEN + AIF read); `--flash` flag + header line; `SEED_KEY_BIAS` removed — unbiased formula `K[i] = resp[0x12+i] + resp[Z+i] + resp[0x29+i]` verified against all three wire vectors (`Z=0x07/0x10/0x16`); tests `flash_read_serves_file_image`, `flash_image_wrong_size_rejected` |
 | `src/sim.rs` (2026-11-17, MPPS follow-up) | **Missing DS2 responses implemented**: session keep `9E`, test stamp `0E`/`0F`, actuator override `0C`, EWS sync `6C`/`6D`, adjustment values `40`/`41`/`42`, MW sub-services `03`/`04`/`11`/`12`/`07`, flash-write-type `07 10` (STEUERN_TESTPLATZ) — all answered with well-formed JOBRESULT replies instead of falling through to NACK; tests `missing_ds2_responses_are_answered`, `mw_subservices_answered` |
-| `src/sim.rs` (2026-11-18, MPPS follow-up) | **AIF/hardware-ID read content**: `FLASH_LESEN addr=0 count=46` now serves the ASCII identification string (`12 2E A0 <42> <XOR>`, via `IDENT_STRING`, incl. hw `0281001445` + ECU type) instead of raw AIF record bytes; test hook `SimEcu::set_aif()` + tests `aif_override_serves_test_content`, `flash_read_aif_serves_ident_string` |
+| `src/sim.rs` (2026-11-19, MPPS follow-up) | **AIF/hardware-ID read content REVERTED**: `FLASH_LESEN addr=0 count=46` again serves the flash image's AIF slot (`self.flash[AIF_SLOT..AIF_SLOT+46]`, `set_aif` override wins) instead of the hard-coded ASCII `IDENT_STRING` from session 19 — the `respond --flash <file>` override therefore serves the real car's AIF record again (Bosch HW number / ECU type / VIN data), restoring the properly-read VIN; test hook `SimEcu::set_aif()` + tests `aif_override_serves_test_content`, `flash_read_aif_serves_slot_content` |
 | `README.md` | `respond` documented |
 
 See also [`wire-protocol.md`](wire-protocol.md) (framing, LEN semantics,

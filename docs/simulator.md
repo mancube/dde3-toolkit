@@ -61,6 +61,7 @@ XOR. `Kline` adds the XOR and the echo bookkeeping.
 | `12 05 6C 00` | EWS sync start | status only |
 | `12 04 6D` | EWS sync status | status byte(s) |
 | `12 09 06 A0 A1 A2 n` | FLASH_LESEN | n flash bytes at [3] (toolkit read path, real-car confirmed) |
+| `12 09 06 00 00 00 00 2E` | AIF hardware-ID read via FLASH_LESEN (`addr=0x000000`, `count=46`) | 46-byte AIF record from the flash image's AIF slot (cal `0x7CB2` → flash `0x3FCB2`), reply `12 32 A0 <46 B> + XOR` (LEN 50); served from the sim's `flash` model so `respond --flash <file>` answers with the file's AIF record — the Bosch HW number / ECU type / VIN data; `SimEcu::set_aif` override wins |
 | `12 09 06 05 A2 A1 A0 n` | 24-bit memory read (STATUS_MW5: 13 bytes @ 0x02FB56) | n bytes at [3] |
 | `12 09 06 06 A2 A1 A0 n` | EEPROM read (24C02, 256 B) | n EEPROM bytes at [3] |
 | `12 09 07 06 A0 A1 A2 n` | flash erase (n=0 → to end of image) | status only, needs programming mode |
@@ -78,6 +79,9 @@ now answered by the fake ECU — including the previously-missing ones
 values `40`/`41`/`42`, session keep `9E`, MW sub-services `03`/`04`/`11`/`12`,
 and STEUERN_TESTPLATZ `07 10`) — so a foreign tool (MPPS/Galletto) no longer
 hits a mid-session NACK and stalls waiting for a response it will never get.
+(AIF content follow-up, 2026-11-19: the AIF hardware-ID read via
+`FLASH_LESEN addr=0x000000 count=46` serves the flash image's AIF slot again —
+see the new service-map row above.)
 
 ## Seed/key (`0x90`)
 
