@@ -33,13 +33,12 @@ chmod +x "$LINUX"
 
 # 3. Windows (cross, static CRT — same recipe as dde4-toolkit).
 if command -v cargo-xwin >/dev/null 2>&1; then
-  # Delay-load kernel32: the eframe/winit GUI stack imports
-  # `GetSystemTimePreciseAsFileTime` (Win8+) from KERNEL32.dll; on a Windows 7
-  # host that export is missing and the release dies at startup with
-  # "The procedure entry point GetSystemTimePreciseAsFileTime could not be
-  # located in the dynamic link library KERNEL32.dll". /DELAYLOAD + delayimp
-  # defers the resolution so the binary starts on Win7.
-  RUSTFLAGS="-C target-feature=+crt-static -C link-arg=/DELAYLOAD:KERNEL32.dll -C link-arg=/DEFAULTLIB:delayimp" \
+  # Delay-load the native DLLs used by the eframe/winit GUI layer so the
+  # release starts on Windows 7: the stack imports Win8+-era APIs/exports that
+  # Windows 7 lacks (e.g. `GetSystemTimePreciseAsFileTime` from KERNEL32.dll,
+  # `combase.dll` for the COM base). /DELAYLOAD + the delay-load helper defers
+  # resolution so no missing export kills startup.
+  RUSTFLAGS="-C target-feature=+crt-static -C link-arg=/DELAYLOAD:KERNEL32.dll -C link-arg=/DELAYLOAD:USER32.DLL -C link-arg=/DELAYLOAD:GDI32.DLL -C link-arg=/DELAYLOAD:OL32.DLL -C link-arg=/DELAYLOAD:COBASE.DLL -C link-arg=/DELAYLOAD:COMDLG32.DLL -C link-arg=/DELAYLOAD:IMM32.DLL -C link-arg=/DELAYLOAD:SHELL32.DLL -C link-arg=/DELAYLOAD:SHLWAPI.DLL -C link-arg=/DELAYLOAD:ADVAPI32.DLL -C link-arg=/DELAYLOAD:SETUPAPI.DLL -C link-arg=/DELAYLOAD:CFGMR32.DLL -C link-arg=/DELAYLOAD:UXTHEME.DLL -C link-arg=/DELAYLOAD:DWMAPI.DLL -C link-arg=/DELAYLOAD:OPENGL32.DLL -C link-arg=/DELAYLOAD:BCRYPTPRIMITIVES.DLL -C link-arg=/DEFAULTLIB:delayimp" \
     cargo xwin build --release --target x86_64-pc-windows-msvc
   cp "target/x86_64-pc-windows-msvc/release/$NAME.exe" "$WIN"
 elif [ -f "$WIN" ]; then
