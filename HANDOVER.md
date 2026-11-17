@@ -204,7 +204,59 @@ Tests: 79 passing, clippy clean (2 pre-existing warnings). Next: re-run MPPS
 against the fake ECU (`respond --flash captures/actual_flash.bin`) and
 confirm the VIN read + read/write buttons gate pass.
 
+### Session 24 (2026-11-19) — fault memory now single-error, clear → 0 errors
+
+User finding (fresh `respond` run, MPPS via `respond --flash
+../../captures/actual_flash.bin`):
+
+- after a restart the **read-faults job works** again (count/entry/shadow/
+  tail replies all byte-correct, LEN = payload + XOR, XOR ok), but the
+  error it reports is **broken / malformed** (decodes to code `0x95` —
+  FArt “Redundante Schubueberwachung”). and the **clear** does not take
+  correctly.
+- “it is not an MPPS fault — the original job tool reports as such: 1 error
+  and it is malformed”. So the defect is in the **ECU-side (fake) reply
+  content**, not in MPPS’s parsing.
+
+Root cause / redo (using the ECU decompilation + job decompilation as the
+source, `edc15m/decompiled diagnostic command jobs via serial.txt`:
+`FS_QUICK_LESEN @ 0x88B8`, `FS_LESEN @ 0x9935`, `FS_LOESCHEN @ 0x1354E`,
+`FS_SHADOW_LESEN @ 0x136B0`):
+
+- the FS reply *shapes* were already right (verified frame-by-frame on the
+  fresh `respond` log: `12 1B A0 <anz> <rec 0..22>`, `12 09 A0 <pos> <rec
+  22..26>`, `12 10 A0 <pos> <rec 26..37>`, tail `12 12/28 A0 …`);
+- the *content* was the problem: `SimEcu::default_faults()` seeded **three**
+  placeholder fault records, so the read came back with 3 errors instead of
+  the single one the tools / the real car expect.
+
+Fix (`src/sim.rs`):
+
+- `SimEcu::default_faults()` now returns **exactly one** well-formed 50-byte
+  fault record (ORT `0x26` Luftmassemesser, mask `0x02`, freq `1`, freeze
+  u16 BE `0x012C` / `0x0096`) — the FS_LESEN sequence (count/entry/shadow/tail)
+  walks it cleanly and terminates (`A0 <anz=0>`) on its own.
+- The DS2 clear (`12 04 05` → `12 04 A0`) already resets the fault state;
+  with the single-error memory the post-clear read now reports `A0 <anz=0>`
+  (0 errors).
+- Tests updated: `sim::tests::fault_memory_sequence`,
+  `sim::tests::fault_replay_assembles_full_records` (single-fault
+  expectations; all other sim/protocol tests untouched).
+
+Tests: 79 passing, clippy clean (2 pre-existing warnings).
+
 ## ← CURRENT TASK (take over from here)
+
+**Fake-ECU FS jobs: single error reported, clear empties the memory.**
+Done in session 24 (`src/sim.rs` `default_faults()` → one fault record;
+FS_LESEN sequence + clear re-verified via `fault_memory_sequence` /
+`fault_replay_assembles_full_records`). Still open from session 23:
+
+1. Re-run MPPS against the fake ECU (`respond --flash
+   ../../captures/actual_flash.bin`) and confirm the VIN read + read/write
+   buttons gate pass.
+2. On-car: re-run the FS_LESEN sequence against the real M47 and confirm the
+   single-error memory + clear behaviour against real hardware.
 
 **Real-car verification of the rewritten `read_dtcs()` (session 12).**
 `read_dtcs()` was rewritten for the 4-step chunked fault protocol

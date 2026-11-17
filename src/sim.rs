@@ -91,13 +91,14 @@ impl Default for SimEcu {
 }
 
 impl SimEcu {
-    /// The sim's fault records (shared by all constructors).
+    /// The simulated fault memory: exactly ONE stored fault.
+    ///
+    /// The fake ECU comes up with a single DTC (the M47 the tools were built
+    /// against ran with one live error); the FS_LESEN sequence below is walked
+    /// against that single-error memory, and the DS2 clear wipes it again so
+    /// the next read reports zero errors.
     fn default_faults() -> Vec<[u8; 50]> {
-        vec![
-            Self::record(0, 0x26, 0x02, 0x012C, 0x0096), // Luftmassenmesser, Signal Unterbrechung
-            Self::record(1, 0x05, 0x01, 0x04D2, 0x021F), // Nadelbewegungsfuehler, KS B+
-            Self::record(2, 0x36, 0x04, 0x02BC, 0x03A5), // Ladedruckfuehler, nicht plausibel
-        ]
+        vec![Self::record(0, 0x26, 0x02, 0x012C, 0x0096)] // Luftmassemesser (ORT 0x26)
     }
 
     /// Fresh sim with a deterministic 256 KB pattern (not zeros, so an
@@ -959,11 +960,10 @@ mod tests {
     #[test]
     fn fault_memory_sequence() {
         let mut s = SimEcu::new();
-        // count: 3 seeded faults + header (rec 0..22) of fault 1.
-        // LEN = payload + trailing XOR: 26 + 1 = 0x1B, exactly the real-car
-        // DTC reply `12 1B A0 02 …` in captures/dde3newlog.txt.
+        // count: 1 seeded fault + header (rec 0..22) of fault 1.
+        // LEN = payload + trailing XOR: 26 + 1 = 0x1B (real-car DTC reply shape).
         let r = s.handle(&[0x12, 0x05, 0x14, 0x01]);
-        assert_eq!(&r[..4], &[0x12, 0x1B, 0xA0, 3]);
+        assert_eq!(&r[..4], &[0x12, 0x1B, 0xA0, 1]);
         assert_eq!(r.len(), 3 + 1 + 22);
         assert_eq!(&r[4..6], &[0x26, 0x02]); // ORT + ART mask of fault 1
         // entry 1: `A0 <pos> <rec 22..26>` — LEN 8 + 1 = 9
@@ -974,20 +974,7 @@ mod tests {
         let r = s.handle(&[0x12, 0x05, 0x04, 0x01]);
         assert_eq!(&r[..4], &[0x12, 0x10, 0xA0, 1]);
         assert_eq!(r.len(), 3 + 1 + 11);
-        // tail 1: `A0 <anz=2> <rec 37..50> <next rec 0..22>` — LEN 39 + 1 = 0x28
-        let r = s.handle(&[0x12, 0x05, 0x14, 0x01]);
-        assert_eq!(&r[..4], &[0x12, 0x28, 0xA0, 2]);
-        assert_eq!(r.len(), 3 + 1 + 13 + 22);
-        assert_eq!(&r[17..19], &[0x05, 0x01]); // fault 2 ORT + mask
-        // fault 2 entry/shadow, tail announces fault 3
-        s.handle(&[0x12, 0x05, 0x04, 0x00]);
-        s.handle(&[0x12, 0x05, 0x04, 0x01]);
-        let r = s.handle(&[0x12, 0x05, 0x14, 0x01]);
-        assert_eq!(r[3], 1);
-        assert_eq!(&r[17..19], &[0x36, 0x04]); // fault 3 ORT + mask
-        s.handle(&[0x12, 0x05, 0x04, 0x00]);
-        s.handle(&[0x12, 0x05, 0x04, 0x01]);
-        // last tail: `A0 <anz=0> <rec 37..50>` only — LEN 17 + 1 = 0x12
+        // tail 1 (last of a single-fault memory): `A0 <anz=0> <rec 37..50>` — LEN 17 + 1 = 0x12
         let r = s.handle(&[0x12, 0x05, 0x14, 0x01]);
         assert_eq!(&r[..4], &[0x12, 0x12, 0xA0, 0]);
         assert_eq!(r.len(), 3 + 1 + 13);
@@ -1033,10 +1020,8 @@ mod tests {
         }
         let exp = [
             (0x26u8, 0x02u8, 0x012Cu16, 0x0096u16),
-            (0x05, 0x01, 0x04D2, 0x021F),
-            (0x36, 0x04, 0x02BC, 0x03A5),
         ];
-        assert_eq!(assembled.len(), 3);
+        assert_eq!(assembled.len(), 1);
         for (i, rec) in assembled.iter().enumerate() {
             assert_eq!(rec.len(), 50);
             assert_eq!(rec[0], exp[i].0, "ORT {i}");
