@@ -86,16 +86,18 @@ dde4-toolkit):
 ```sh
 rustup target add x86_64-pc-windows-msvc
 cargo install cargo-xwin --locked
-RUSTFLAGS="-C target-feature=+crt-static -C link-arg=/DELAYLOAD:KERNEL32.dll -C link-arg=/DEFAULTLIB:delayimp" \
+RUSTFLAGS="-C target-feature=+crt-static -C link-arg=/DELAYLOAD:KERNEL32.dll -C link-arg=/DELAYLOAD:USER32.DLL -C link-arg=/DELAYLOAD:GDI32.DLL -C link-arg=/DELAYLOAD:OL32.DLL -C link-arg=/DELAYLOAD:COBASE.DLL -C link-arg=/DELAYLOAD:COMDLG32.DLL -C link-arg=/DELAYLOAD:IMM32.DLL -C link-arg=/DELAYLOAD:SHELL32.DLL -C link-arg=/DELAYLOAD:SHLWAPI.DLL -C link-arg=/DELAYLOAD:ADVAPI32.DLL -C link-arg=/DELAYLOAD:SETUPAPI.DLL -C link-arg=/DELAYLOAD:CFGMR32.DLL -C link-arg=/DELAYLOAD:UXTHEME.DLL -C link-arg=/DELAYLOAD:DWMAPI.DLL -C link-arg=/DELAYLOAD:OPENGL32.DLL -C link-arg=/DELAYLOAD:BCRYPTPRIMITIVES.DLL -C link-arg=/DEFAULTLIB:delayimp" \
   cargo xwin build --release --target x86_64-pc-windows-msvc
 ```
 
-The `/DELAYLOAD:KERNEL32.dll` + delay-load helper keeps the release startable
-on **Windows 7** (the eframe/winit GUI stack imports the Win8+-only
-`GetSystemTimePreciseAsFileTime` from `KERNEL32.dll`, which Windows 7 does
-not export — without the delay-load the binary died at startup with
+The `/DELAYLOAD:*` flags + delay-load helper keep the release startable on
+**Windows 7** (the eframe/winit GUI layer imports Win8+-era exports such as
+`GetSystemTimePreciseAsFileTime` from `KERNEL32.dll` and the COM base from
+`combase.dll`, which Windows 7 lacks) — without them the binary died at startup
+with e.g.
 `The procedure entry point GetSystemTimePreciseAsFileTime could not be located
-in the dynamic link library KERNEL32.dll`).
+in the dynamic link library KERNEL32.dll` or `The procedure entry point ... could
+not be located in the dynamic link library COBASE.DLL`.
 
 On Windows use a COM port, e.g. `dde3-toolkit.exe --port COM3`.
 

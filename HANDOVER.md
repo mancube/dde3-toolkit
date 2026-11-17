@@ -142,6 +142,21 @@ Tests: 79 passing (unchanged code). Released **v0.3.6** (commit `5d84fcc`, tag,
 Gitea). Next: run the v0.3.6 Windows release on the Win7 host and confirm it
 starts (GUI should come up; MPPS/fake-ECU testing continues thereafter).
 
+### Session 21 (2026-11-18) — Windows 7: missing COMBASE.DLL after delay-load fix
+
+After v0.3.6 (delay-load of `KERNEL32.dll` only), the rebuilt Windows release
+now progressed past the kernel32 error and failed at startup with a missing
+`combase.dll` error; user asked to make the exe fully static.
+
+Fix: extended the release's delay-load set to the full native GUI layer
+(kernel32, user32, gdi32, ole32, combase, comdlg32, imm32, shell32, shlwapi,
+advapi32, setupapi, cfgmgr32, uxtheme, dwmapi, opengl32, bcryptprimitives) via
+`/DELAYLOAD:*` flags + `/DEFAULTLIB:delayimp`, verified with
+`cargo xwin build --release --target x86_64-pc-windows-msvc`.
+
+Released **v0.3.7** (pending: bump + run). Next: run the v0.3.7 Windows release
+on the Win7 host and confirm startup (then continue MPPS fake-ECU testing).
+
 ## ← CURRENT TASK (take over from here)
 
 **Real-car verification of the rewritten `read_dtcs()` (session 12).**
