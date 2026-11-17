@@ -111,8 +111,9 @@ content in `SimEcu::handle` → `flash_read`:
   `flash_read_aif_serves_ident_string`.
 - Docs: `docs/respond-mode.md` §3 (flash read) + §7 files-touched updated.
 
-Tests: 79 passing. Release: not yet cut (pending user confirmation to re-run
-MPPS against the adjusted serve).
+Tests: 79 passing. Released **v0.3.5** (commit `a5d7280`, tag, Gitea) — the
+Cargo.lock chore follow-up (`282ed31`) synced the version. Next: re-run MPPS
+against the v0.3.5 fake ECU and confirm the stall/hang is resolved.
 
 ## ← CURRENT TASK (take over from here)
 
