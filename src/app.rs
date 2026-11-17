@@ -136,20 +136,39 @@ fn default_log_file_name() -> String {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let time = secs;
-    let mut t = std::mem::MaybeUninit::<libc::tm>::uninit();
-    let ptr = unsafe { libc::localtime_r(&time, t.as_mut_ptr()) };
-    let ptr = if ptr.is_null() {
-        // localtime_r failed — fall back to UTC (practically impossible on Linux)
-        let mut u = std::mem::MaybeUninit::<libc::tm>::uninit();
-        let p = unsafe { libc::gmtime_r(&time, u.as_mut_ptr()) };
-        if p.is_null() {
+    // Use thread-safe time functions with platform-specific variants.
+    let tm = unsafe {
+        #[cfg(unix)]
+        {
+            let mut t = std::mem::MaybeUninit::<libc::tm>::uninit();
+            if libc::localtime_r(&time, t.as_mut_ptr()).is_null() {
+                let mut u = std::mem::MaybeUninit::<libc::tm>::uninit();
+                if libc::gmtime_r(&time, u.as_mut_ptr()).is_null() {
+                    return "log.csv".into();
+                }
+                *u.as_ptr()
+            } else {
+                *t.as_ptr()
+            }
+        }
+        #[cfg(windows)]
+        {
+            let mut t = std::mem::MaybeUninit::<libc::tm>::uninit();
+            if libc::localtime_s(t.as_mut_ptr(), &time) != 0 {
+                let mut u = std::mem::MaybeUninit::<libc::tm>::uninit();
+                if libc::gmtime_s(u.as_mut_ptr(), &time) != 0 {
+                    return "log.csv".into();
+                }
+                *u.as_ptr()
+            } else {
+                *t.as_ptr()
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
             return "log.csv".into();
         }
-        p
-    } else {
-        ptr
     };
-    let tm = unsafe { &*ptr };
     format!(
         "{:04}-{:02}-{:02}-{:02}{:02}{:02}.csv",
         tm.tm_year + 1900,
