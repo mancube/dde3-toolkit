@@ -245,18 +245,41 @@ Fix (`src/sim.rs`):
 
 Tests: 79 passing, clippy clean (2 pre-existing warnings).
 
+### Session 25 (2026-11-19) — fault memory serves the REAL M47 error record
+
+User finding (fresh `respond` run after session 24): the read-faults job
+now reports **1 error** (`12 1B A0 01 26 02 …` → anzahl `0x01`) but the
+error is still broken — ORT `0x5F` → “unbekannter Fehlerort”, error
+frequency `101`, Errorcode `5F 62 65 68 …` (the old placeholder record’s
+bytes).
+
+User correction: “it is not an MPPS fault — the original job tool reports
+as such: 1 error and it is malformed”. Source of truth: `analysis/actual
+error.txt` (INPA on the real car) + `protocol.rs::dtc_from_record_reference_m47`.
+
+Fix (`src/sim.rs` `default_faults()`): serve the **real M47 reference
+fault record** verbatim instead of the synthesized placeholder:
+
+```text
+08 C8 3C 00 38 9C E3 00 37 9D DE C4 C1 04 00 48 … 31 C5 00 00 22
+```
+
+(ORT `0x08` Gluehanlage, ART mask `0xC8`, freq `60`, Errorcode `08 C8 3C …`).
+The synthesized `SimEcu::record()` helper was removed as it is no longer
+used.
+
 ## ← CURRENT TASK (take over from here)
 
-**Fake-ECU FS jobs: single error reported, clear empties the memory.**
-Done in session 24 (`src/sim.rs` `default_faults()` → one fault record;
-FS_LESEN sequence + clear re-verified via `fault_memory_sequence` /
-`fault_replay_assembles_full_records`). Still open from session 23:
+**Fake-ECU FS jobs: serve the real M47 error record; clear empties memory.**
+Done in session 25 (`src/sim.rs` `default_faults()` → real M47 reference
+fault record; FS_LESEN sequence + clear re-verified via
+`fault_memory_sequence` / `fault_replay_assembles_full_records`).
+Still open from session 23/25:
 
 1. Re-run MPPS against the fake ECU (`respond --flash
    ../../captures/actual_flash.bin`) and confirm the VIN read + read/write
    buttons gate pass.
-2. On-car: re-run the FS_LESEN sequence against the real M47 and confirm the
-   single-error memory + clear behaviour against real hardware.
+2. On-car: confirm the single-error memory + clear against the real M47.
 
 **Real-car verification of the rewritten `read_dtcs()` (session 12).**
 `read_dtcs()` was rewritten for the 4-step chunked fault protocol

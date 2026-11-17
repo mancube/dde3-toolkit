@@ -173,11 +173,12 @@ any next rejection is visible in the log. Status as of the §6 follow-up:
 4. ~~Flash write~~ — **done** (see §6): 73-byte blocks parse intact, the
    image is reconstructed and `--dump`ed.
 5. **Fault memory** (count / entry / shadow / tail) — LEN now matches
-   the real capture; the fake ECU now serves a **single** stored fault
-   (`SimEcu::default_faults()` → one well-formed 50-byte record, ORT
-   `0x26` Luftmassemesser) and the DS2 clear (`12 04 05`) wipes it, so the
-   next read answers `A0 <anz=0>` — the read reports **one** error, the
-   clear leaves the memory empty.
+   the real capture; the fake ECU now serves a **single** stored fault —
+   the real M47 reference error record (`analysis/actual error.txt` +
+   `protocol::dtc_from_record_reference_m47`: ORT `0x08` Gluehanlage, ART
+   mask `0xC8`, error frequency `60`, Errorcode `08 C8 3C …`) — and the
+   DS2 clear (`12 04 05`) wipes it, so the next read answers `A0 <anz=0>`;
+   the read reports **one** error, the clear leaves the memory empty.
 6. **Flash end / restart** — note `0x17` is NACKed in normal mode by the
    sim; if the tool stalls after “write complete”, look here.
 
@@ -242,7 +243,7 @@ byte-for-byte (`0x10000..0x10080`, 128 B).
 | `src/sim.rs`, `src/respond.rs`, `src/main.rs` (2026-11-17) | **`--flash <image.bin>`**: `SimEcu::with_flash_image()` / `from_flash_file()` serve a real 256 KB dump verbatim (FLASH_LESEN + AIF read); `--flash` flag + header line; `SEED_KEY_BIAS` removed — unbiased formula `K[i] = resp[0x12+i] + resp[Z+i] + resp[0x29+i]` verified against all three wire vectors (`Z=0x07/0x10/0x16`); tests `flash_read_serves_file_image`, `flash_image_wrong_size_rejected` |
 | `src/sim.rs` (2026-11-17, MPPS follow-up) | **Missing DS2 responses implemented**: session keep `9E`, test stamp `0E`/`0F`, actuator override `0C`, EWS sync `6C`/`6D`, adjustment values `40`/`41`/`42`, MW sub-services `03`/`04`/`11`/`12`/`07`, flash-write-type `07 10` (STEUERN_TESTPLATZ) — all answered with well-formed JOBRESULT replies instead of falling through to NACK; tests `missing_ds2_responses_are_answered`, `mw_subservices_answered` |
 | `src/sim.rs` (2026-11-19, MPPS follow-up) | **AIF/hardware-ID read content REVERTED**: `FLASH_LESEN addr=0 count=46` again serves the flash image's AIF slot (`self.flash[AIF_SLOT..AIF_SLOT+46]`, `set_aif` override wins) instead of the hard-coded ASCII `IDENT_STRING` from session 19 — the `respond --flash <file>` override therefore serves the real car's AIF record again (Bosch HW number / ECU type / VIN data), restoring the properly-read VIN; test hook `SimEcu::set_aif()` + tests `aif_override_serves_test_content`, `flash_read_aif_serves_slot_content` |
-| `src/sim.rs` (2026-11-19, MPPS follow-up) | **Fault memory now single-error**: `SimEcu::default_faults()` returns one well-formed 50-byte fault record (ORT `0x26`) instead of three placeholder records; `fault_memory_sequence` / `fault_replay_assembles_full_records` updated — the FS_LESEN sequence (count/entry/shadow/tail) walks the single error cleanly and the DS2 clear (`12 04 05`) empties the memory (next read → `A0 <anz=0>`) |
+| `src/sim.rs` (2026-11-19, MPPS follow-up) | **Fault memory now single-error**: `SimEcu::default_faults()` returns one well-formed 50-byte fault record (the real M47 reference error: ORT `0x08` Gluehanlage, ART mask `0xC8`, freq `60`, Errorcode `08 C8 3C …`) instead of three placeholder records; `fault_memory_sequence` / `fault_replay_assembles_full_records` updated — the FS_LESEN sequence (count/entry/shadow/tail) walks the single error cleanly and the DS2 clear (`12 04 05`) empties the memory (next read → `A0 <anz=0>`) |
 | `README.md` | `respond` documented |
 
 See also [`wire-protocol.md`](wire-protocol.md) (framing, LEN semantics,

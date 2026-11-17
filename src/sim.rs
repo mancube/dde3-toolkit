@@ -93,12 +93,20 @@ impl Default for SimEcu {
 impl SimEcu {
     /// The simulated fault memory: exactly ONE stored fault.
     ///
-    /// The fake ECU comes up with a single DTC (the M47 the tools were built
-    /// against ran with one live error); the FS_LESEN sequence below is walked
-    /// against that single-error memory, and the DS2 clear wipes it again so
-    /// the next read reports zero errors.
+    /// The M47 the tools were built against ran with a single live error —
+    /// the real one, per the INPA reference read (`analysis/actual error.txt` +
+    /// `protocol::dtc_from_record_reference_m47`): ORT `0x08` (Gluehanlage),
+    /// ART mask `0xC8`, error frequency `60`, Errorcode `08 C8 3C …`. The
+    /// fake ECU therefore serves that record verbatim; the FS_LESEN sequence
+    /// (count/entry/shadow/tail) walks it cleanly and the DS2 clear (`12 04
+    /// 05`) empties the memory again (next read -> `12 05 A0 <anz=0>`).
     fn default_faults() -> Vec<[u8; 50]> {
-        vec![Self::record(0, 0x26, 0x02, 0x012C, 0x0096)] // Luftmassemesser (ORT 0x26)
+        vec![[
+            0x08, 0xC8, 0x3C, 0x00, 0x38, 0x9C, 0xE3, 0x00, 0x37, 0x9D, 0xDE, 0xC4, 0xC1, 0x04,
+            0x00, 0x48, 0x00, 0x99, 0x03, 0x00, 0x76, 0xDC, 0x5B, 0x03, 0x4A, 0x00, 0x76, 0xD1,
+            0x7D, 0x00, 0x76, 0xDC, 0x5A, 0x00, 0x34, 0x32, 0x33, 0x32, 0x34, 0x00, 0x30, 0x21,
+            0x00, 0x00, 0x00, 0x31, 0xC5, 0x00, 0x00, 0x22,
+        ]]
     }
 
     /// Fresh sim with a deterministic 256 KB pattern (not zeros, so an
@@ -169,21 +177,6 @@ impl SimEcu {
             .with_context(|| format!("cannot read flash image {}", path.display()))?;
         Self::with_flash_image(image)
             .with_context(|| format!("flash image {}", path.display()))
-    }
-
-    /// Synthesize a deterministic 50-byte fault record: `[0]=ORT [1]=ART mask
-    /// [2]=freq [3..9]=freeze u16 BE` plus filler for the rest.
-    fn record(idx: usize, ort: u8, mask: u8, uw1: u16, uw2: u16) -> [u8; 50] {
-        let mut r = [0u8; 50];
-        r[0] = ort;
-        r[1] = mask;
-        r[2] = 1;
-        r[3..5].copy_from_slice(&uw1.to_be_bytes());
-        r[5..7].copy_from_slice(&uw2.to_be_bytes());
-        for (i, b) in r.iter_mut().enumerate().skip(9) {
-            *b = (i as u8).wrapping_mul(3).wrapping_add(idx as u8).wrapping_add(0x11);
-        }
-        r
     }
 
     /// Handle a DS2 request payload (without the trailing XOR byte).
@@ -960,12 +953,12 @@ mod tests {
     #[test]
     fn fault_memory_sequence() {
         let mut s = SimEcu::new();
-        // count: 1 seeded fault + header (rec 0..22) of fault 1.
-        // LEN = payload + trailing XOR: 26 + 1 = 0x1B (real-car DTC reply shape).
+        // count: 1 seeded fault (M47 reference: Gluehanlage) + header
+        // (rec 0..22). LEN = payload + trailing XOR: 26 + 1 = 0x1B (real-car DTC reply shape).
         let r = s.handle(&[0x12, 0x05, 0x14, 0x01]);
         assert_eq!(&r[..4], &[0x12, 0x1B, 0xA0, 1]);
         assert_eq!(r.len(), 3 + 1 + 22);
-        assert_eq!(&r[4..6], &[0x26, 0x02]); // ORT + ART mask of fault 1
+        assert_eq!(&r[4..6], &[0x08, 0xC8]); // ORT + ART mask of fault 1 (Gluehanlage)
         // entry 1: `A0 <pos> <rec 22..26>` — LEN 8 + 1 = 9
         let r = s.handle(&[0x12, 0x05, 0x04, 0x00]);
         assert_eq!(&r[..4], &[0x12, 0x09, 0xA0, 1]);
@@ -1019,7 +1012,7 @@ mod tests {
             }
         }
         let exp = [
-            (0x26u8, 0x02u8, 0x012Cu16, 0x0096u16),
+            (0x08u8, 0xC8u8, 0x0038u16, 0x9CE3u16),
         ];
         assert_eq!(assembled.len(), 1);
         for (i, rec) in assembled.iter().enumerate() {
