@@ -157,6 +157,22 @@ advapi32, setupapi, cfgmgr32, uxtheme, dwmapi, opengl32, bcryptprimitives) via
 Released **v0.3.7** (pending: bump + run). Next: run the v0.3.7 Windows release
 on the Win7 host and confirm startup (then continue MPPS fake-ECU testing).
 
+### Session 22 (2026-11-18) — Windows release under Wine (prefix /home/ilija/Bottles/Programs/)
+
+User asked to test the Windows release under Wine using prefix
+`/home/ilija/Bottles/Programs/` (after noting it may not run under wine at all).
+
+Run: `WINEPREFIX=/home/ilija/Bottles/Programs/ wine dist/dde3-toolkit-windows-x86_64.exe`
+Result: reproducible, exit 1. With `WINEDEBUG=+loaddll`, kernel32/user32/gdi32/
+combase/ole32 all load as wine builtins with **no missing-DLL errors** — the
+v0.3.7 delay-load set is loading cleanly under wine. Process then died with
+`virtual:virtual_setup_exception stack overflow` (wine-internal crash; likely
+GUI/GL-related under wine, not a missing DLL).
+
+Conclusion: the missing-import startup blockers appear resolved at the loader
+level; full GUI startup validation still pending (bare-metal Win7 host test
+remains the real acceptance check).
+
 ## ← CURRENT TASK (take over from here)
 
 **Real-car verification of the rewritten `read_dtcs()` (session 12).**
