@@ -619,6 +619,32 @@ worker calls the identical `write_full`/`read_full` with pacing 0 that the
 bench pty E2E proved in Session 36 (36.1 s write / 24.3 s read, byte-exact).
 89 tests passing, clippy clean. FINDINGS §5 pacing note updated.
 
+### Session 38 (2026-11-18) — live Hz counter: producer-side 1 s window
+
+User report: the live-logging Hz counter read unrealistically high at fast
+baud, and at 9600 it overshot then took a long time to settle to the real
+~8–9 Hz. Root cause: the rate was measured on the **UI thread** —
+`dt = now - live_last` with `now` taken when the message was *processed*,
+not when the cycle *completed*. egui drains the channel in frame-sized
+bursts (~60 fps): at fast baud (100+ Hz producer rate) several `Msg::Live`
+land in one frame, microseconds apart → `dt ≈ 0` → `hz = 1/dt` in the
+hundreds of thousands, and the 0.8/0.2 EMA (first sample taken as-is,
+`live_last` initialized at app construction) pinned the display high and
+decayed spikes over ~15 samples.
+
+Fix (`src/app.rs`): the rate is now measured in the **live thread**, where
+the cycle time is real. `live_rate_update()` keeps a 1 s sliding window of
+cycle-completion stamps and returns the true mean rate — (n−1) intervals /
+window span; 0.0 until two samples. `Msg::Live` carries the Hz
+(`Live(Vec<(u16,u16)>, f32)`); the UI just displays it (keeps the previous
+value for the 0.0 first sample). `live_last` removed. Being a plain window
+average it cannot overshoot, and it shows the real number after a few
+samples (exact from sample 2 at steady cycle time; fast-start anomalies age
+out of the window within 1 s).
+
+Tests: 91 passing (+2: `app::tests::live_rate_window_is_the_true_mean`,
+`live_rate_window_ages_out_fast_start`). Clippy clean.
+
 ## ← CURRENT TASK (take over from here)
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU
