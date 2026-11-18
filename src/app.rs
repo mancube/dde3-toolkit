@@ -8,6 +8,7 @@
 //! (`12 05 14 01` count, `12 05 04 00` entry, `12 05 04 01` shadow,
 //! `12 04 05` clear) with the German text tables in `crate::dtc`.
 
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -227,7 +228,9 @@ enum Msg {
     /// clear `busy` / `active_job`, or the running job's progress bar
     /// disappears the moment the snapshot arrives.
     BatterySnapshot(f64),
-    Live(Vec<(u16, u16)>),
+    /// Live values + the producer-measured polling rate (Hz, 1 s sliding
+    /// window in the live thread; 0.0 only on the first sample of a session).
+    Live(Vec<(u16, u16)>, f32),
     LogProgress(usize),
     /// Fast-baud (0x91) switch succeeded; payload = the rate the port now runs at.
     FastBaud(u32),
@@ -277,7 +280,6 @@ pub struct App {
     live_values: Vec<f64>,
     live_history: Vec<Vec<f32>>,
     live_enabled: Vec<bool>,
-    live_last: Instant,
     live_rate: f32,
     live_log: Arc<Mutex<Option<LogWriter>>>,
     logging: bool,
@@ -372,7 +374,6 @@ impl App {
             live_values: vec![0.0; LIVE_VARS.len()],
             live_history: vec![Vec::new(); LIVE_VARS.len()],
             live_enabled: LIVE_VARS.iter().map(|v| v.default_on).collect(),
-            live_last: Instant::now(),
             live_rate: 0.0,
             live_log: Arc::new(Mutex::new(None)),
             logging: false,
@@ -615,17 +616,12 @@ impl App {
                 Msg::LogProgress(rows) => {
                     self.log_rows = rows;
                 }
-                Msg::Live(vals) => {
-                    let now = Instant::now();
-                    let dt = now.duration_since(self.live_last).as_secs_f32();
-                    self.live_last = now;
-                    if dt > 0.0 {
-                        let hz = 1.0 / dt;
-                        self.live_rate = if self.live_rate == 0.0 {
-                            hz
-                        } else {
-                            self.live_rate * 0.8 + hz * 0.2
-                        };
+                Msg::Live(vals, hz) => {
+                    // Producer-measured cycle rate (1 s sliding window in the
+                    // live thread). 0.0 only on the first sample of a session
+                    // — keep the previous display value then.
+                    if hz > 0.0 {
+                        self.live_rate = hz;
                     }
                     for (id, raw) in vals {
                         if let Some(i) = LIVE_VARS.iter().position(|v| v.id == id) {
@@ -877,6 +873,10 @@ impl App {
         self.active_job = Some(Job::Full);
         self.job_started = Some(Instant::now());
         let path = PathBuf::from(self.read_path.clone());
+        // At a fast baud the wire is fast enough for back-to-back frames —
+        // the 3 ms/byte pacing (a 9600 habit) would dominate the 9-byte
+        // request frames (same rule as bench and the live loop).
+        let fast = self.fast_baud_active.is_some();
         self.start(move |link, tx| {
             let mut guard = lock_or_recover(&link);
             let Some(k) = guard.as_mut() else {
@@ -892,9 +892,11 @@ impl App {
                     format!("Reading {done} / {total} bytes"),
                 ));
             };
+            k.set_write_delay(if fast { 0 } else { 3 });
             // read_full retries once internally on a non-link error
             // (20 ms silence) — the same recovery the CLI gets.
             let result = k.read_full(&mut progress);
+            k.set_write_delay(3);
             let logs = k.take_logs();
             for l in logs {
                 let _ = tx.send(Msg::Log(l));
@@ -928,6 +930,8 @@ impl App {
         self.active_job = Some(Job::Cal);
         self.job_started = Some(Instant::now());
         let path = PathBuf::from(self.cal_path.clone());
+        // Same fast-baud pacing rule as the full read (see start_read).
+        let fast = self.fast_baud_active.is_some();
         self.start(move |link, tx| {
             let mut guard = lock_or_recover(&link);
             let Some(k) = guard.as_mut() else {
@@ -943,9 +947,11 @@ impl App {
                     format!("Reading calibration {done} / {total} bytes"),
                 ));
             };
+            k.set_write_delay(if fast { 0 } else { 3 });
             // read_range retries once internally on a non-link error
             // (20 ms silence) — the same recovery the CLI gets.
             let result = k.read_range(CAL_START, CAL_LEN, &mut progress);
+            k.set_write_delay(3);
             let logs = k.take_logs();
             for l in logs {
                 let _ = tx.send(Msg::Log(l));
@@ -990,7 +996,11 @@ impl App {
         let Some(image) = self.prepare_write_image() else {
             return;
         };
-        let fast = self.fast_write;
+        // Pacing 0 when the "fast write" checkbox is set OR the 0x91 link is
+        // already at the fast baud — at 124800 the 3 ms/byte WinKFP pacing
+        // (a 9600 habit) would dominate: a 73-byte frame takes 219 ms of
+        // pacing vs 5.9 ms of wire (same rule as bench and the live loop).
+        let fast = self.fast_write || self.fast_baud_active.is_some();
         self.stop_live();
         self.active_job = Some(Job::Write);
         self.job_started = Some(Instant::now());
@@ -1010,8 +1020,8 @@ impl App {
             };
             k.set_silence(10);
             k.set_write_delay(3);
-            // DDE3 K-line is fixed at 9600 8E1; `fast` only drops the
-            // inter-byte pause (unverified on real hardware).
+            // `fast` (checkbox or fast-baud link) drops the inter-byte pause;
+            // the checkbox-only-at-9600 case is unverified on real hardware.
             let result = k.write_full(&image, 9600, if fast { 0 } else { 3 }, &mut progress);
             k.set_write_delay(3);
             let logs = k.take_logs();
@@ -1045,7 +1055,8 @@ impl App {
         let Some(image) = self.prepare_write_image() else {
             return;
         };
-        let fast = self.fast_write;
+        // Same fast-baud pacing rule as the full write (see start_write).
+        let fast = self.fast_write || self.fast_baud_active.is_some();
         self.stop_live();
         self.active_job = Some(Job::WriteCal);
         self.job_started = Some(Instant::now());
@@ -1065,8 +1076,8 @@ impl App {
             };
             k.set_silence(10);
             k.set_write_delay(3);
-            // DDE3 K-line is fixed at 9600 8E1; `fast` only drops the
-            // inter-byte pause (unverified on real hardware).
+            // `fast` (checkbox or fast-baud link) drops the inter-byte pause;
+            // the checkbox-only-at-9600 case is unverified on real hardware.
             let result = k.write_calibration(&image, 9600, if fast { 0 } else { 3 }, &mut progress);
             k.set_write_delay(3);
             let logs = k.take_logs();
@@ -1347,6 +1358,15 @@ impl App {
         let fast9600 = self.fast9600.clone();
         thread::spawn(move || {
             let mut reported = false;
+            // Cycle-completion stamps for the Hz counter. The rate must be
+            // measured HERE, where the cycle time is real: the UI thread
+            // processes Msg::Live in frame-sized bursts (~60 fps), so a
+            // consumer-side dt spikes to ~1/dt≈∞ whenever two messages land
+            // in one frame — the old counter read "unrealistically high" at
+            // fast baud for exactly that reason. A 1 s sliding window gives
+            // the true mean rate (n-1 intervals over the span): no overshoot
+            // by construction, and it converges within ~1 s of starting.
+            let mut cycles: VecDeque<Instant> = VecDeque::new();
             while !stop.load(Ordering::Relaxed) {
                 let (pairs, logs, link_error) = {
                     let mut guard = lock_or_recover(&link);
@@ -1416,6 +1436,7 @@ impl App {
                 }
                 if let Some(v) = pairs {
                     reported = false;
+                    let hz = live_rate_update(&mut cycles, Instant::now());
                     let mut rows = None;
                     if let Some(w) = lock_or_recover(&log).as_mut() {
                         w.write_row(&v);
@@ -1424,7 +1445,7 @@ impl App {
                     if let Some(rows) = rows {
                         let _ = tx.send(Msg::LogProgress(rows));
                     }
-                    let _ = tx.send(Msg::Live(v));
+                    let _ = tx.send(Msg::Live(v, hz));
                 }
                 // Poll gap: default 55 ms — the original WinKFP tester gap.
                 // Back-to-back (1 ms) was faster but is flaky in the car, so it
@@ -4343,4 +4364,74 @@ fn pad_calibration(cal: &[u8]) -> Vec<u8> {
     let mut full = vec![0xFFu8; IMAGE_SIZE];
     full[CAL_START..CAL_START + CAL_LEN].copy_from_slice(cal);
     full
+}
+
+/// Producer-side polling-rate estimator for the live loop. Records a
+/// cycle-completion stamp and returns the TRUE mean rate (Hz) over the last
+/// second of cycles: (n-1) intervals divided by the window span. Returns
+/// 0.0 until two samples exist.
+///
+/// Must be called from the live thread, where the cycle time is real: the
+/// UI thread processes `Msg::Live` in frame-sized bursts (~60 fps), so a
+/// consumer-side `dt` spikes to ~1/dt≈∞ whenever two messages land in one
+/// frame — the old counter read "unrealistically high" at fast baud for
+/// exactly that reason. Being a plain window average, it cannot overshoot
+/// the real rate and converges within ~1 s of starting.
+fn live_rate_update(stamps: &mut VecDeque<Instant>, now: Instant) -> f32 {
+    stamps.push_back(now);
+    while let Some(&front) = stamps.front() {
+        if now.duration_since(front) > Duration::from_secs(1) {
+            stamps.pop_front();
+        } else {
+            break;
+        }
+    }
+    match stamps.front() {
+        Some(&first) if stamps.len() >= 2 => {
+            (stamps.len() - 1) as f32 / now.duration_since(first).as_secs_f32().max(1e-3)
+        }
+        _ => 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_rate_window_is_the_true_mean() {
+        let mut stamps = VecDeque::new();
+        let t0 = Instant::now();
+        assert_eq!(live_rate_update(&mut stamps, t0), 0.0, "first sample: no rate yet");
+        // ~50 ms per cycle → the 1 s window average must settle near 20 Hz
+        // and never overshoot it (it is the plain mean of what happened).
+        let mut hz = 0.0;
+        for _ in 0..8 {
+            thread::sleep(Duration::from_millis(50));
+            hz = live_rate_update(&mut stamps, Instant::now());
+        }
+        assert!((14.0..28.0).contains(&hz), "expected ~20 Hz, got {hz}");
+    }
+
+    #[test]
+    fn live_rate_window_ages_out_fast_start() {
+        // Overshoot scenario: a few fast cycles at the start must age out of
+        // the 1 s window instead of pinning the counter high (the old EMA
+        // decayed a spike over ~15 samples).
+        let mut stamps = VecDeque::new();
+        let t0 = Instant::now();
+        let mut hz = live_rate_update(&mut stamps, t0);
+        for _ in 0..3 {
+            thread::sleep(Duration::from_millis(10));
+            hz = live_rate_update(&mut stamps, Instant::now());
+        }
+        assert!(hz > 50.0, "fast start should read fast: {hz} Hz");
+        // Then slow to ~100 ms cycles; within the next second the window
+        // must reflect the slow reality, not the fast start.
+        for _ in 0..10 {
+            thread::sleep(Duration::from_millis(100));
+            hz = live_rate_update(&mut stamps, Instant::now());
+        }
+        assert!((5.0..20.0).contains(&hz), "expected ~10 Hz after aging, got {hz}");
+    }
 }

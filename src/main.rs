@@ -76,6 +76,11 @@ fn print_usage() {
     eprintln!("    [--out <file>] [--duration <secs>] [--data-delay <ms>]");
     eprintln!("    [--reply-delay <ms>] [--dump <image.bin>]");
     eprintln!("    [--flash <image.bin>]");
+    eprintln!("    [--patched-baud 38400|125000]");
+    eprintln!("                             (configure the fake ECU like the patched real ECU:");
+    eprintln!("                             it accepts the 0x91 baud change and switches the link —");
+    eprintln!("                             125000 runs at the S0BG divisor 124800 — so `baud` and");
+    eprintln!("                             `bench --fast-baud` fast-baud reads/writes can be tested)");
     eprintln!("                             (default port /dev/ttyUSB0; --dump writes the");
     eprintln!("                             reconstructed flash image the peer programmed —");
     eprintln!("                             the 192 KB 0x10000..0x40000 test write is padded");
@@ -87,7 +92,9 @@ fn print_usage() {
     eprintln!("    [--info|--read|--read-cal|--write|--write-cal|--live]");
     eprintln!("    [--image <path>] [--out <path>] [--fast-baud 38400|125000] [--duration <s>]");
     eprintln!("    [--fast-9600] (--live only: back-to-back polling + 1 ms/byte pacing;");
-    eprintln!("    default is the original 55 ms / 3 ms timing; --fast-baud needs the patch)");
+    eprintln!("    default is the original 55 ms / 3 ms timing; --fast-baud needs the patch,");
+    eprintln!("    and at the fast rate TX pacing is 0 — back-to-back frames, the 3 ms/byte");
+    eprintln!("    WinKFP pacing is a 9600 habit that would erase the speedup)");
     eprintln!("  checksum <image.bin>       Verify and optionally correct flash checksums");
     eprintln!("  patches [list|show|apply|revert|verify|correct] [name]");
     eprintln!("                             Firmware patch manifests from ./patches (baud 0x91,");
@@ -184,6 +191,9 @@ fn run() -> Result<()> {
     let mut bench_dump: Option<String> = None;
     // `respond --flash <file>`: serve this real flash dump from the fake ECU.
     let mut respond_flash: Option<String> = None;
+    // `respond --patched-baud <rate>`: configure the fake ECU like the
+    // patched real ECU (0x91 accepted, the link switches — 38400|125000).
+    let mut respond_baud_patch: Option<u32> = None;
 
     let mut i = 2;
     while i < args.len() {
@@ -262,6 +272,15 @@ fn run() -> Result<()> {
                 i += 1;
                 respond_flash = Some(args.get(i).cloned().context("--flash requires a value")?);
             }
+            "--patched-baud" => {
+                i += 1;
+                respond_baud_patch = Some(
+                    args.get(i)
+                        .context("--patched-baud requires a value")?
+                        .parse::<u32>()
+                        .with_context(|| format!("invalid rate: {}", args[i]))?,
+                );
+            }
             _ => {}
         }
         i += 1;
@@ -295,6 +314,15 @@ fn run() -> Result<()> {
             Ok(())
         }
         "respond" => {
+            // Only the two shipped 0x91 patch images exist (e46_baud38400.bin
+            // / e46_baud125000.bin) — the fake ECU mirrors one of them.
+            if let Some(rate) = respond_baud_patch {
+                if !matches!(rate, 38_400 | 125_000) {
+                    anyhow::bail!(
+                        "--patched-baud takes 38400 or 125000 (the two shipped 0x91 patch images), got {rate}"
+                    );
+                }
+            }
             let opts = respond::RespondOptions {
                 port,
                 baud,
@@ -304,6 +332,7 @@ fn run() -> Result<()> {
                 reply_delay_ms,
                 dump: bench_dump.clone().map(PathBuf::from),
                 flash: respond_flash.map(PathBuf::from),
+                baud_patch: respond_baud_patch,
             };
             respond::run(&opts)?;
             Ok(())
@@ -764,7 +793,7 @@ fn patch_positionals(args: &[String]) -> Vec<String> {
     while i < args.len() {
         match args[i].as_str() {
             "--image" | "--out" | "--port" | "--baud" | "--data-delay" | "--duration"
-            | "--rate" | "--fast-baud" => i += 2,
+            | "--rate" | "--fast-baud" | "--patched-baud" => i += 2,
             s if s.starts_with("--") => i += 1,
             s => {
                 pos.push(s.to_string());

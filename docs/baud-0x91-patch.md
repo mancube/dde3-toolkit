@@ -39,3 +39,13 @@ Full docs + applier + patched image:
 3. `dde3-toolkit baud --port /dev/ttyUSB1` → expect IDENT reply @38.4k
 4. power cycle → `ident` again at 9600 (revert works)
 
+**Fake-ECU test rig (session 34):** `respond --patched-baud <38400|125000>`
+configures the fake ECU like the patched real ECU — the `0x91` is accepted,
+the port switches to the patch's rate (125000 → 124800, S0BG divisor) and
+the ACK goes out at the **new** rate, so the tester side (`baud --rate …`,
+`bench --fast-baud …` read/write/live) runs the full flow end-to-end over a
+pty loopback or dual-adapter bench without a car. Verified: `baud` switch +
+IDENT at both rates, ~89 Hz live polling, 256 KB fast read byte-exact, fast
+write reconstructs (`--dump`) to the exact source span. See
+`docs/respond-mode.md` §9.
+

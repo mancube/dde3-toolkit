@@ -545,6 +545,106 @@ Verified end-to-end against the fake ECU over a socat pty pair
 199 lines captured, 194 of them TX/RX frames, byte-for-byte the full session.
 87 tests passing; build warning-free.
 
+### Session 35 (2026-11-18) — `respond --patched-baud`: fake ECU mirrors the 0x91 baud patch
+
+The fake ECU can now behave like the **patched real ECU**, so the toolkit's
+own fast-baud path is testable end-to-end without a car (branch
+`feat/respond-baud-91`):
+
+- `respond --patched-baud <38400|125000>` (only the two shipped patch rates
+  are accepted): the `0x91` is accepted, the port reopens at the patch's
+  fixed rate **before** the ACK is transmitted (125000 → 124800, the S0BG
+  divisor — the same `reopen_divisor` mapping the tester side uses), so the
+  ACK rides the line at the **new** rate, exactly like the real patch
+  (S0BG write, then ACK). The frame's baud field is ignored (v1 patches are
+  single-rate). The link stays at the new rate until `respond` is restarted
+  (= power cycle). Without the flag the legacy stub ACK stays, so `--sim`
+  fast-baud runs are unchanged.
+- Sim hooks: `SimEcu::set_baud_patch(rate)` + `take_baud_switch()` (pending
+  switch, consumed once); `respond` applies the port reopen +
+  `clear(ClearBuffer::All)`, logs `BAUD old -> new` and prints "link left at
+  …" at exit.
+- E2E over a socat pty pair: `baud --rate 125000` / `38400` (switch + IDENT
+  verify), `bench --fast-baud 125000 --live` (~89 Hz vs ~2.5 Hz at 9600),
+  full 256 KB `--read` byte-exact vs the served image (24 s with
+  `--data-delay 0`), full `--write` → `--dump` reconstructs the exact source
+  span (boot area 0x0..0x10000 FF-padded, by design).
+- Tests: 89 passing (+2: `sim::tests::baud_patch_91_switches_link_and_acks`,
+  `baud_91_without_patch_keeps_stub_ack`). Docs: `docs/respond-mode.md` §9,
+  `docs/baud-0x91-patch.md` (fake-ECU test rig).
+
+### Session 36 (2026-11-18) — fast-baud write/read pacing fixed (bench)
+
+User report: the full write with the 125k patch active was **slower than at
+9600**. Root cause: the bench Write/Read arms passed the default
+`--data-delay 3` (ms/byte — a 9600-baud WinKFP habit) straight to
+`write_full` / the read loop even at 124800. A 73-byte `FLASH_SCHREIBEN`
+frame took 219 ms of pacing vs 5.9 ms of wire → 3072 frames ≈ 11.5 min,
+the 13× wire speedup fully masked. The Live loop and the GUI write job
+already zeroed pacing at fast baud (`if fast { 0 }`); bench was the outlier.
+
+Fix (`src/bench.rs`): when the 0x91 switch succeeds, `set_write_delay(0)` is
+applied for the whole run (covers the read path + bootstrap frames) and the
+Write/WriteCal arms pass the effective delay (0 at fast baud) to
+`write_full` / `write_calibration`, which re-set it from the argument.
+`WRITE_START` now logs the effective delay.
+
+Verified over the pty loopback with **default** flags (no `--data-delay`):
+full write 36.1 s (was ~11.5 min), dump byte-exact over the written span;
+full read 24.3 s, byte-exact. 89 tests passing, clippy clean.
+Docs: `docs/FINDINGS_flash_and_fast_ds2.md` §5 (pacing rule), bench usage
+line.
+
+### Session 37 (2026-11-18) — GUI full write at 125k still paced (fixed)
+
+User report: the GUI full write was still slow with the link at 125000.
+Root cause: the GUI write jobs keyed pacing off the `fast_write` checkbox
+only (`let fast = self.fast_write;`) — the "fast write" toggle is a 9600-baud
+inter-byte-pause switch, unrelated to the 0x91 link state. With the link at
+124800 but the checkbox unticked, the write ran 3 ms/byte → ~11.5 min.
+The GUI read jobs didn't touch pacing at all (inherited the 3 ms default).
+
+Fix (`src/app.rs`): all four job starters now compute the effective pacing
+flag before spawning the worker — `start_write` / `start_write_cal`:
+`fast = fast_write || fast_baud_active.is_some()`; `start_read` /
+`start_read_cal`: `fast = fast_baud_active.is_some()` with
+`set_write_delay(if fast { 0 } else { 3 })` around the read (reset after,
+mirroring the write jobs). `fast_baud_active` is set by `Msg::FastBaud`
+(CLI `--fast-baud` on connect or the Live-tab button) and cleared on
+failure / link loss / reconnect, so it is the authoritative "link is fast"
+state. The live loop already did this (unchanged).
+
+Not E2E'd through the egui window (needs a display + UI driving); the
+worker calls the identical `write_full`/`read_full` with pacing 0 that the
+bench pty E2E proved in Session 36 (36.1 s write / 24.3 s read, byte-exact).
+89 tests passing, clippy clean. FINDINGS §5 pacing note updated.
+
+### Session 38 (2026-11-18) — live Hz counter: producer-side 1 s window
+
+User report: the live-logging Hz counter read unrealistically high at fast
+baud, and at 9600 it overshot then took a long time to settle to the real
+~8–9 Hz. Root cause: the rate was measured on the **UI thread** —
+`dt = now - live_last` with `now` taken when the message was *processed*,
+not when the cycle *completed*. egui drains the channel in frame-sized
+bursts (~60 fps): at fast baud (100+ Hz producer rate) several `Msg::Live`
+land in one frame, microseconds apart → `dt ≈ 0` → `hz = 1/dt` in the
+hundreds of thousands, and the 0.8/0.2 EMA (first sample taken as-is,
+`live_last` initialized at app construction) pinned the display high and
+decayed spikes over ~15 samples.
+
+Fix (`src/app.rs`): the rate is now measured in the **live thread**, where
+the cycle time is real. `live_rate_update()` keeps a 1 s sliding window of
+cycle-completion stamps and returns the true mean rate — (n−1) intervals /
+window span; 0.0 until two samples. `Msg::Live` carries the Hz
+(`Live(Vec<(u16,u16)>, f32)`); the UI just displays it (keeps the previous
+value for the 0.0 first sample). `live_last` removed. Being a plain window
+average it cannot overshoot, and it shows the real number after a few
+samples (exact from sample 2 at steady cycle time; fast-start anomalies age
+out of the window within 1 s).
+
+Tests: 91 passing (+2: `app::tests::live_rate_window_is_the_true_mean`,
+`live_rate_window_ages_out_fast_start`). Clippy clean.
+
 ## ← CURRENT TASK (take over from here)
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU
@@ -756,5 +856,8 @@ UI/UX polish requested, no behaviour changes.
 3. **Break-mode T2.1 capture** — `break-probe` + `tools/monitor.py` on
    `/dev/ttyUSB0` to confirm the on-wire 4-byte layout, then wire the
    byte-addressed reads into CLI/GUI (`docs/break-mode.md`).
-4. **0x91 patch bench test** — flash `e46_baud91.bin`, `baud` subcommand,
-   power-cycle revert check (`docs/baud-0x91-patch.md`).
+4. ~~**0x91 patch bench test**~~ — the fake-ECU half is done (session 35:
+   `respond --patched-baud` mirrors the patch, `baud` / `bench --fast-baud`
+   verified end-to-end over a pty loopback). On-car half remains: flash
+   `e46_baud125000.bin`, `baud --rate 125000`, power-cycle revert check
+   (`docs/baud-0x91-patch.md`).

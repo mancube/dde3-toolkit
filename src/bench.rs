@@ -82,6 +82,17 @@ pub fn run(args: BenchArgs) -> Result<()> {
         false
     };
 
+    // At a fast baud the wire is fast enough for back-to-back frames — the
+    // 3 ms/byte WinKFP pacing (a 9600-baud habit) would dominate the
+    // transfer: a 73-byte write frame would take 219 ms of pacing alone vs
+    // 5.9 ms of wire, erasing the speedup. Same rule as the live loop and
+    // the GUI write job (pacing 0 at fast baud). Covers the read path and
+    // the bootstrap frames; the write arms pass the same value explicitly
+    // (write_full/write_calibration re-set the delay from their argument).
+    if fast_active {
+        k.set_write_delay(0);
+    }
+
     let result = (|| -> Result<()> {
         match args.mode {
             Mode::Info => Ok(()),
@@ -158,9 +169,16 @@ pub fn run(args: BenchArgs) -> Result<()> {
                 let raw = std::fs::read(&path)
                     .with_context(|| format!("cannot read {}", path.display()))?;
                 let image = prepare_image(&raw, args.mode)?;
+                // Fast baud: back-to-back frames (pacing 0) — see the
+                // set_write_delay(0) above; write_full re-sets the delay
+                // from this argument, so pass the effective value.
+                let delay = if fast_active { 0 } else { args.data_delay };
                 eprintln!(
-                    "WRITE_START mode={:?} baud={} delay={}ms",
-                    args.mode, args.baud, args.data_delay
+                    "WRITE_START mode={:?} baud={} delay={}ms{}",
+                    args.mode,
+                    args.baud,
+                    delay,
+                    if fast_active { " (fast baud: back-to-back)" } else { "" }
                 );
                 let mut progress = |done: usize, total: usize| {
                     if done % 0x8000 < 0x80 {
@@ -169,10 +187,10 @@ pub fn run(args: BenchArgs) -> Result<()> {
                 };
                 match args.mode {
                     Mode::Write => {
-                        k.write_full(&image, args.baud, args.data_delay, &mut progress)?
+                        k.write_full(&image, args.baud, delay, &mut progress)?
                     }
                     Mode::WriteCal => {
-                        k.write_calibration(&image, args.baud, args.data_delay, &mut progress)?
+                        k.write_calibration(&image, args.baud, delay, &mut progress)?
                     }
                     _ => unreachable!(),
                 }
