@@ -61,10 +61,10 @@ docs: README rewrite + HANDOVER §18 (2026-11-11 status)
 Releases are **git-tagged binary bundles in `dist/`**, not CI artifacts:
 
 1. `scripts/release.sh <version>` does everything: bumps the `Cargo.toml`
-   version, builds the Linux and Windows release binaries into `dist/` with
-   `.sha256` files, commits `dist/` + `Cargo.toml`, tags `v<version>`,
+   version, builds the Linux release binary into `dist/` with a `.sha256`
+   file, commits `dist/` + `Cargo.toml`, tags `v<version>`,
    pushes branch + tag, and creates the **Gitea release** (via `gt`) with
-   the four `dist/` files as assets.
+   the two `dist/` files as assets.
 2. Release commit message is always `release: v<version>` — the changes
    themselves are committed separately beforehand, per the rules above.
 3. Never hand-edit files in `dist/`; only the release script touches them.
