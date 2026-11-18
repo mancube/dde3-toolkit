@@ -813,6 +813,66 @@ mod tests {
         assert_eq!(rk2[2], 0xA0, "retried key unlocks");
     }
 
+    /// Galletto's full write is **two sessions** (`testwrite.txt`): program
+    /// area 0x10000..0x38000, `DIAGNOSE_ENDE`, re-auth from scratch, cal
+    /// area 0x38000..0x40000. Verify the fake ECU enforces the re-auth:
+    /// after `DIAGNOSE_ENDE` a data write is NACKed until UPROG_EIN +
+    /// seed/key are repeated.
+    #[test]
+    fn two_phase_write_reauth_like_galletto() {
+        let mut s = SimEcu::new();
+
+        // Seed/key exchange; returns the key-check status byte.
+        let seed_key = |s: &mut SimEcu| -> u8 {
+            let z: u8 = 0x10;
+            let r = s.handle(&[0x12, 0x08, 0x90, 0x42, 0x4D, 0x57, z]);
+            let mut frame = r.clone();
+            frame.push(crate::protocol::xor_cs(&r));
+            let mut key = [0u8; 4];
+            for i in 0..4usize {
+                key[i] = frame[(0x12 + i) % 46]
+                    .wrapping_add(frame[(z as usize + i) % 46])
+                    .wrapping_add(frame[(0x29 + i) % 46]);
+            }
+            s.handle(&[0x12, 0x08, 0x90, key[0], key[1], key[2], key[3]])[2]
+        };
+
+        // Phase 1: UPROG_EIN + seed/key, erase @0x10000, write 64 B.
+        assert_eq!(s.handle(&[0x12, 0x04, 0x0D])[2], 0xA0, "phase-1 UPROG_EIN");
+        assert_eq!(seed_key(&mut s), 0xA0, "phase-1 key");
+        assert_eq!(
+            s.handle(&[0x12, 0x09, 0x07, 0x06, 0x01, 0x00, 0x00, 0x00])[2],
+            0xA0,
+            "erase @0x10000"
+        );
+        let mut w1 = vec![0x12, 0x49, 0x07, 0x02, 0x01, 0x00, 0x00, 0x40];
+        w1.extend(std::iter::repeat(0xAA).take(64));
+        assert_eq!(s.handle(&w1)[2], 0xA0, "phase-1 write");
+
+        // DIAGNOSE_ENDE closes the session.
+        assert_eq!(s.handle(&[0x12, 0x04, 0x9F])[2], 0xA0, "DIAGNOSE_ENDE");
+
+        // Without re-auth the data write is NACKed (ECU left prog mode).
+        assert_eq!(s.handle(&w1)[2], 0xFF, "write after DIAGNOSE_ENDE -> NACK");
+
+        // Phase 2: full re-auth, erase @0x38000, write 64 B.
+        assert_eq!(s.handle(&[0x12, 0x04, 0x0D])[2], 0xA0, "phase-2 UPROG_EIN");
+        assert_eq!(seed_key(&mut s), 0xA0, "phase-2 key");
+        assert_eq!(
+            s.handle(&[0x12, 0x09, 0x07, 0x06, 0x03, 0x80, 0x00, 0x00])[2],
+            0xA0,
+            "erase @0x38000"
+        );
+        let mut w2 = vec![0x12, 0x49, 0x07, 0x02, 0x03, 0x80, 0x00, 0x40];
+        w2.extend(std::iter::repeat(0xBB).take(64));
+        assert_eq!(s.handle(&w2)[2], 0xA0, "phase-2 write");
+
+        // Both areas landed in the reconstructed image.
+        let img = s.flash_image();
+        assert!(img[0x10000..0x10040].iter().all(|&b| b == 0xAA));
+        assert!(img[0x38000..0x38040].iter().all(|&b| b == 0xBB));
+    }
+
     #[test]
     fn aif_read_46_bytes_from_cal_7cb2() {
         let mut s = SimEcu::new();

@@ -399,16 +399,54 @@ the dump lines up with a full flash read.
 - tests: `dump_image_pads_the_192kb_test_write_with_ff`,
   `dump_image_keeps_other_spans_compact` (86 passing).
 
+### Session 30 (2026-11-21) — write path now mimics Galletto's two-session flow
+
+User pointed out the inconsistency: Galletto's full write is **two
+re-authenticated sessions** (see `captures/galletto capture with respond
+tool/testwrite.txt` @ ~line 7725): program area 0x10000..0x38000, then
+`DIAGNOSE_ENDE` (`12 04 9F`), then IDENT/UPROG_EIN/AIF/SEED_KEY again, erase
+@0x38000, calibration area 0x38000..0x40000, `DIAGNOSE_ENDE`. The toolkit's
+`write_full` had done everything in one session with a single erase and a
+`07 0F` write-end (which Galletto never sends).
+
+- `Kline::write_full` restructured: two phases
+  `(0x10000,0x38000)` then `(0x38000,0x40000)`, each = `begin_flash_session`
+  → per-area erase → **64-byte** blocks (was 128; 64 is the only
+  real-ECU-proven size) → `DIAGNOSE_ENDE` via `request_filtered(
+  is_not_live_broadcast)`. `write_end`/`07 0F` removed from the write flow.
+  Progress stays continuous over the full 192 KB.
+- `Kline::write_calibration` = Galletto's phase 2 on its own (64-byte blocks,
+  ends with `DIAGNOSE_ENDE`).
+- New sim test `two_phase_write_reauth_like_galletto`: proves the fake ECU
+  NACKs a data write after `DIAGNOSE_ENDE` until UPROG_EIN + seed/key are
+  repeated (87 passing).
+- E2E verified on a pty loopback (socat pair): `bench --write
+  captures/actual_flash.bin` vs `respond --flash` — respond log shows 2×
+  UPROG_EIN/SEED_KEY/LOESCHEN/DIAGNOSE_ENDE, exactly 3072 writes
+  (2560+512), no `07 0F`; reconstructed dump byte-identical to the source
+  image over 0x10000..0x40000 (boot area FF-padded per session 29's rule).
+- Docs: FINDINGS §2.1 rewritten (two-session flow, per-phase frame counts),
+  README feature line updated.
+
 ## ← CURRENT TASK (take over from here)
 
-**Real-car verification of the session-28 parser fix.** The LEN-validated
-`FrameParser` + echo-wait retransmit were verified end-to-end against the
-fake ECU (`respond --flash`), not yet against the real car. Next on-car:
+**Real-car verification of the session-28 parser fix and the session-30
+two-session write flow.** The LEN-validated `FrameParser` + echo-wait
+retransmit were verified end-to-end against the fake ECU (`respond --flash`),
+and the two-session write (program → DIAGNOSE_ENDE → re-auth → calibration)
+was verified against the fake ECU via a pty loopback — neither has been
+verified against the real car yet. Next on-car:
 
 1. `dde3-toolkit read /tmp/full.bin --port /dev/ttyUSB1` — the bootstrap
    (IDENT → UPROG_EIN → AIF → SEED_KEY) must pass on the first try (it used
    to need spamming), and the 256 KB chunk loop must run clean.
-2. If the real ECU ever replies with a frame whose LEN disagrees with the
+2. **Write verification (destructive — do it last, with a verified backup
+   in hand):** `dde3-toolkit write <backup>.bin --port /dev/ttyUSB1` must
+   show the two phases in the log: program area 0x10000..0x38000,
+   DIAGNOSE_ENDE, re-auth (second UPROG_EIN + SEED_KEY), erase @0x38000,
+   calibration 0x38000..0x40000, DIAGNOSE_ENDE — 3072 × 64-byte writes, no
+   `07 0F`.
+3. If the real ECU ever replies with a frame whose LEN disagrees with the
    trailing-XOR position, the log will show a `no response` bail — the
    parser drops one byte and resyncs, so look for repeated 1-byte drops in
    the RX log before changing anything.

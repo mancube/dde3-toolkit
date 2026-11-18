@@ -122,24 +122,40 @@ field is 1 byte → ≤255 per frame; BLOCKLAENGE_MAX's 0xFFF7 is the max *aggre
 length, not a per-frame cap). The write path stays gated behind typing WRITE +
 a verified backup.
 
-## 2.1 Full-write region — only `[0x10000, 0x40000)` (2026-11-17, Galletto)
+## 2.1 Full-write region — only `[0x10000, 0x40000)`, in **two sessions** (Galletto)
 
-The fakewrite session against the fake ECU
-(`captures/galletto capture with respond tool/fakewritegalleto.txt`) shows the
-full write touching exactly the program+calibration span:
+The Galletto full-write session (`captures/galletto capture with respond
+tool/testwrite.txt`, and `fakewritegalleto.txt`) writes the program area and
+the calibration area as **two separate, re-authenticated sessions**:
 
-- erase `12 09 07 06 01 00 00 00` @ 0x10000, then 3072 × 64-byte
-  `FLASH_SCHREIBEN` through 0x3FFC0 (program area `[0x10000, 0x38000)`);
-- erase `12 09 07 06 03 80 00 00` @ 0x38000, then 512 × 64-byte writes
-  through 0x3FFC0 (calibration area `[0x38000, 0x40000)`).
-- Reconstructed dump: **196608 bytes (`0x10000..0x40000`)** → `write.bin`.
+Phase 1 — program area `[0x10000, 0x38000)`:
+- IDENT / UPROG_EIN (retried), AIF read, SEED_KEY (seed + key)
+- erase `12 09 07 06 01 00 00 00` @ 0x10000
+- 2560 × 64-byte `FLASH_SCHREIBEN`, 0x10000..0x37FC0
+- `DIAGNOSE_ENDE` (`12 04 9F`) closes the session
 
-`Kline::write_full` therefore now erases/writes/writes-end at
-`FLASH_WRITE_START` = 0x10000 instead of 0x00000; the full read (`FLASH_LESEN`
-@0x0, 128-byte contiguous blocks, 2048 frames) and the calibration
-read/write (`0x38000..0x40000`) were verified to already match Galletto and
-were left alone. The CLI `--write` sim read-back compare is scoped to the
-written region `[FLASH_WRITE_START, IMAGE_SIZE)`.
+Phase 2 — calibration area `[0x38000, 0x40000)`:
+- session re-opened and **re-authenticated from scratch**: IDENT / UPROG_EIN
+  (retried), AIF read, SEED_KEY (fresh seed + key)
+- erase `12 09 07 06 03 80 00 00` @ 0x38000
+- 512 × 64-byte `FLASH_SCHREIBEN`, 0x38000..0x3FFC0
+- `DIAGNOSE_ENDE` closes the session
+
+There is **no `FLASH_SCHREIBEN_ENDE` (`07 0F`)** anywhere — each phase ends
+with `DIAGNOSE_ENDE`. Total: 3072 × 64-byte writes (2560 + 512).
+`Kline::write_full` therefore runs the two phases above (bootstrap →
+per-area erase → 64-byte blocks → DIAGNOSE_ENDE, then a full re-bootstrap for
+the calibration area); `Kline::write_calibration` is phase 2 on its own.
+The full read (`FLASH_LESEN` @0x0, 128-byte contiguous blocks, 2048 frames)
+and the calibration read were verified to already match Galletto and were
+left alone. The CLI `--write` sim read-back compare is scoped to the written
+region `[FLASH_WRITE_START, IMAGE_SIZE)`.
+
+Verified end-to-end against the fake ECU (pty loopback, `bench --write` vs
+`respond --flash`): the respond log shows exactly the two-phase structure
+(2× UPROG_EIN/SEED_KEY/LOESCHEN/DIAGNOSE_ENDE, 3072 writes, no `07 0F`) and
+the reconstructed dump is byte-identical to the source image over
+`0x10000..0x40000`.
 
 ## 3. Real-car capture confirms the rest (`captures/dde3newlog.txt`)
 

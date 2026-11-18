@@ -1259,12 +1259,23 @@ impl Kline {
         Ok(())
     }
 
-    /// Full flash write: full flasher session → erase → write blocks → end.
+    /// Full flash write, mimicking Galletto's **two-session** flow
+    /// (`captures/galletto capture with respond tool/testwrite.txt`):
     ///
-    /// Only the writable span `[FLASH_WRITE_START, IMAGE_SIZE)` —
-    /// `[0x10000, 0x40000)` — is erased and written; the image bytes below
-    /// 0x10000 (boot block / gap) are never programmed. Matches Galletto's
-    /// full-write flow (`fakewritegalleto.txt`).
+    /// 1. **Program area** `[0x10000, 0x38000)`: flasher session
+    ///    (IDENT → UPROG_EIN → AIF read → SEED_KEY) → erase @0x10000 →
+    ///    64-byte `FLASH_SCHREIBEN` blocks → `DIAGNOSE_ENDE` (`12 04 9F`)
+    ///    closes the session.
+    /// 2. **Calibration area** `[0x38000, 0x40000)`: the session is
+    ///    re-opened and **re-authenticated from scratch** (IDENT → UPROG_EIN
+    ///    → AIF read → SEED_KEY) → erase @0x38000 → 64-byte blocks →
+    ///    `DIAGNOSE_ENDE`.
+    ///
+    /// Galletto never sends `FLASH_SCHREIBEN_ENDE` (`07 0F`); each phase
+    /// ends with `DIAGNOSE_ENDE`. Only the writable span
+    /// `[FLASH_WRITE_START, IMAGE_SIZE)` — `[0x10000, 0x40000)` — is erased
+    /// and written; the image bytes below 0x10000 (boot block / gap) are
+    /// never programmed.
     pub fn write_full(
         &mut self,
         image: &[u8],
@@ -1276,25 +1287,36 @@ impl Kline {
             bail!("image must be exactly 256 KB");
         }
         self.set_write_delay(data_delay_ms);
-        // Full flasher session before touching flash (Galletto procedure:
-        // IDENT -> UPROG_EIN -> AIF read -> SEED_KEY), then erase → write → end.
-        self.begin_flash_session()?;
-        self.erase_flash(FLASH_WRITE_START as u32, 0x00)?;
-        thread::sleep(Duration::from_millis(100));
         let region_len = IMAGE_SIZE - FLASH_WRITE_START;
         let mut done = 0usize;
-        for start in (FLASH_WRITE_START..IMAGE_SIZE).step_by(0x80) {
-            let len = 0x80.min(IMAGE_SIZE - start);
-            self.write_block(start as u32, &image[start..start + len])?;
-            done += len;
-            progress(done, region_len);
+        // The two Galletto phases: program area, then calibration area.
+        for (start, end) in [(FLASH_WRITE_START, CAL_START), (CAL_START, IMAGE_SIZE)] {
+            // (Re-)open the flasher session and unlock. After phase 1's
+            // DIAGNOSE_ENDE the ECU is back in normal mode, so phase 2
+            // repeats the whole bootstrap (re-authentication).
+            self.begin_flash_session()?;
+            self.erase_flash(start as u32, 0x00)?;
+            thread::sleep(Duration::from_millis(100));
+            for off in (start..end).step_by(0x40) {
+                let len = 0x40.min(end - off);
+                self.write_block(off as u32, &image[off..off + len])?;
+                done += len;
+                progress(done, region_len);
+            }
+            // Close the session — Galletto sends no `07 0F` write-end, just
+            // DIAGNOSE_ENDE.
+            self.request_filtered(
+                &frame_diagnose_ende(),
+                Duration::from_secs(10),
+                is_not_live_broadcast,
+            )?;
+            thread::sleep(Duration::from_millis(100));
         }
-        self.write_end(FLASH_WRITE_START as u32)?;
         Ok(())
     }
 
     /// Calibration flash write: full flasher session → erase → write blocks →
-    /// end.
+    /// `DIAGNOSE_ENDE` (Galletto's phase-2 flow, 64-byte blocks).
     pub fn write_calibration(
         &mut self,
         image: &[u8],
@@ -1307,18 +1329,24 @@ impl Kline {
         }
         self.set_write_delay(data_delay_ms);
         // Full flasher session before touching flash (Galletto procedure:
-        // IDENT -> UPROG_EIN -> AIF read -> SEED_KEY), then erase → write → end.
+        // IDENT -> UPROG_EIN -> AIF read -> SEED_KEY), then erase → write.
         self.begin_flash_session()?;
         self.erase_flash(CAL_START as u32, 0x00)?;
         thread::sleep(Duration::from_millis(100));
         let mut done = 0usize;
-        for start in (0..CAL_LEN).step_by(0x80) {
-            let len = 0x80.min(CAL_LEN - start);
+        for start in (0..CAL_LEN).step_by(0x40) {
+            let len = 0x40.min(CAL_LEN - start);
             self.write_block(CAL_START as u32 + start as u32, &image[start..start + len])?;
             done += len;
             progress(done, CAL_LEN);
         }
-        self.write_end(CAL_START as u32)?;
+        // Galletto closes the session with DIAGNOSE_ENDE, not a `07 0F`
+        // write-end.
+        self.request_filtered(
+            &frame_diagnose_ende(),
+            Duration::from_secs(10),
+            is_not_live_broadcast,
+        )?;
         Ok(())
     }
 

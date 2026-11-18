@@ -21,9 +21,10 @@ captures. All of that work is written up in [`docs/`](docs) — start with
 - **Flash read** — full 256 KB or the 32 KB calibration region (0x38000–0x3FFFF);
   runs the full flasher session first (IDENT → UPROG_EIN → AIF read →
   SEED_KEY) before the `FLASH_LESEN` chunks, matching the Galletto read flow
-- **Flash write** — full image or calibration region; UPROG_EIN → erase →
-  block write → write-end, with progress reporting and a post-write
-  power-cycle step
+- **Flash write** — full image or calibration region, following Galletto's
+  two-session flow: program area (0x10000–0x38000) → `DIAGNOSE_ENDE` →
+  re-authenticate → calibration area (0x38000–0x40000); 64-byte blocks,
+  per-area erase, progress reporting and a post-write power-cycle step
 - **Fault codes (DTCs)** — read (4-step chunked protocol), freeze values,
   shadow values, fault texts (ORT/FArt tables embedded in the OEM
   `DDE30DS0.prg`), DS2 and K-line clear
