@@ -595,6 +595,30 @@ full read 24.3 s, byte-exact. 89 tests passing, clippy clean.
 Docs: `docs/FINDINGS_flash_and_fast_ds2.md` §5 (pacing rule), bench usage
 line.
 
+### Session 37 (2026-11-18) — GUI full write at 125k still paced (fixed)
+
+User report: the GUI full write was still slow with the link at 125000.
+Root cause: the GUI write jobs keyed pacing off the `fast_write` checkbox
+only (`let fast = self.fast_write;`) — the "fast write" toggle is a 9600-baud
+inter-byte-pause switch, unrelated to the 0x91 link state. With the link at
+124800 but the checkbox unticked, the write ran 3 ms/byte → ~11.5 min.
+The GUI read jobs didn't touch pacing at all (inherited the 3 ms default).
+
+Fix (`src/app.rs`): all four job starters now compute the effective pacing
+flag before spawning the worker — `start_write` / `start_write_cal`:
+`fast = fast_write || fast_baud_active.is_some()`; `start_read` /
+`start_read_cal`: `fast = fast_baud_active.is_some()` with
+`set_write_delay(if fast { 0 } else { 3 })` around the read (reset after,
+mirroring the write jobs). `fast_baud_active` is set by `Msg::FastBaud`
+(CLI `--fast-baud` on connect or the Live-tab button) and cleared on
+failure / link loss / reconnect, so it is the authoritative "link is fast"
+state. The live loop already did this (unchanged).
+
+Not E2E'd through the egui window (needs a display + UI driving); the
+worker calls the identical `write_full`/`read_full` with pacing 0 that the
+bench pty E2E proved in Session 36 (36.1 s write / 24.3 s read, byte-exact).
+89 tests passing, clippy clean. FINDINGS §5 pacing note updated.
+
 ## ← CURRENT TASK (take over from here)
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU

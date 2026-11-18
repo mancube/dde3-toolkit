@@ -286,8 +286,10 @@ This needs **the baud patch flashed** (`e46_baud125000.bin`). Without flashing,
 change (service 0x91 absent) and transmits nothing spontaneously, so there is
 no listen-only fast path.
 
-**TX pacing is zeroed at the fast rate** (all bench modes, matching the GUI
-write job): the 3 ms/byte WinKFP default is a 9600-baud habit — at 124800 a
+**TX pacing is zeroed at the fast rate** (all bench modes and all GUI
+read/write jobs — the GUI jobs key off `fast_baud_active`, the "fast write"
+checkbox alone only covers 9600): the 3 ms/byte WinKFP default is a 9600-baud
+habit — at 124800 a
 73-byte `FLASH_SCHREIBEN` frame would take 219 ms of pacing alone vs 5.9 ms
 of wire, so a full write stays ~11.5 min instead of ~36 s. The request/reply
 structure still gives the ECU a full ACK round-trip between frames, so

@@ -877,6 +877,10 @@ impl App {
         self.active_job = Some(Job::Full);
         self.job_started = Some(Instant::now());
         let path = PathBuf::from(self.read_path.clone());
+        // At a fast baud the wire is fast enough for back-to-back frames —
+        // the 3 ms/byte pacing (a 9600 habit) would dominate the 9-byte
+        // request frames (same rule as bench and the live loop).
+        let fast = self.fast_baud_active.is_some();
         self.start(move |link, tx| {
             let mut guard = lock_or_recover(&link);
             let Some(k) = guard.as_mut() else {
@@ -892,9 +896,11 @@ impl App {
                     format!("Reading {done} / {total} bytes"),
                 ));
             };
+            k.set_write_delay(if fast { 0 } else { 3 });
             // read_full retries once internally on a non-link error
             // (20 ms silence) — the same recovery the CLI gets.
             let result = k.read_full(&mut progress);
+            k.set_write_delay(3);
             let logs = k.take_logs();
             for l in logs {
                 let _ = tx.send(Msg::Log(l));
@@ -928,6 +934,8 @@ impl App {
         self.active_job = Some(Job::Cal);
         self.job_started = Some(Instant::now());
         let path = PathBuf::from(self.cal_path.clone());
+        // Same fast-baud pacing rule as the full read (see start_read).
+        let fast = self.fast_baud_active.is_some();
         self.start(move |link, tx| {
             let mut guard = lock_or_recover(&link);
             let Some(k) = guard.as_mut() else {
@@ -943,9 +951,11 @@ impl App {
                     format!("Reading calibration {done} / {total} bytes"),
                 ));
             };
+            k.set_write_delay(if fast { 0 } else { 3 });
             // read_range retries once internally on a non-link error
             // (20 ms silence) — the same recovery the CLI gets.
             let result = k.read_range(CAL_START, CAL_LEN, &mut progress);
+            k.set_write_delay(3);
             let logs = k.take_logs();
             for l in logs {
                 let _ = tx.send(Msg::Log(l));
@@ -990,7 +1000,11 @@ impl App {
         let Some(image) = self.prepare_write_image() else {
             return;
         };
-        let fast = self.fast_write;
+        // Pacing 0 when the "fast write" checkbox is set OR the 0x91 link is
+        // already at the fast baud — at 124800 the 3 ms/byte WinKFP pacing
+        // (a 9600 habit) would dominate: a 73-byte frame takes 219 ms of
+        // pacing vs 5.9 ms of wire (same rule as bench and the live loop).
+        let fast = self.fast_write || self.fast_baud_active.is_some();
         self.stop_live();
         self.active_job = Some(Job::Write);
         self.job_started = Some(Instant::now());
@@ -1010,8 +1024,8 @@ impl App {
             };
             k.set_silence(10);
             k.set_write_delay(3);
-            // DDE3 K-line is fixed at 9600 8E1; `fast` only drops the
-            // inter-byte pause (unverified on real hardware).
+            // `fast` (checkbox or fast-baud link) drops the inter-byte pause;
+            // the checkbox-only-at-9600 case is unverified on real hardware.
             let result = k.write_full(&image, 9600, if fast { 0 } else { 3 }, &mut progress);
             k.set_write_delay(3);
             let logs = k.take_logs();
@@ -1045,7 +1059,8 @@ impl App {
         let Some(image) = self.prepare_write_image() else {
             return;
         };
-        let fast = self.fast_write;
+        // Same fast-baud pacing rule as the full write (see start_write).
+        let fast = self.fast_write || self.fast_baud_active.is_some();
         self.stop_live();
         self.active_job = Some(Job::WriteCal);
         self.job_started = Some(Instant::now());
@@ -1065,8 +1080,8 @@ impl App {
             };
             k.set_silence(10);
             k.set_write_delay(3);
-            // DDE3 K-line is fixed at 9600 8E1; `fast` only drops the
-            // inter-byte pause (unverified on real hardware).
+            // `fast` (checkbox or fast-baud link) drops the inter-byte pause;
+            // the checkbox-only-at-9600 case is unverified on real hardware.
             let result = k.write_calibration(&image, 9600, if fast { 0 } else { 3 }, &mut progress);
             k.set_write_delay(3);
             let logs = k.take_logs();
