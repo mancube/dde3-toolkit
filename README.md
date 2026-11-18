@@ -113,6 +113,12 @@ logged. Own replies are matched on the wire and logged as `ECHO`.
 # answered with the file's bytes (256 KB / 0x40000 image required)
 ./target/release/dde3-toolkit respond --out fake_ecu.log \
     --flash captures/actual_flash.bin
+
+# Behave like the patched real ECU (0x91 baud change): accept the 0x91,
+# switch the port to the patch's rate (125000 -> 124800) and ACK at the new
+# rate, so `baud --rate …` / `bench --fast-baud …` run end-to-end
+./target/release/dde3-toolkit respond --out fake_ecu.log \
+    --patched-baud 125000
 ```
 
 ```sh

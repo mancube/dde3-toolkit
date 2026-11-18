@@ -56,6 +56,13 @@ pub struct RespondOptions {
     /// AIF read (0x02) answer with the file's bytes. `None` = built-in
     /// deterministic pattern.
     pub flash: Option<std::path::PathBuf>,
+    /// 0x91 baud patch: configure the fake ECU like the patched real ECU
+    /// (the `e46_baud<rate>.bin` images). `Some(38400 | 125000)` — a `0x91`
+    /// then switches the port to the patch's actual rate (125000 → 124800,
+    /// the S0BG divisor) and the ACK goes out at the NEW rate, so `baud`
+    /// and `bench --fast-baud` can be tested end-to-end. `None` = no patch
+    /// (the 0x91 stub ACK stays, nothing switches).
+    pub baud_patch: Option<u32>,
 }
 
 pub struct Summary {
@@ -154,11 +161,26 @@ pub fn run(opts: &RespondOptions) -> Result<Summary> {
         None => (SimEcu::new(), "built-in deterministic pattern".to_string()),
     };
 
+    // 0x91 baud patch: configure the sim like the patched real ECU. The
+    // patch's FIXED rate is the ECU's actual divisor (125000 → 124800),
+    // the same mapping the tester side uses to reopen the port.
+    let mut link_baud = opts.baud;
+    let baud_patch_desc = if let Some(req) = opts.baud_patch {
+        let actual = crate::protocol::reopen_divisor(req);
+        sim.set_baud_patch(actual);
+        format!("{req} (switches to {actual} on 0x91)")
+    } else {
+        String::new()
+    };
+
     println!("dde3-toolkit respond — FAKE ECU (full duplex on one port)");
     println!(
         "port={} baud={} 8E1  reply-delay={} ms  tx-pacing={} ms  flash={}  (Ctrl-C to stop)",
         opts.port, opts.baud, opts.reply_delay_ms, opts.data_delay_ms, flash_desc
     );
+    if !baud_patch_desc.is_empty() {
+        println!("baud-patch: {baud_patch_desc} (0x91 accepted, link switches, ACK at new rate)");
+    }
     if let Some(f) = file.as_mut() {
         let _ = writeln!(
             f,
@@ -169,6 +191,9 @@ pub fn run(opts: &RespondOptions) -> Result<Summary> {
             "# port={} baud={} 8E1  flash={}",
             opts.port, opts.baud, flash_desc
         );
+        if !baud_patch_desc.is_empty() {
+            let _ = writeln!(f, "# baud-patch: {baud_patch_desc}");
+        }
         let _ = f.flush();
     }
     let mut framer = Framer::new();
@@ -243,6 +268,20 @@ pub fn run(opts: &RespondOptions) -> Result<Summary> {
                     frames += 1;
                     *services.entry(name.to_string()).or_insert(0) += 1;
                     let reply = sim.handle(payload);
+                    // 0x91 baud patch: the patched ECU switches the link
+                    // BEFORE the ACK is transmitted (S0BG write, then ACK) —
+                    // apply the switch, then the ACK rides the new rate.
+                    if let Some(new_rate) = sim.take_baud_switch() {
+                        port.set_baud_rate(new_rate)
+                            .with_context(|| "cannot switch baud after 0x91")?;
+                        port.clear(ClearBuffer::All)
+                            .with_context(|| "cannot flush line after baud switch")?;
+                        let old = link_baud;
+                        link_baud = new_rate;
+                        emit(&format!(
+                            "[{t:9.3}] BAUD {old} -> {new_rate}   0x91 patch: link switched, ACK at new rate"
+                        ));
+                    }
                     std::thread::sleep(Duration::from_millis(opts.reply_delay_ms));
                     let wire = build_frame(&reply);
                     tx(
@@ -322,6 +361,10 @@ pub fn run(opts: &RespondOptions) -> Result<Summary> {
                 println!("reconstructed image: no flash writes received; nothing to dump");
             }
         }
+    }
+
+    if link_baud != opts.baud {
+        println!("link left at {link_baud} (revert by restarting respond = power cycle)");
     }
 
     let summary = Summary {

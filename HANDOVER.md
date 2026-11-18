@@ -545,6 +545,34 @@ Verified end-to-end against the fake ECU over a socat pty pair
 199 lines captured, 194 of them TX/RX frames, byte-for-byte the full session.
 87 tests passing; build warning-free.
 
+### Session 35 (2026-11-18) — `respond --patched-baud`: fake ECU mirrors the 0x91 baud patch
+
+The fake ECU can now behave like the **patched real ECU**, so the toolkit's
+own fast-baud path is testable end-to-end without a car (branch
+`feat/respond-baud-91`):
+
+- `respond --patched-baud <38400|125000>` (only the two shipped patch rates
+  are accepted): the `0x91` is accepted, the port reopens at the patch's
+  fixed rate **before** the ACK is transmitted (125000 → 124800, the S0BG
+  divisor — the same `reopen_divisor` mapping the tester side uses), so the
+  ACK rides the line at the **new** rate, exactly like the real patch
+  (S0BG write, then ACK). The frame's baud field is ignored (v1 patches are
+  single-rate). The link stays at the new rate until `respond` is restarted
+  (= power cycle). Without the flag the legacy stub ACK stays, so `--sim`
+  fast-baud runs are unchanged.
+- Sim hooks: `SimEcu::set_baud_patch(rate)` + `take_baud_switch()` (pending
+  switch, consumed once); `respond` applies the port reopen +
+  `clear(ClearBuffer::All)`, logs `BAUD old -> new` and prints "link left at
+  …" at exit.
+- E2E over a socat pty pair: `baud --rate 125000` / `38400` (switch + IDENT
+  verify), `bench --fast-baud 125000 --live` (~89 Hz vs ~2.5 Hz at 9600),
+  full 256 KB `--read` byte-exact vs the served image (24 s with
+  `--data-delay 0`), full `--write` → `--dump` reconstructs the exact source
+  span (boot area 0x0..0x10000 FF-padded, by design).
+- Tests: 89 passing (+2: `sim::tests::baud_patch_91_switches_link_and_acks`,
+  `baud_91_without_patch_keeps_stub_ack`). Docs: `docs/respond-mode.md` §9,
+  `docs/baud-0x91-patch.md` (fake-ECU test rig).
+
 ## ← CURRENT TASK (take over from here)
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU
@@ -756,5 +784,8 @@ UI/UX polish requested, no behaviour changes.
 3. **Break-mode T2.1 capture** — `break-probe` + `tools/monitor.py` on
    `/dev/ttyUSB0` to confirm the on-wire 4-byte layout, then wire the
    byte-addressed reads into CLI/GUI (`docs/break-mode.md`).
-4. **0x91 patch bench test** — flash `e46_baud91.bin`, `baud` subcommand,
-   power-cycle revert check (`docs/baud-0x91-patch.md`).
+4. ~~**0x91 patch bench test**~~ — the fake-ECU half is done (session 35:
+   `respond --patched-baud` mirrors the patch, `baud` / `bench --fast-baud`
+   verified end-to-end over a pty loopback). On-car half remains: flash
+   `e46_baud125000.bin`, `baud --rate 125000`, power-cycle revert check
+   (`docs/baud-0x91-patch.md`).

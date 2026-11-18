@@ -82,6 +82,20 @@ pub struct SimEcu {
     /// Test hook: override the AIF (hardware-ID) programming record served
     /// on the `FLASH_LESEN addr=0 count=46` read; `None` = serve from flash.
     aif_override: Option<[u8; 46]>,
+    /// 0x91 baud patch (the `respond --patched-baud` flag): the link rate
+    /// the fake ECU switches to when it accepts a `0x91` — the patch's FIXED
+    /// rate, already mapped through `protocol::reopen_divisor` (a 125000
+    /// patch runs at 124800, the S0BG divisor). `None` = no patch: the 0x91
+    /// stub ACK stays (so `--sim` fast-baud runs still verify) and nothing
+    /// switches. Like the shipped v1 patch images, the frame's baud field
+    /// is ignored — only the patch's fixed rate is used.
+    baud_patch: Option<u32>,
+    /// Pending 0x91 link switch for the transport to apply: set by the 0x91
+    /// handler, consumed once via [`SimEcu::take_baud_switch`]. `respond`
+    /// reopens the port at this rate BEFORE transmitting the ACK, so the
+    /// ACK rides the line at the new rate — the real patch's wire semantics
+    /// (S0BG is written before the ACK is transmitted).
+    baud_switch: Option<u32>,
 }
 
 impl Default for SimEcu {
@@ -133,6 +147,8 @@ impl SimEcu {
             test_stamp: [0, 0, 0],
             adjustments: BTreeMap::new(),
             aif_override: None,
+            baud_patch: None,
+            baud_switch: None,
         }
     }
 
@@ -160,6 +176,8 @@ impl SimEcu {
             test_stamp: [0, 0, 0],
             adjustments: BTreeMap::new(),
             aif_override: None,
+            baud_patch: None,
+            baud_switch: None,
         })
     }
 
@@ -169,6 +187,25 @@ impl SimEcu {
     #[allow(dead_code)]
     pub fn set_aif(&mut self, aif: [u8; 46]) {
         self.aif_override = Some(aif);
+    }
+
+    /// Configure the sim like the patched real ECU (`respond
+    /// --patched-baud`): a `0x91` then switches the link to `rate` and the
+    /// ACK goes out at the NEW rate (the transport applies the switch via
+    /// [`SimEcu::take_baud_switch`] before transmitting the reply). `rate`
+    /// is the patch's fixed rate — the ECU's actual divisor, not the
+    /// nominal request (125000 → 124800), as [`crate::protocol::reopen_divisor`
+    /// computes it.
+    pub fn set_baud_patch(&mut self, rate: u32) {
+        self.baud_patch = Some(rate);
+    }
+
+    /// The 0x91 link switch pending since the last [`SimEcu::handle`] —
+    /// `None` if the last frame did not switch the baud. Consumed once; the
+    /// transport (respond) reopens its port at the rate before sending the
+    /// ACK, mirroring the real patch (S0BG write, then ACK at the new rate).
+    pub fn take_baud_switch(&mut self) -> Option<u32> {
+        self.baud_switch.take()
     }
 
     /// [`SimEcu::with_flash_image`] from a file on disk.
@@ -253,9 +290,21 @@ impl SimEcu {
             // send `12 08 90 K0 K1 K2 K3` — see `seed_key` (M47 decomp
             // sub_028B5E, DDE3 SEED_KEY job reconstruction).
             0x90 => self.seed_key(p, len_echo),
-            // BAUD change (0x91 patch): `12 08 91 00 <baud BE> <p2>` — ACK so a
-            // `--sim` fast-baud switch verifies (real stock firmware NACKs this).
-            0x91 => Self::status(p, len_echo, SB_OK),
+            // BAUD change (0x91 patch): `12 08 91 00 <baud BE> <p2>`.
+            // With `set_baud_patch` (respond --patched-baud) the fake ECU
+            // behaves like the patched real ECU: the link switches to the
+            // patch's fixed rate and the ACK goes out at the NEW rate (the
+            // patch writes S0BG before the ACK is transmitted) — the switch
+            // is reported to the transport via `take_baud_switch()`. The
+            // frame's baud field is ignored, like the shipped v1 patches.
+            // Without the patch the stub ACK is kept so a `--sim` fast-baud
+            // switch still verifies (real stock firmware NACKs this).
+            0x91 => {
+                if let Some(rate) = self.baud_patch {
+                    self.baud_switch = Some(rate);
+                }
+                Self::status(p, len_echo, SB_OK)
+            },
             // FLASH_LESEN: `12 09 06 00 <A_hi A_mid A_lo> <count@7>` (addr big-endian).
             0x06 => self.flash_read(p, len_echo),
             // FLASH write family: `12 09 07 <sub> ...`.
@@ -1204,5 +1253,36 @@ mod tests {
         assert_eq!(r.len(), 3 + AIF_LEN);
         assert_eq!(&r[3..], &AIF_RECORD[..]);
         assert_eq!(r[3], AIF_RECORD[0]);
+    }
+
+    #[test]
+    fn baud_patch_91_switches_link_and_acks() {
+        // respond --patched-baud: the fake ECU behaves like the patched real
+        // ECU — 0x91 is accepted, the link switches to the patch's fixed
+        // rate, and the ACK goes out at the NEW rate (the transport applies
+        // the switch before transmitting the reply — take_baud_switch).
+        let mut s = SimEcu::new();
+        s.set_baud_patch(124_800); // the 125000 patch's actual S0BG divisor
+        let r = s.handle(&[0x12, 0x08, 0x91, 0x00, 0x01, 0xE2, 0x40, 0x03]);
+        assert_eq!(&r[..3], &[0x12, 0x04, 0xA0], "0x91 ACKed");
+        assert_eq!(s.take_baud_switch(), Some(124_800), "switch pending");
+        assert_eq!(s.take_baud_switch(), None, "switch consumed once");
+        // The link is now at the new rate: normal services keep working.
+        let r = s.handle(&[0x12, 0x04, 0x00]);
+        assert_eq!(r[2], 0xA0, "IDENT at the new rate");
+        // A second 0x91 re-switches (idempotent on the real ECU too).
+        let r = s.handle(&[0x12, 0x08, 0x91, 0x00, 0x01, 0xE2, 0x40, 0x03]);
+        assert_eq!(r[2], 0xA0, "second 0x91 ACKed");
+        assert_eq!(s.take_baud_switch(), Some(124_800), "second switch");
+    }
+
+    #[test]
+    fn baud_91_without_patch_keeps_stub_ack() {
+        // No --patched-baud: the legacy stub ACK stays (so `--sim` fast-baud
+        // runs still verify) and no link switch is reported.
+        let mut s = SimEcu::new();
+        let r = s.handle(&[0x12, 0x08, 0x91, 0x00, 0x00, 0x09, 0x60, 0x03]);
+        assert_eq!(&r[..3], &[0x12, 0x04, 0xA0], "stub ACK");
+        assert_eq!(s.take_baud_switch(), None, "no switch without the patch");
     }
 }

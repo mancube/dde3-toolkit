@@ -8,6 +8,7 @@ that made foreign flashing tools reject the simulated IDENT reply.
 dde3-toolkit respond [--port DEV] [--baud N] [--out FILE]
                      [--duration SECS] [--data-delay MS] [--reply-delay MS]
                      [--dump IMAGE.BIN] [--flash IMAGE.BIN]
+                     [--patched-baud 38400|125000]
 ```
 
 `--dump` writes the **reconstructed flash image** (everything the peer
@@ -23,6 +24,13 @@ the file's bytes at the requested address and the AIF read (`0x02`, slot
 ECU gets exactly what it would get from a real ECU holding that image
 (e.g. `captures/actual_flash.bin`). Without `--flash` the built-in
 deterministic pattern is served.
+
+`--patched-baud <38400|125000>` configures the fake ECU like the **patched
+real ECU** (the `e46_baud<rate>.bin` images, see
+`docs/baud-0x91-patch.md`): a `0x91` baud-change frame is accepted and the
+port switches to the patch's fixed rate (125000 → 124800, the S0BG divisor),
+the ACK going out at the **new** rate — so `baud --rate …` and
+`bench --fast-baud …` can be tested end-to-end without a car (see §9).
 
 Single-port **full duplex** on one UART (default `/dev/ttyUSB0`, the
 QinHeng UART-LPT): the adapter both *receives* the peer's frames (a
@@ -278,3 +286,50 @@ services the tool uses were still falling through to the `12 04 FF` NACK
 
 Regression tests: `sim::tests::missing_ds2_responses_are_answered`,
 `sim::tests::mw_subservices_answered`.
+
+## 9. 0x91 baud patch — `--patched-baud` (session 34)
+
+The fake ECU can now behave like the patched real ECU (see
+[`baud-0x91-patch.md`](baud-0x91-patch.md)), which makes the toolkit's own
+fast-baud path testable end-to-end without a car:
+
+```sh
+# Fake ECU on the tap port, patched for 125000
+./target/release/dde3-toolkit respond --out fake_ecu.log \
+    --patched-baud 125000
+
+# Tester side on the other port: the full 0x91 flow
+./target/release/dde3-toolkit baud --rate 125000 --port /dev/ttyUSB1
+./target/release/dde3-toolkit bench --fast-baud 125000 --live
+./target/release/dde3-toolkit bench --fast-baud 125000 --read --out img.bin
+./target/release/dde3-toolkit bench --fast-baud 125000 --write --image img.bin
+```
+
+Wire semantics mirror the real patch exactly:
+
+- The `0x91` arrives at the old rate; the fake ECU reopens its port at the
+  patch's rate **before** the ACK is transmitted, so the ACK rides the line
+  at the **new** rate (the patch writes S0BG before the ACK goes out — the
+  tester must not expect a reply at the old rate).
+- The frame's baud field is ignored — the patch's **fixed** rate is used
+  (the shipped v1 patch images are single-rate), and 125000 runs at the
+  S0BG divisor 124800, the same mapping the tester side uses to reopen.
+- The link stays at the new rate until `respond` is restarted (= power
+  cycle; the real ECU reverts to 9600 after sleep/wake).
+- Without `--patched-baud` the legacy stub ACK stays (no switch), so
+  `--sim` fast-baud runs keep working as before.
+
+Implementation: `SimEcu::set_baud_patch(rate)` arms the sim; the `0x91`
+handler records a pending switch (`take_baud_switch()`, consumed once) and
+ACKs; `respond` reopens the port at the rate before sending the ACK and
+tracks the link rate (`BAUD old -> new` log line, "link left at …" at
+exit). Only the two shipped patch rates are accepted (38400 / 125000).
+
+Verified end-to-end over a pty loopback (session 34): `baud --rate
+125000` / `38400` complete the switch + IDENT verify; `bench --fast-baud
+125000 --live` polls at ~89 Hz; a full 256 KB fast read matches the served
+image byte-for-byte; a full fast write reconstructs (`--dump`) to the exact
+source span (boot area 0x0..0x10000 padded FF, by design).
+
+Tests: `sim::tests::baud_patch_91_switches_link_and_acks`,
+`sim::tests::baud_91_without_patch_keeps_stub_ack`.
