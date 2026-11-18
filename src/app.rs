@@ -255,7 +255,6 @@ pub struct App {
     dtc_clear_armed: bool,
     battery_v: Option<f64>,
     post_write_pending: bool,
-    write_path: String,
     image: Option<Vec<u8>>,
     image_name: String,
     image_is_partial: bool,
@@ -296,10 +295,11 @@ pub struct App {
     fast_baud: Option<u32>,
     /// The rate the DS2 link currently runs at once a 0x91 switch succeeded.
     fast_baud_active: Option<u32>,
-    /// "faster 9600" test switch (Live tab): back-to-back polling (1 ms gap)
-    /// + 1 ms/byte TX pacing. Off by default — the link runs the original
-    /// WinKFP timing (55 ms poll gap, 3 ms/byte). Shared with the live thread
-    /// so it can be flipped while live is running.
+    /// "faster 9600" test switch (Live tab): back-to-back polling (1 ms gap),
+    /// 1 ms/byte TX pacing. Off by default — the link runs the original
+    /// WinKFP timing (55 ms poll gap, 3 ms/byte).
+    ///
+    /// Shared with the live thread; can be flipped while live is running.
     fast9600: Arc<AtomicBool>,
     /// Firmware patch manifests (built in + `patches/` + DDE3_PATCH_DIR).
     patches: Vec<Patch>,
@@ -351,7 +351,6 @@ impl App {
             dtc_clear_armed: false,
             battery_v: None,
             post_write_pending: false,
-            write_path: String::new(),
             image: None,
             image_name: String::new(),
             image_is_partial: false,
@@ -434,7 +433,6 @@ impl App {
         self.image = Some(img);
         self.image_name = "demo_dde3.bin".into();
         self.image_is_partial = false;
-        self.write_path = "demo_dde3.bin".into();
         self.dtcs = vec![
             protocol::Dtc {
                 ort: 0x26,
@@ -525,7 +523,6 @@ impl App {
                     self.start_auto_actions();
                 }
                 Msg::Error(e) => {
-                    eprintln!("ERROR {e}");
                     self.busy = false;
                     self.active_job = None;
                     self.progress_text = "Aborted".into();
@@ -534,7 +531,6 @@ impl App {
                     self.push_log(format!("ERROR {e}"));
                 }
                 Msg::LinkLost(e) => {
-                    eprintln!("LINK_LOST {e}");
                     self.busy = false;
                     self.active_job = None;
                     self.progress_text = "Link lost".into();
@@ -1411,7 +1407,6 @@ impl App {
                 self.checks = checksum::verify(&data);
                 self.image = Some(data);
                 self.image_name = path.display().to_string();
-                self.write_path = path.display().to_string();
                 self.error = None;
                 self.status = "Full image loaded".into();
                 self.sync_comp_edits();
@@ -1421,7 +1416,6 @@ impl App {
                 self.checks = checksum::verify(&pad_calibration(&data));
                 self.image = Some(data);
                 self.image_name = path.display().to_string();
-                self.write_path = path.display().to_string();
                 self.error = None;
                 self.status = "Calibration image loaded".into();
                 self.sync_comp_edits();

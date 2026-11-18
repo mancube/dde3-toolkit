@@ -112,13 +112,10 @@ pub mod s0bg {
 }
 
 /// Host-side baud rates matching `s0bg`.
-#[allow(dead_code)]
 pub const BAUD_9600: u32 = 9_600;
 /// Intermediate handshake rate.
-#[allow(dead_code)]
 pub const BAUD_10_4K: u32 = 10_400;
 /// Fast bulk-access rate.
-#[allow(dead_code)]
 pub const BAUD_38_4K: u32 = 38_400;
 
 // ---------------------------------------------------------------------------
@@ -137,6 +134,8 @@ pub const HANDSHAKE_FAST_BYTE: u8 = 0xA6;
 // Command opcodes (interpreter at 0x1F6D2, jump table 0x1F724)
 // ---------------------------------------------------------------------------
 
+// Decoded reference table (FINDINGS §4): some opcodes are documented but not
+// yet exercised by the tool, so individual constants may be unused.
 #[allow(dead_code)]
 pub mod opcode {
     /// Echo `DATA`, add it to the checksum accumulator. (0x1F868)
@@ -276,14 +275,6 @@ impl<'a> BreakHandle<'a> {
         self.command(opcode::HANDSHAKE, opcode::HANDSHAKE_DATA)
     }
 
-    /// Set the protocol address register (C804 low, C805 high) via 0x25/0x26.
-    #[allow(dead_code)]
-    pub fn set_addr(&mut self, addr: u32) -> Result<(Reply, Reply)> {
-        let lo = self.command(opcode::SET_ADDR_LOW, (addr & 0xFF) as u8)?;
-        let hi = self.command(opcode::SET_ADDR_HIGH, ((addr >> 8) & 0xFF) as u8)?;
-        Ok((lo, hi))
-    }
-
     /// Read back the address register via 0x04/0x07.
     pub fn get_addr(&mut self) -> Result<u16> {
         let lo = self.command(opcode::ADDR_LOW, 0x00)?.data;
@@ -294,22 +285,6 @@ impl<'a> BreakHandle<'a> {
     /// Read the checksum accumulator `C887` (opcode 0x1B).
     pub fn checksum(&mut self) -> Result<u8> {
         Ok(self.command(opcode::CHECKSUM, 0x00)?.data)
-    }
-
-    /// Read one RAM byte at `addr` via 0x0B (word-aware on the ECU side; the
-    /// low byte of the read word comes back, the high byte is cached for the
-    /// partner address — see the module docs).
-    #[allow(dead_code)]
-    pub fn read_ram(&mut self, addr: u32) -> Result<u8> {
-        let _ = self.set_addr(addr)?;
-        Ok(self.command(opcode::READ, 0x00)?.data)
-    }
-
-    /// Re-arm both ends to a new rate (the ECU re-rates too, so the tool must
-    /// match). Mirrors `Kline::set_baud`.
-    #[allow(dead_code)]
-    pub fn set_rate(&mut self, baud: u32) -> Result<()> {
-        self.kline.set_baud(baud)
     }
 
     /// Return to the 9600 DS2 application link (best-effort).
@@ -831,7 +806,7 @@ mod tests {
         s.block_size_src = 0x20;
         let rej = s.service(&request(opcode::SET_BLOCK_SIZE, 0x00)).unwrap();
         assert_eq!(rej[2], opcode::REJECT);
-        let ok = s.service(&request(opcode::SET_BLOCK_SIZE, 0x3D)).unwrap();
+        let ok = s.service(&request(opcode::SET_BLOCK_SIZE, opcode::SET_BLOCK_SIZE_DATA)).unwrap();
         assert_eq!(s.c802, 0x40);
         assert_eq!(ok[2], 0x3D ^ 0x20);
     }
