@@ -77,9 +77,11 @@ fn print_usage() {
     eprintln!("    [--reply-delay <ms>] [--dump <image.bin>]");
     eprintln!("    [--flash <image.bin>]");
     eprintln!("                             (default port /dev/ttyUSB0; --dump writes the");
-    eprintln!("                             reconstructed flash image the peer programmed;");
-    eprintln!("                             --flash serves a real 256 KB dump from the fake");
-    eprintln!("                             ECU: FLASH_LESEN + AIF read return the file's bytes)");
+    eprintln!("                             reconstructed flash image the peer programmed —");
+    eprintln!("                             the 192 KB 0x10000..0x40000 test write is padded");
+    eprintln!("                             FF to a full 256 KB image; --flash serves a real");
+    eprintln!("                             256 KB dump from the fake ECU: FLASH_LESEN + AIF");
+    eprintln!("                             read return the file's bytes)");
     eprintln!("  bench                      Headless run: identify + optional read/write,");
     eprintln!("                             progress and timing on stderr, useful exit status");
     eprintln!("    [--info|--read|--read-cal|--write|--write-cal|--live]");

@@ -12,7 +12,9 @@ dde3-toolkit respond [--port DEV] [--baud N] [--out FILE]
 
 `--dump` writes the **reconstructed flash image** (everything the peer
 programmed, contiguous first-to-last written byte) to the file at the end
-of the run.
+of the run. The 192 KB test write (0x10000..0x40000) is exported as a full
+256 KB image: the boot area 0x0..0x10000 is padded with 0xFF (erased
+flash), so the dump lines up with a full flash read.
 
 `--flash <image.bin>` loads a real 256 KB flash dump (0x40000 bytes) and
 the fake ECU **serves it verbatim**: `FLASH_LESEN` (`12 09 06 …`) returns
@@ -217,7 +219,9 @@ Also in this follow-up:
   and `sim::tests::seed_key_round_trip`.
 - **`--dump IMAGE.BIN`** — at run end, `respond` writes the reconstructed
   flash span (`SimEcu::written_span()` → `flash_image()`) to the given
-  file, so the flasher’s image is recovered from a session.
+  file, so the flasher’s image is recovered from a session. The 192 KB
+  test write (0x10000..0x40000) is exported as a full 256 KB image with
+  the boot area 0x0..0x10000 padded 0xFF (`dump_image`).
 - **Clean SIGINT exit** — an interrupted blocking read (`EINTR`) now
   breaks to the summary/dump path instead of surfacing as
   `ERROR: Interrupted system call`.

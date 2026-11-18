@@ -90,6 +90,22 @@ fn read_line(port: &mut Box<dyn SerialPort>, buf: &mut [u8]) -> std::io::Result<
     }
 }
 
+/// Build the dump image for a written span.
+///
+/// The 192 KB test write (0x10000..0x40000) is exported as a full 256 KB
+/// image: the unwritten boot area 0x0..0x10000 is padded with 0xFF
+/// (erased flash), so the dump lines up with a full flash read. Any other
+/// span is dumped compactly, first to last written byte.
+fn dump_image(flash: &[u8], lo: u32, hi: u32) -> Vec<u8> {
+    if lo == 0x10000 && hi == 0x40000 {
+        let mut img = flash[..0x40000].to_vec();
+        img[..0x10000].fill(0xFF);
+        img
+    } else {
+        flash[lo as usize..hi as usize].to_vec()
+    }
+}
+
 fn tx(port: &mut Box<dyn SerialPort>, frame: &[u8], pacing: Duration) -> Result<()> {
     for b in frame {
         port.write_all(&[*b])
@@ -267,22 +283,32 @@ pub fn run(opts: &RespondOptions) -> Result<Summary> {
 
     // Reconstruct the binary the peer wrote: dump the flash span it
     // programmed (the flasher's image, contiguous from the first to the
-    // last written byte).
+    // last written byte; the 192 KB test write 0x10000..0x40000 is
+    // exported as a full 256 KB image — see `dump_image`).
     if let Some(path) = &dump_path {
         match sim.written_span() {
             Some((lo, hi)) => {
-                let img = &sim.flash_image()[lo as usize..hi as usize];
+                let padded = lo == 0x10000 && hi == 0x40000;
+                let img = dump_image(sim.flash_image(), lo, hi);
                 if let Some(parent) = path.parent() {
                     if !parent.as_os_str().is_empty() {
                         let _ = std::fs::create_dir_all(parent);
                     }
                 }
-                match std::fs::write(path, img) {
+                match std::fs::write(path, &img) {
                     Ok(_) => {
-                        let msg = format!(
-                            "reconstructed image: {} bytes ({:#06x}..{:#06x}) -> {}",
-                            img.len(), lo, hi, path.display()
-                        );
+                        let msg = if padded {
+                            format!(
+                                "reconstructed image: {} bytes (0x0000..0x40000, 0x0000..0x10000 padded FF) -> {}",
+                                img.len(),
+                                path.display()
+                            )
+                        } else {
+                            format!(
+                                "reconstructed image: {} bytes ({:#06x}..{:#06x}) -> {}",
+                                img.len(), lo, hi, path.display()
+                            )
+                        };
                         println!("{msg}");
                         if let Some(f) = file.as_mut() {
                             let _ = writeln!(f, "# {msg}");
@@ -312,4 +338,31 @@ pub fn run(opts: &RespondOptions) -> Result<Summary> {
         let _ = f.flush();
     }
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dump_image;
+
+    #[test]
+    fn dump_image_pads_the_192kb_test_write_with_ff() {
+        // Distinct content: boot area 0x11, written span 0xA5.
+        let mut flash = vec![0x11u8; 0x40000];
+        flash[0x10000..].fill(0xA5);
+        let img = dump_image(&flash, 0x10000, 0x40000);
+        assert_eq!(img.len(), 0x40000, "full 256 KB image");
+        assert!(img[..0x10000].iter().all(|&b| b == 0xFF), "boot area padded FF");
+        assert!(img[0x10000..].iter().all(|&b| b == 0xA5), "written span verbatim");
+    }
+
+    #[test]
+    fn dump_image_keeps_other_spans_compact() {
+        let flash: Vec<u8> = (0..0x40000u32).map(|i| (i & 0xFF) as u8).collect();
+        let img = dump_image(&flash, 0x38000, 0x40000);
+        assert_eq!(img.len(), 0x8000, "cal span stays compact");
+        assert_eq!(&img[..4], &flash[0x38000..0x38004]);
+        let img = dump_image(&flash, 0x10000, 0x10080);
+        assert_eq!(img.len(), 0x80, "short span stays compact");
+        assert_eq!(&img[..4], &flash[0x10000..0x10004]);
+    }
 }

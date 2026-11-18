@@ -383,6 +383,22 @@ bad-XOR resync). Clippy: only the 4 pre-existing warnings.
 (IDENT → UPROG_EIN → AIF → SEED_KEY → key) passes clean, the 2048-chunk
 `FLASH_LESEN` loop runs without truncation or collision.
 
+### Session 29 (2026-11-21) — respond `--dump`: 192 KB test write exported as full 256 KB image
+
+User request: the test-write dumps from the `respond` tool — when the peer
+wrote the 192 KB span 0x10000..0x40000 — must be padded with 0xFF from
+0x0 to 0x10000 on export (full 256 KB image, boot area = erased flash), so
+the dump lines up with a full flash read.
+
+- new pure `respond::dump_image(flash, lo, hi)`: span `(0x10000, 0x40000)`
+  → full 256 KB image with `[0..0x10000]` filled 0xFF, written span
+  verbatim; any other span stays compact (first-to-last written byte),
+  unchanged.
+- the run-end dump in `respond::run` uses it; the log line says
+  `(0x0000..0x40000, 0x0000..0x10000 padded FF)` when padding applied.
+- tests: `dump_image_pads_the_192kb_test_write_with_ff`,
+  `dump_image_keeps_other_spans_compact` (86 passing).
+
 ## ← CURRENT TASK (take over from here)
 
 **Real-car verification of the session-28 parser fix.** The LEN-validated
