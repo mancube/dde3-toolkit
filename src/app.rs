@@ -222,6 +222,11 @@ enum Msg {
     DtcDone(Vec<protocol::Dtc>),
     DtcCleared,
     Battery(f64),
+    /// Pre-job battery snapshot (taken inside a running read/write job). Only
+    /// refreshes the displayed voltage — unlike [`Msg::Battery`] it must NOT
+    /// clear `busy` / `active_job`, or the running job's progress bar
+    /// disappears the moment the snapshot arrives.
+    BatterySnapshot(f64),
     Live(Vec<(u16, u16)>),
     LogProgress(usize),
     /// Fast-baud (0x91) switch succeeded; payload = the rate the port now runs at.
@@ -590,6 +595,12 @@ impl App {
                     self.busy = false;
                     self.active_job = None;
                     self.status = format!("Battery {v:.2} V");
+                }
+                Msg::BatterySnapshot(v) => {
+                    // Snapshot from inside a running job: update the voltage
+                    // display only. The job's own Done/Error message clears
+                    // `busy` / `active_job` and sets the final status.
+                    self.battery_v = Some(v);
                 }
                 Msg::LogProgress(rows) => {
                     self.log_rows = rows;
@@ -4154,7 +4165,7 @@ fn snapshot_battery(k: &mut Kline, tx: &Sender<Msg>) {
         if let Some(raw) = values.first() {
             let v = *raw as f64 * 0.02037243;
             let _ = tx.send(Msg::Log(format!("BATTERY pre-write {v:.2} V (raw {raw})")));
-            let _ = tx.send(Msg::Battery(v));
+            let _ = tx.send(Msg::BatterySnapshot(v));
         }
     }
 }

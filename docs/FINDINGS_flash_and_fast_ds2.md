@@ -54,6 +54,23 @@ Real 256 KB read/write happens only after **programming mode** is entered with
 EDC15C4 situation. Its on-wire frames therefore come from the WinKFP job
 templates, not from static code.
 
+**Toolkit read path (2026-11-20):** the bare `FLASH_LESEN` chunk loop
+(`Kline::read_flash`) is now preceded by the full flasher session bootstrap —
+IDENT (`12 04 00`) → UPROG_EIN (`12 04 0D`) → AIF read (`12 05 02 00`) →
+SEED_KEY (seed `12 08 90 42 4D 57 Z` + key `12 08 90 K0 K1 K2 K3`) — before
+the first `FLASH_LESEN` chunk. Previously the read sent `FLASH_LESEN` frames
+directly; that did not match how Galletto read the full flash
+(`captures/galletto capture with respond tool/testread.txt`: IDENT, UPROG_EIN,
+AIF, SEED_KEY, then 2048 × `FLASH_LESEN` @128 B).
+
+**Toolkit write path (2026-11-20, session 27):** the same full session bootstrap
+now precedes the write sequence — `Kline::write_full` / `Kline::write_calibration`
+run `begin_flash_session()` (IDENT → UPROG_EIN → AIF read → SEED_KEY) before the
+erase → write → write-end, replacing the bare `UPROG_EIN` they used to send.
+This mirrors Galletto’s write session (`fakewritegalleto.txt`: UPROG_EIN, IDENT
+cycles, AIF, SEED_KEY, then FLASH_LOESCHEN → FLASH_SCHREIBEN →
+FLASH_SCHREIBEN_ENDE).
+
 ### WinKFP tester frames (ground truth, `decompiled_winkfp.txt`)
 
 All are issued **after** `UPROG_EIN` (`12 04 0D`). The job first sends an

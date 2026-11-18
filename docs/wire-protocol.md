@@ -158,3 +158,33 @@ parse against the real car.
 (43 pre-existing + 5 new). **Re-test against the real car is the next step** —
 ident, fault read, and live/battery should now parse correctly end-to-end.
 
+
+## 28. FrameParser: LEN-validated framing (2026-11-20) ← **current parser rules**
+
+The front-anchored "shortest XOR-terminated prefix" extractor (section 21)
+is **gone**. It truncated any reply whose data bytes happened to self-
+terminate — the 46-byte SEED reply `12 2E A0 00 01 02 … 29 9D` contains the
+in-band run `12 13 14 15` with `0x12^0x13^0x14 == 0x15`, so a chunked
+delivery (46 bytes = ~49 ms at 9600 baud — always chunked) made the parser
+emit the 3-byte frame `12 13 14` from inside the still-arriving reply. The
+toolkit then computed the key from 3 garbage bytes and its key TX collided
+with the real reply in flight.
+
+**Current rules (`FrameParser::take_frame`, `src/protocol.rs`):**
+
+- A frame is `12 <LEN> <job> <data …> <XOR>` where **LEN (offset [1]) is
+  the total wire length INCLUDING the trailing XOR** (the convention from
+  section 21, now load-bearing: every captured frame checks out — IDENT
+  `12 2E …` = 46 wire, AIF `12 32 …` = 50, flash write `12 49 …` = 73).
+- A frame is emitted **only when all LEN bytes are present AND the
+  trailing XOR validates**. A partial frame is never emitted, no matter
+  what its bytes look like — there is no anchor scan for `0x12` inside the
+  buffer and no shortest-prefix rule.
+- Leading non-`0x12` bytes are dropped one at a time (collision debris);
+  an implausible LEN (outside 4..=255) or a failed trailing XOR drops one
+  byte and resyncs.
+- `do_request` transmits, then waits for the **echo of its own TX**
+  (reflected by the monitor tap) by `echo_timeout` (5 ms/byte, min 250 ms);
+  a missing echo means the request never reached the bus → resend (max 3),
+  instead of waiting out the full reply timeout. BUSY resends are unchanged
+  (gated by `retry_on_busy`, capped at 50).

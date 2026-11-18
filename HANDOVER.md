@@ -268,7 +268,134 @@ fault record** verbatim instead of the synthesized placeholder:
 The synthesized `SimEcu::record()` helper was removed as it is no longer
 used.
 
+### Session 26 (2026-11-20) — full flash read now runs the Galletto session bootstrap
+
+User finding: the **actual read-flash procedure of the toolkit did not match
+the way Galletto read the full flash** — see the `galletto capture with
+respond tool` (`testread.txt`: IDENT → UPROG_EIN → AIF read → SEED_KEY →
+2048 × `FLASH_LESEN` @128 B, contiguous). The toolkit's read instead sent the
+`FLASH_LESEN` chunk loop directly.
+
+Fix (`src/protocol.rs`):
+
+- new `Kline::begin_flash_session()` — full flasher session before the
+  first `FLASH_LESEN` chunk:
+  `IDENT` (`12 04 00`) → `UPROG_EIN` (`12 04 0D`) → AIF read (`12 05 02 00`)
+  → SEED_KEY (seed `12 08 90 42 4D 57 Z` + key via new
+  `protocol::key_from_seed_reply`, unbiased job sum) →
+  `FLASH_LESEN` chunks;
+- `Kline::read_flash` (shared by `read_full` / `read_range`) now runs the
+  bootstrap first — GUI, CLI `read`/`read-cal` and the `--write` read-back
+  compare all go through it.
+- new pure helpers + tests: `frame_aif_read`, `key_from_seed_reply`
+  (unbiased vectors: Z=0x07 → `39 3C 3F 42`, Z=0x10 → `87 8A 8D 90`,
+  Z=0x16 → `BB BE C1 C4`).
+
+Tests: 81 passing, clippy clean (2 pre-existing `app.rs` doc-list warnings
+only). Next: bench-verified the `--sim` full read end-to-end (bootstrap +
+chunk loop) and re-run the MPPS/Galletto fake-ECU read session.
+
+### Session 27 (2026-11-20) — full flash write now runs the same flasher session bootstrap
+
+Transfer of the session-26 fix to the **write** path (“mimic the Galletto
+logs”): `Kline::write_full` / `Kline::write_calibration` previously sent a bare
+`UPROG_EIN` (`12 04 0D`) before erase → write → end. Galletto’s write session
+(`fakewritegalleto.txt`) runs the full session first (IDENT → UPROG_EIN → AIF →
+SEED_KEY) and only then the flash-write family (FLASH_LOESCHEN → FLASH_SCHREIBEN →
+FLASH_SCHREIBEN_ENDE).
+
+- Renamed `Kline::begin_flash_read_session` → `Kline::begin_flash_session`
+  (the flasher session bootstrap; now shared by the read *and* write paths);
+- `write_full` / `write_calibration` now run `begin_flash_session()` before
+  erase instead of the bare `UPROG_EIN` (docs/comments updated accordingly).
+- Write-side docs: `docs/FINDINGS_flash_and_fast_ds2.md` §2 note extended to
+  the write path.
+
+Tests: 81 passing, clippy clean (2 pre-existing warnings). Next: bench-verify
+  the `--sim` full write end-to-end (bootstrap → erase → 3072 × 64-B writes →
+  end) and re-run the Galletto fakewrite fake-ECU session.
+
+### Session 28 (2026-11-20) — SEED_KEY bootstrap fixed: LEN-validated FrameParser + echo-wait retransmit
+
+The session-26/27 bootstrap (`begin_flash_session`) failed on the wire:
+the toolkit logged `RX 12 13 14` (3 bytes) as the SEED reply, computed a
+key from the garbage (`3C 3B 3A 39` instead of `39 3C 3F 42`), and the key
+TX collided with the real 46-byte reply still in flight (the fake ECU's
+log shows the merged RAW run `… 27 08 CA E7 F8 90 3C 3B 3A 39 8E`).
+
+**Root cause — proven by running the real parser on the real byte stream**
+(a temporary test fed the exact wire frames byte-by-byte): the old
+`FrameParser::take_frame` completed frames by *shortest XOR-terminated
+prefix* plus a 0x12 **anchor scan inside the buffer**. The SEED reply
+`12 2E A0 00 01 02 … 29 9D` is a linear ramp, and the in-band run
+`12 13 14 15` satisfies `0x12^0x13^0x14 == 0x15` — a self-terminating
+"frame". At 9600 baud the 46-byte reply takes ~49 ms to arrive, so
+`take_frame` always saw it mid-stream; the anchor scan locked onto the
+**data byte** 0x12 (the ramp's own 0x12) and emitted `12 13 14` as a
+complete 3-byte frame. `do_request` accepted it (payload[2] = 0x14 is not
+a known status → "data reply"), the key was computed from 3 bytes, and the
+early key TX hit the still-arriving real reply on the half-duplex line.
+Longer frames (IDENT 46 B, AIF 50 B) only survived because their data
+never happens to self-terminate. The same bug class had already been fixed
+in `capture.rs`'s `Framer` (73-byte `FLASH_SCHREIBEN` truncated at byte 21)
+— the active-path `FrameParser` had never been updated.
+
+Fixes (`src/protocol.rs`):
+
+- **`FrameParser::take_frame` rewritten — no 0x12 anchor scan.** A frame is
+  `12 <LEN> <job> <data…> <XOR>` where **LEN is the total wire length
+  INCLUDING the trailing XOR** (verified on every frame in
+  `captures/dde3newlog.txt`: IDENT `12 2E …` = 46 wire, AIF `12 32 …` = 50,
+  flash write `12 49 …` = 73; the AIF/seed/flash-read replies all check
+  out). A frame is emitted **only when all LEN bytes are present AND the
+  trailing XOR validates** — a partial frame is never emitted, no matter
+  what its bytes look like. Leading non-0x12 bytes are dropped one at a
+  time (collision debris); an implausible LEN or a failed trailing XOR
+  drops one byte and resyncs. The legacy "raw reply = whole buffer" case
+  was removed (both the real ECU and the fake ECU envelope every reply;
+  the in-process sim bypasses the parser).
+- **`do_request`: transmit → wait for echo → retransmit.** The echo of our
+  own TX (reflected by the monitor tap) must be on the line by
+  `echo_timeout` (5 ms/byte of frame, min 250 ms — the per-byte pacing
+  dominates at 9600). Missing echo ⇒ the request never reached the bus ⇒
+  resend (up to `MAX_TX_RETRIES = 3`), instead of waiting out the full
+  reply timeout and bailing. No-echo resends are safe even for
+  `request_once` frames (no echo ⇒ the ECU never received the frame; a
+  reply would have arrived as a frame). BUSY resends keep their
+  `retry_on_busy` gate and `MAX_BUSY_RETRIES` cap. TX log lines now show
+  the retry reason: `(BUSY retry n)` / `(no-echo retry n)`.
+- **Progress bar (GUI):** new `Msg::BatterySnapshot` — the pre-job battery
+  snapshot inside a read/write job now only refreshes the voltage display;
+  it no longer clears `busy` / `active_job` (the bar vanished the moment
+  the snapshot landed). The battery *button* job still uses `Msg::Battery`.
+- **Live-broadcast collision:** the flash service frames
+  (`read_flash` chunk loop, `erase_flash`, `write_block`, `write_end`)
+  now go through `request_filtered(…, is_not_live_broadcast)` so the
+  ECU's periodic 16-byte live block can no longer be mistaken for the
+  service reply (same pattern the DTC/battery reads already used).
+
+Tests: 84 passing (3 new parser regression tests: the 46-byte SEED reply
+byte-by-byte — nothing emitted before all 46 bytes; leading-garbage drop;
+bad-XOR resync). Clippy: only the 4 pre-existing warnings.
+
+**End-to-end verified:** full 256 KB `read` against the fake ECU
+(`respond --flash captures/actual_flash.bin --reply-delay 0`) — bootstrap
+(IDENT → UPROG_EIN → AIF → SEED_KEY → key) passes clean, the 2048-chunk
+`FLASH_LESEN` loop runs without truncation or collision.
+
 ## ← CURRENT TASK (take over from here)
+
+**Real-car verification of the session-28 parser fix.** The LEN-validated
+`FrameParser` + echo-wait retransmit were verified end-to-end against the
+fake ECU (`respond --flash`), not yet against the real car. Next on-car:
+
+1. `dde3-toolkit read /tmp/full.bin --port /dev/ttyUSB1` — the bootstrap
+   (IDENT → UPROG_EIN → AIF → SEED_KEY) must pass on the first try (it used
+   to need spamming), and the 256 KB chunk loop must run clean.
+2. If the real ECU ever replies with a frame whose LEN disagrees with the
+   trailing-XOR position, the log will show a `no response` bail — the
+   parser drops one byte and resyncs, so look for repeated 1-byte drops in
+   the RX log before changing anything.
 
 **Fake-ECU FS jobs: serve the real M47 error record; clear empties memory.**
 Done in session 25 (`src/sim.rs` `default_faults()` → real M47 reference

@@ -115,6 +115,11 @@ pub fn known_status_sb(sb: u8) -> bool {
 /// half-duplex K-line.
 const MAX_BUF: usize = 192;
 
+/// Total wire length INCLUDING the trailing XOR of the smallest and largest
+/// real frames; a LEN outside this range marks a false anchor / corruption.
+const MIN_LEN: usize = 4;
+const MAX_LEN: usize = 255;
+
 #[derive(Default)]
 pub struct FrameParser {
     buf: Vec<u8>,
@@ -133,65 +138,55 @@ impl FrameParser {
 
     /// Extract the next complete frame from the front of the buffer.
     ///
-    /// A frame is a run of bytes whose final byte equals the XOR of the
-    /// preceding bytes. Three cases, in order:
-    ///  1. the buffer starts with the ECU address (0x12): the frame is the
-    ///     shortest XOR-terminated prefix — this is what splits our TX echo
-    ///     from the ECU reply (and any interleaved periodic live block) that
-    ///     follow each other back-to-back on the line;
-    ///  2. otherwise, skip leading garbage until a 0x12-anchored frame
-    ///     appears;
-    ///  3. otherwise the whole silence-delimited buffer is one raw reply
-    ///     (e.g. the IDENT string, which carries no 0x12 anchor).
+    /// A frame is `12 <LEN> <job> <data...> <XOR>` where LEN is the TOTAL
+    /// wire length INCLUDING the trailing XOR (verified on every frame in
+    /// captures/dde3newlog.txt: IDENT `12 2E …` = 46 wire bytes, AIF
+    /// `12 32 …` = 50, flash write `12 49 …` = 73). A frame is emitted only
+    /// when all LEN bytes are present AND the trailing XOR validates — a
+    /// partial frame is never emitted, no matter what its bytes look like.
+    /// (The old "shortest XOR-terminated prefix" rule truncated the 46-byte
+    /// SEED reply to `12 13 14`, because the linear seed table contains the
+    /// in-band coincidence `0x12^0x13^0x14 == 0x15`.)
     ///
+    /// Bytes before the 0x12 front are line noise (collision debris) and
+    /// are dropped one at a time; there is no anchor scan inside the buffer.
     /// Returns the payload (trailing XOR byte stripped), or `None` when no
     /// complete frame is present yet — the partial frame stays buffered.
     pub fn take_frame(&mut self) -> Option<Frame> {
-        // 1) Envelope frame anchored at the front.
-        if self.buf.first() == Some(&ECU_ADDR) {
-            if let Some(k) = xor_end(&self.buf) {
-                let payload = self.buf[..k].to_vec();
-                self.buf.drain(0..=k);
-                return Some(Frame { payload });
+        // Leading garbage: drop until the buffer starts with the ECU
+        // address (or is empty).
+        while self.buf.first() != Some(&ECU_ADDR) {
+            if self.buf.is_empty() {
+                return None;
             }
+            self.buf.drain(0..1);
         }
-        // 2) Skip leading garbage until a 0x12-anchored frame appears.
-        for i in 1..self.buf.len() {
-            if self.buf[i] != ECU_ADDR {
-                continue;
-            }
-            if let Some(k) = xor_end(&self.buf[i..]) {
-                let payload = self.buf[i..i + k].to_vec();
-                self.buf.drain(0..i + k + 1);
-                return Some(Frame { payload });
-            }
+        // Envelope frame at the front: wait until all LEN wire bytes have
+        // arrived, then verify the trailing XOR.
+        let len = *self.buf.get(1)? as usize;
+        if !(MIN_LEN..=MAX_LEN).contains(&len) {
+            // Implausible LEN: false anchor — drop one byte, resync.
+            self.buf.drain(0..1);
+            return None;
         }
-        // 3) No 0x12 anchor: a raw reply is the whole buffer, XOR-terminated.
-        if self.buf.len() >= 2
-            && xor_cs(&self.buf[..self.buf.len() - 1]) == self.buf[self.buf.len() - 1]
-        {
-            let payload = self.buf[..self.buf.len() - 1].to_vec();
-            self.buf.clear();
+        if self.buf.len() < len {
+            return None; // mid-frame: wait for the remaining bytes
+        }
+        let k = len - 1; // index of the trailing XOR byte
+        if xor_cs(&self.buf[..k]) == self.buf[k] {
+            let payload = self.buf[..k].to_vec();
+            self.buf.drain(0..=k);
             return Some(Frame { payload });
         }
+        // Full declared length present but the XOR does not validate:
+        // corruption or a false 0x12 anchor — drop one byte, resync.
+        self.buf.drain(0..1);
         None
     }
 
     pub fn clear(&mut self) {
         self.buf.clear();
     }
-}
-
-/// Index of a frame's trailing XOR byte: the shortest `k >= 2` with
-/// `xor(s[..k]) == s[k]`. Returns `None` when no such position exists (the
-/// frame is incomplete).
-fn xor_end(s: &[u8]) -> Option<usize> {
-    for k in 2..s.len() {
-        if xor_cs(&s[..k]) == s[k] {
-            return Some(k);
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +336,30 @@ pub fn reopen_divisor(requested: u32) -> u32 {
 /// Seed/Key init: `12 08 90 42 4D 57 05 <Z>`.
 pub fn frame_seed_key(z: u8) -> Vec<u8> {
     vec![0x12, 0x08, 0x90, 0x42, 0x4D, 0x57, 0x05, z]
+}
+
+/// AIF / programming-record read: `12 05 02 <param>` (+ trailing XOR) —
+/// the flasher-side "read the programming record / VIN" telegram that opens
+/// the flash session (Galletto sent `12 05 02 00`, XOR `0x15`).
+pub fn frame_aif_read(param: u8) -> Vec<u8> {
+    vec![0x12, 0x05, 0x02, param]
+}
+
+/// DS2 `0x90` seed-key: compute the accepted 4-byte key from a seed-telegram
+/// reply — the job's unbiased formula, `K[i] = FR[(0x12+i) % 46] + FR[(Z+i) % 46]
+/// + FR[(0x29+i) % 46]` (byte adds, `FR` = the 46-byte wire frame = seed reply
+/// payload + trailing XOR). Verified against the unbiased vectors: Z=0x07 →
+/// `39 3C 3F 42`, Z=0x10 → `87 8A 8D 90`, Z=0x16 → `BB BE C1 C4` — no bias.
+pub fn key_from_seed_reply(reply: &[u8], z: u8) -> [u8; 4] {
+    let mut fr = reply.to_vec();
+    fr.push(xor_cs(&fr));
+    let n = fr.len();
+    let mut key = [0u8; 4];
+    for (i, slot) in key.iter_mut().enumerate() {
+        let idx = |base: usize| (base + i) % n;
+        *slot = fr[idx(0x12)].wrapping_add(fr[idx(z as usize)]).wrapping_add(fr[idx(0x29)]);
+    }
+    key
 }
 
 /// Flash read (FLASH_LESEN, service 0x06): `12 09 06 00 <A_hi A_mid A_lo> <count> [XOR]`.
@@ -614,6 +633,10 @@ pub fn frame_dtc_clear() -> Vec<u8> {
 /// Max BUSY (0xA1) resends before giving up.
 const MAX_BUSY_RETRIES: u32 = 50;
 
+/// Max resends when our own TX echo never appears on the line (the request
+/// never reached the bus).
+const MAX_TX_RETRIES: u32 = 3;
+
 pub struct Kline {
     port: Box<dyn SerialPort>,
     path: String,
@@ -829,7 +852,14 @@ impl Kline {
     /// NRC. Any other byte at [2] means a data reply (e.g. flash read, MW
     /// live) and is returned as-is.
     pub fn request(&mut self, payload: &[u8], timeout: Duration) -> Result<Vec<u8>> {
-        self.do_request(payload, timeout, |_| true)
+        self.do_request(payload, timeout, &mut |_: &[u8]| true, true)
+    }
+
+    /// Like [`Kline::request`], but sends the frame exactly once and never
+    /// retries on BUSY — for the flashing-session bootstrap frames, which
+    /// must not be retried as a sequence (one of each).
+    pub fn request_once(&mut self, payload: &[u8], timeout: Duration) -> Result<Vec<u8>> {
+        self.do_request(payload, timeout, &mut |_: &[u8]| true, false)
     }
 
     /// Like [`request`], but only a reply that satisfies `accept` is returned;
@@ -840,10 +870,23 @@ impl Kline {
     where
         F: Fn(&[u8]) -> bool,
     {
-        self.do_request(payload, timeout, accept)
+        self.do_request(payload, timeout, accept, true)
     }
 
-    fn do_request<F>(&mut self, payload: &[u8], timeout: Duration, mut accept: F) -> Result<Vec<u8>>
+    /// How long to wait for the echo of a transmitted frame: the frame's
+    /// own transmission time (per-byte pacing dominates at 9600 baud) plus
+    /// margin.
+    fn echo_timeout(frame: &[u8]) -> Duration {
+        Duration::from_millis(frame.len() as u64 * 5).max(Duration::from_millis(250))
+    }
+
+    fn do_request<F>(
+        &mut self,
+        payload: &[u8],
+        timeout: Duration,
+        mut accept: F,
+        retry_on_busy: bool,
+    ) -> Result<Vec<u8>>
     where
         F: FnMut(&[u8]) -> bool,
     {
@@ -853,16 +896,24 @@ impl Kline {
         };
         let sid = payload.get(2).copied().unwrap_or(0);
         let mut busy = 0u32;
+        let mut tx_retries = 0u32;
 
         loop {
             // Drop stale state from the previous transaction (e.g. the bus
             // echo that was consumed after its response).
             self.parser.clear();
             self.pending.clear();
+            let retry_note = if busy > 0 {
+                format!("BUSY retry {busy}")
+            } else if tx_retries > 0 {
+                format!("no-echo retry {tx_retries}")
+            } else {
+                String::new()
+            };
             self.log(format!(
                 "TX {}{}",
                 hex(&frame),
-                if busy == 0 { String::new() } else { format!("  (BUSY retry {busy})") }
+                if retry_note.is_empty() { String::new() } else { format!("  ({retry_note})") }
             ));
             self.write_frame(&frame)?;
 
@@ -877,11 +928,19 @@ impl Kline {
             }
 
             let deadline = Instant::now() + timeout;
+            // The echo of our own TX (reflected by the monitor tap) must be
+            // on the line by the time the last transmitted byte lands, plus
+            // margin. If it is missing, the request never reached the bus —
+            // resend instead of waiting out the full reply timeout.
+            let echo_deadline = Instant::now() + Self::echo_timeout(&frame);
+            let mut got_echo = false;
+            let mut resend = false;
             let mut res: Option<Result<Vec<u8>>> = None;
             'recv: while res.is_none() {
                 while let Some(f) = self.pending.pop_front() {
                     // Skip echo of our own transmission.
                     if f.payload == sent.payload {
+                        got_echo = true;
                         continue;
                     }
                     self.log(format!("RX {}", hex(&f.payload)));
@@ -895,11 +954,15 @@ impl Kline {
                                 match JobStatus::from_sb(sb, sid) {
                                     JobStatus::Okay => res = Some(Ok(f.payload)),
                                     JobStatus::Busy => {
+                                        if !retry_on_busy {
+                                            bail!("ECU BUSY for service 0x{sid:02X} (single-shot flashing session frame)");
+                                        }
                                         if busy >= MAX_BUSY_RETRIES {
                                             bail!("ECU BUSY for {MAX_BUSY_RETRIES} retries to service 0x{sid:02X}");
                                         }
                                         busy += 1;
                                         thread::sleep(Duration::from_millis(50));
+                                        resend = true;
                                         break 'recv; // resend in the outer loop
                                     }
                                     _ => {
@@ -916,6 +979,19 @@ impl Kline {
                 }
                 if res.is_some() {
                     break;
+                }
+
+                if !got_echo && Instant::now() > echo_deadline {
+                    if tx_retries >= MAX_TX_RETRIES {
+                        bail!(
+                            "no echo of service 0x{sid:02X} ({}) on {} after {MAX_TX_RETRIES} resends — line dead or ECU not listening",
+                            hex(payload),
+                            self.path
+                        );
+                    }
+                    tx_retries += 1;
+                    resend = true;
+                    break 'recv; // resend in the outer loop
                 }
 
                 if Instant::now() > deadline {
@@ -936,7 +1012,14 @@ impl Kline {
             }
 
             if res.is_none() {
-                continue; // BUSY: resend the request
+                if resend {
+                    continue; // BUSY or no-echo: resend the request
+                }
+                bail!(
+                    "no response to service 0x{sid:02X} ({}), link {}",
+                    hex(payload),
+                    self.path
+                );
             }
             let reply = res.unwrap()?;
             // With the sim active, confirm the TX actually reached the bus
@@ -1028,6 +1111,53 @@ impl Kline {
         }
     }
 
+    /// Full flasher session bootstrap — mirrors the flasher tools' captured
+    /// full-flash / full-write procedure (`captures/galletto capture with
+    /// respond tool/testread.txt` read session, `fakewritegalleto.txt` write
+    /// session). Galletto never touches flash services directly; every session
+    /// starts with:
+    ///
+    /// ```text
+    /// IDENT       12 04 00          -> 12 2E A0 <42-char ident>    (one more identify)
+    /// UPROG_EIN   12 04 0D          -> 12 04 A0 B6                 (enter programming mode)
+    /// AIF read    12 05 02 00        -> 12 32 A0 <46-byte record>  (programm record / VIN)
+    /// SEED_KEY   12 08 90 42 4D 57 Z -> 12 2E A0 <42-byte seed>     (Z = seconds mod 0x2E)
+    ///             12 08 90 K0 K1 K2 K3 -> 12 04 A0 B6              (OKAY = unlocked)
+    /// ```
+    ///
+    /// The bare flash service frames (`FLASH_LESEN` for reads, `FLASH_LOESCHEN`/
+    /// `FLASH_SCHREIBEN`/… for writes) only answer inside this session on a real
+    /// ECU: services 0x06/0x07 are NACK stubs (status `0xA2`) in the normal
+    /// application session (`docs/FINDINGS_flash_and_fast_ds2.md` §2) and the
+    /// flasher tools therefore run the whole bootstrap first and only then talk
+    /// flash. This is what the full-flash read now does — previously the chunk
+    /// loop sent `FLASH_LESEN` frames directly and never performed the session
+    /// setup.
+    pub fn begin_flash_session(&mut self) -> Result<()> {
+        // 1) One more identify — (re-)open / verify the diagnostic session.
+        //    Single-shot: exactly one of each flashing-session frame, no retry.
+        self.request_once(&frame_ident(), Duration::from_millis(500))
+            .with_context(|| "FLASH_READ bootstrap: IDENT failed")?;
+        // 2) Set to programming mode.
+        self.request_once(&frame_uprog_ein(), Duration::from_secs(3))
+            .with_context(|| "FLASH_READ bootstrap: UPROG_EIN failed")?;
+        // 3) AIF / programming-record read (the flasher's VIN / record gate).
+        self.request_once(&frame_aif_read(0x00), Duration::from_secs(3))
+            .with_context(|| "FLASH_READ bootstrap: AIF read failed")?;
+        // 4) Unlock: seed telegram -> key -> key check. A failing key check
+        //    (NRC, e.g. B0 not-unlocked) aborts the session immediately.
+        let z: u8 = 0x07; // SEED_KEY job: Z = seconds mod 0x2E (Galletto's captured read session used Z=0x07)
+        let seed_req = [0x12, 0x08, 0x90, 0x42, 0x4D, 0x57, z];
+        let seed_reply = self
+            .request_once(&seed_req, Duration::from_secs(3))
+            .with_context(|| "FLASH_READ bootstrap: SEED_KEY seed request failed")?;
+        let key = key_from_seed_reply(&seed_reply, z);
+        let key_send = [0x12, 0x08, 0x90, key[0], key[1], key[2], key[3]];
+        self.request_once(&key_send, Duration::from_secs(3))
+            .with_context(|| "FLASH_READ bootstrap: SEED_KEY key check failed")?;
+        Ok(())
+    }
+
     /// Read the full 256 KB flash image using `12 09 06 <addr> <count>` frames.
     pub fn read_full(
         &mut self,
@@ -1052,16 +1182,26 @@ impl Kline {
     /// Shared read loop for [`Kline::read_full`] / [`Kline::read_range`]:
     /// 0x80-byte `12 09 06` chunks over `start..start+length`.
     ///
-    /// On a non-link error (timeout, bad reply) the whole read is retried
-    /// once after a 1 s pause with 20 ms inter-byte silence; a hard link
-    /// error (port gone) is not retried. GUI and CLI both read through
-    /// this, so both recover identically.
+    /// The full flasher session bootstrap runs once here and is NOT part of
+    /// the retry — a failed session (e.g. unlock refused / B0) aborts the read
+    /// instantly instead of being retried as a flashing-session job. On a
+    /// non-link error (timeout, bad reply) the chunk loop is retried once after
+    /// a 1 s pause with 20 ms inter-byte silence; a hard link error (port gone)
+    /// is not retried. GUI and CLI both read through this, so both recover
+    /// identically.
     fn read_flash(
         &mut self,
         start: usize,
         length: usize,
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<Vec<u8>> {
+        // Full flasher session first (Galletto procedure: IDENT → UPROG_EIN →
+        // AIF read → SEED_KEY), then the FLASH_LESEN chunk loop. A bare FLASH_LESEN
+        // in the normal session is only NACKed on a real ECU — the flasher tools
+        // always run this setup first. The session runs once here; a failed
+        // session (e.g. unlock refused / B0) aborts the read instantly instead of
+        // being retried as a flashing-session job.
+        self.begin_flash_session()?;
         let attempt = |k: &mut Self, progress: &mut dyn FnMut(usize, usize)| -> Result<Vec<u8>> {
             let mut out = Vec::with_capacity(length);
             let mut addr = start as u32;
@@ -1069,7 +1209,13 @@ impl Kline {
             while addr < end {
                 let count = 0x80u32.min(end - addr) as u8;
                 let req = frame_flash_read(addr, count);
-                let r = k.request(&req, Duration::from_secs(5))?;
+                // The ECU keeps broadcasting its periodic ~16-byte live block
+                // (`12 10 A0 10 …`) on the K-line even inside the flashing
+                // session. A bare `request` would accept that block as the
+                // FLASH_LESEN reply (status 0xA0 → OKAY) and the read would
+                // die with "short flash read reply" at a random address — so
+                // skip it, exactly like the DTC/battery reads do.
+                let r = k.request_filtered(&req, Duration::from_secs(5), is_not_live_broadcast)?;
                 check_flash_read_reply(&r, count, addr)?;
                 out.extend_from_slice(&r[3..3 + count as usize]);
                 addr += count as u32;
@@ -1091,25 +1237,29 @@ impl Kline {
     /// Erase flash: sends `12 09 07 06 <addr> <count>`.
     pub fn erase_flash(&mut self, addr: u32, count: u8) -> Result<()> {
         let req = frame_flash_erase(addr, count);
-        self.request(&req, Duration::from_secs(60))?;
+        // The ECU's periodic live block (`12 10 A0 10 …`) interleaves on the
+        // K-line and must not be mistaken for the erase OKAY (`12 04 A0 B6`).
+        self.request_filtered(&req, Duration::from_secs(60), is_not_live_broadcast)?;
         Ok(())
     }
 
     /// Write a block of data: sends `12 09 07 02 <addr> <data...>`.
     pub fn write_block(&mut self, addr: u32, data: &[u8]) -> Result<()> {
         let req = frame_flash_write(addr, data);
-        self.request(&req, Duration::from_secs(5))?;
+        // Skip the periodic live block — it carries status 0xA0 and would be
+        // accepted as the write OKAY before the real reply arrives.
+        self.request_filtered(&req, Duration::from_secs(5), is_not_live_broadcast)?;
         Ok(())
     }
 
     /// End a write sequence: sends `12 09 07 0F <addr> <00>`.
     pub fn write_end(&mut self, addr: u32) -> Result<()> {
         let req = frame_flash_write_end(addr);
-        self.request(&req, Duration::from_secs(10))?;
+        self.request_filtered(&req, Duration::from_secs(10), is_not_live_broadcast)?;
         Ok(())
     }
 
-    /// Full flash write: erase → write blocks → end.
+    /// Full flash write: full flasher session → erase → write blocks → end.
     ///
     /// Only the writable span `[FLASH_WRITE_START, IMAGE_SIZE)` —
     /// `[0x10000, 0x40000)` — is erased and written; the image bytes below
@@ -1126,8 +1276,9 @@ impl Kline {
             bail!("image must be exactly 256 KB");
         }
         self.set_write_delay(data_delay_ms);
-        // Enter programming mode before touching flash.
-        self.request(&frame_uprog_ein(), Duration::from_secs(3))?;
+        // Full flasher session before touching flash (Galletto procedure:
+        // IDENT -> UPROG_EIN -> AIF read -> SEED_KEY), then erase → write → end.
+        self.begin_flash_session()?;
         self.erase_flash(FLASH_WRITE_START as u32, 0x00)?;
         thread::sleep(Duration::from_millis(100));
         let region_len = IMAGE_SIZE - FLASH_WRITE_START;
@@ -1142,7 +1293,8 @@ impl Kline {
         Ok(())
     }
 
-    /// Calibration flash write: erase → write blocks → end.
+    /// Calibration flash write: full flasher session → erase → write blocks →
+    /// end.
     pub fn write_calibration(
         &mut self,
         image: &[u8],
@@ -1154,8 +1306,9 @@ impl Kline {
             bail!("calibration image must be exactly 32 KB");
         }
         self.set_write_delay(data_delay_ms);
-        // Enter programming mode before touching flash.
-        self.request(&frame_uprog_ein(), Duration::from_secs(3))?;
+        // Full flasher session before touching flash (Galletto procedure:
+        // IDENT -> UPROG_EIN -> AIF read -> SEED_KEY), then erase → write → end.
+        self.begin_flash_session()?;
         self.erase_flash(CAL_START as u32, 0x00)?;
         thread::sleep(Duration::from_millis(100));
         let mut done = 0usize;
@@ -1607,7 +1760,43 @@ mod tests {
     }
 
     #[test]
-    fn parameterized_frames_match_vm_extraction() {
+    fn frame_aif_read_matches_galletto() {
+        // Galletto's AIF read from the full-flash-read session: `12 05 02 00`
+        // + trailing XOR (xor(12 05 02 00) = 0x15 — the `… 15` of `12 05 02 00
+        // 15` in the capture).
+        assert_eq!(frame_aif_read(0x00), vec![0x12, 0x05, 0x02, 0x00]);
+        assert_eq!(build_frame(&frame_aif_read(0x00)), vec![0x12, 0x05, 0x02, 0x00, 0x15]);
+    }
+
+    #[test]
+    fn key_from_seed_reply_matches_galletto_vectors() {
+        // Seed replies are the 45-byte payloads `12 2E A0 <42 data bytes>` (+ the
+        // trailing XOR the key formula runs on); the accepted key is the
+        // unbiased job sum `K[i] = FR[(0x12+i)%46] + FR[(Z+i)%46] + FR[(0x29+i)%46]`.
+        // Unbiased vectors only: Z=0x07 -> `39 3C 3F 42`, Z=0x10 -> `87 8A 8D 90`,
+        // Z=0x16 -> `BB BE C1 C4` (the captured Galletto values for Z>=0x10 sat at
+        // unbiased-5, i.e. behind the old bias; the job sum is unbiased).
+        let mut reply = vec![0x12, 0x2E, 0xA0];
+        for i in 0u8..42 {
+            reply.push(((0x07u16 * 31 + i as u16 + 0x27) & 0xFF) as u8); // seed data for Z=0x07
+        }
+        assert_eq!(key_from_seed_reply(&reply, 0x07), [0x39, 0x3C, 0x3F, 0x42]);
+
+        let mut reply10 = vec![0x12, 0x2E, 0xA0];
+        for i in 0u8..42 {
+            reply10.push(((0x10u16 * 31 + i as u16 + 0x27) & 0xFF) as u8); // seed data for Z=0x10
+        }
+        assert_eq!(key_from_seed_reply(&reply10, 0x10), [0x87, 0x8A, 0x8D, 0x90]);
+
+        let mut reply16 = vec![0x12, 0x2E, 0xA0];
+        for i in 0u8..42 {
+            reply16.push(((0x16u16 * 31 + i as u16 + 0x27) & 0xFF) as u8); // seed data for Z=0x16
+        }
+        assert_eq!(key_from_seed_reply(&reply16, 0x16), [0xBB, 0xBE, 0xC1, 0xC4]);
+    }
+
+    #[test]
+    fn parameterized_frames_match_vm_extraction() { 
         // Verified against the WinKFP .prg VM (docs/FINDINGS_flash_and_fast_ds2.md):
         // FLASH_LESEN addr=0x38000 count=0x80 -> 12 09 06 00 03 80 00 80 (addr BE @4..6)
         assert_eq!(
@@ -1702,5 +1891,73 @@ mod tests {
             JobStatus::from_sb(0xAA, 0x0D),
             JobStatus::ErrorSgUnknown(_)
         ));
+    }
+
+    #[test]
+    fn seed_reply_survives_chunked_delivery() {
+        // Regression: the 46-byte SEED reply `12 2E A0 00 01 02 … 29 9D`
+        // arrived in chunks and the old shortest-XOR-prefix parser emitted
+        // the 3-byte frame `12 13 14` from inside the still-arriving reply
+        // (the linear seed table contains the in-band coincidence
+        // 0x12^0x13^0x14 == 0x15), so the toolkit computed a key from
+        // `12 13 14` and collided with the real reply on the wire.
+        let req = build_frame(&[0x12, 0x08, 0x90, 0x42, 0x4D, 0x57, 0x07]);
+        let mut reply_payload = vec![0x12, 0x2E, 0xA0];
+        for i in 0u8..=0x29 {
+            reply_payload.push(i);
+        }
+        let mut reply_wire = reply_payload.clone();
+        reply_wire.push(xor_cs(&reply_payload));
+        assert_eq!(reply_wire.len(), 46, "LEN 0x2E = total wire length");
+
+        // Byte-by-byte delivery (worst-case chunking): nothing may be
+        // emitted before the full 46-byte frame has arrived.
+        let mut p = FrameParser::default();
+        p.feed(&req);
+        let echo = p.take_frame().expect("echo");
+        assert_eq!(echo.payload, vec![0x12, 0x08, 0x90, 0x42, 0x4D, 0x57, 0x07]);
+        for (i, b) in reply_wire.iter().enumerate() {
+            p.feed(&[*b]);
+            if i + 1 < reply_wire.len() {
+                assert!(
+                    p.take_frame().is_none(),
+                    "no frame before all {} bytes (got one after {})",
+                    reply_wire.len(),
+                    i + 1
+                );
+            }
+        }
+        let f = p.take_frame().expect("full seed reply");
+        assert_eq!(f.payload, reply_payload);
+        assert!(p.take_frame().is_none());
+    }
+
+    #[test]
+    fn parser_drops_leading_garbage_before_frame() {
+        let mut p = FrameParser::default();
+        p.feed(&[0x00, 0xFF, 0x12, 0x04, 0x00, 0x16]);
+        let f = p.take_frame().expect("frame after garbage");
+        assert_eq!(f.payload, vec![0x12, 0x04, 0x00]);
+    }
+
+    #[test]
+    fn parser_resyncs_on_bad_xor() {
+        // A frame whose declared LEN is present but whose trailing XOR does
+        // not validate must never be emitted; the buffer resyncs byte by
+        // byte and a valid frame behind the debris is still recovered.
+        let mut p = FrameParser::default();
+        p.feed(&[0x12, 0x04, 0x00, 0x99]); // bad XOR (would be 0x16)
+        for _ in 0..8 {
+            assert!(p.take_frame().is_none(), "corrupt frame must not be emitted");
+        }
+        p.feed(&build_frame(&[0x12, 0x04, 0x0D]));
+        let mut got = None;
+        for _ in 0..16 {
+            if let Some(f) = p.take_frame() {
+                got = Some(f);
+                break;
+            }
+        }
+        assert_eq!(got.unwrap().payload, vec![0x12, 0x04, 0x0D]);
     }
 }

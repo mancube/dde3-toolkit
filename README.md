@@ -18,7 +18,9 @@ captures. All of that work is written up in [`docs/`](docs) — start with
 
 ## Features
 
-- **Flash read** — full 256 KB or the 32 KB calibration region (0x38000–0x3FFFF)
+- **Flash read** — full 256 KB or the 32 KB calibration region (0x38000–0x3FFFF);
+  runs the full flasher session first (IDENT → UPROG_EIN → AIF read →
+  SEED_KEY) before the `FLASH_LESEN` chunks, matching the Galletto read flow
 - **Flash write** — full image or calibration region; UPROG_EIN → erase →
   block write → write-end, with progress reporting and a post-write
   power-cycle step
