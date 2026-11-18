@@ -443,21 +443,6 @@ pub fn frame_flash_write(addr: u32, data: &[u8]) -> Vec<u8> {
     p
 }
 
-/// Flash write end (FLASH_SCHREIBEN_ENDE, service 0x07 subfn 0x0F):
-/// `12 09 07 0F <A_hi A_mid A_lo> 00 [XOR]`, address big-endian.
-pub fn frame_flash_write_end(addr: u32) -> Vec<u8> {
-    vec![
-        0x12,
-        0x09,
-        0x07,
-        0x0F,
-        (addr >> 16) as u8,
-        (addr >> 8) as u8,
-        addr as u8,
-        0x00,
-    ]
-}
-
 /// Fault clear (K-line BAP): `12 09 07 0E 42 41 50 00`.
 pub fn frame_fault_clear() -> Vec<u8> {
     vec![0x12, 0x09, 0x07, 0x0E, 0x42, 0x41, 0x50, 0x00]
@@ -1299,13 +1284,6 @@ impl Kline {
         Ok(())
     }
 
-    /// End a write sequence: sends `12 09 07 0F <addr> <00>`.
-    pub fn write_end(&mut self, addr: u32) -> Result<()> {
-        let req = frame_flash_write_end(addr);
-        self.request_filtered(&req, Duration::from_secs(10), is_not_live_broadcast)?;
-        Ok(())
-    }
-
     /// Full flash write, mimicking Galletto's **two-session** flow
     /// (`captures/galletto capture with respond tool/testwrite.txt`):
     ///
@@ -1894,11 +1872,6 @@ mod tests {
         assert_eq!(
             frame_flash_write(0x38000, &[0x11, 0x22, 0x33, 0x44]),
             vec![0x12, 0x0D, 0x07, 0x02, 0x03, 0x80, 0x00, 0x04, 0x11, 0x22, 0x33, 0x44]
-        );
-        // FLASH_SCHREIBEN_ENDE @0x38000 -> 12 09 07 0F 03 80 00 00
-        assert_eq!(
-            frame_flash_write_end(0x38000),
-            vec![0x12, 0x09, 0x07, 0x0F, 0x03, 0x80, 0x00, 0x00]
         );
     }
 
