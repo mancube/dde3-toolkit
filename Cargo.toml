@@ -1,6 +1,6 @@
 [package]
 name = "dde3-toolkit"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2021"
 description = "DDE3 (BMW EDC15 DDE3.0) K-line diagnostic tool - flash read/write, live data, protocol logging, fault clear"
 license = "MIT"
