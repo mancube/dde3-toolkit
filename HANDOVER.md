@@ -514,6 +514,32 @@ Removed entirely (user call):
   are the only verified block sizes. Don't re-attempt larger write blocks
   without a capture proving the ECU's flasher accepts them.
 
+### Session 34 (2026-11-18) — full per-run log file (GUI)
+
+The in-app Protocol log panel keeps only the most recent 2000 lines
+(`push_log` drains 500 past 2000), so a long session's early frames were
+lost from the on-screen record. Now **every GUI launch also writes a full,
+untruncated log to a temp file**, named after the startup time:
+
+- Path: `$TMPDIR/dde3-toolkit/dde3-YYYYmmdd-HHMMSS.log` (one file per run;
+  `open_run_log` in `app.rs` creates the dir + file in `App::new`).
+- Every `push_log` line (all wire TX/RX + operation messages) is appended
+  with a wall-clock `YYYY-MM-DD HH:MM:SS.mmm` prefix, **flushed per line**
+  (a crash mid-write still leaves a complete log). Original `[+x.xxxs]`
+  relative timing is kept after the prefix.
+- Header block: version, start time, mode (demo/K-line). `on_exit` appends
+  a `run ended` line on a clean window close (not on SIGTERM).
+- The path is printed to stderr at startup and shown in the Log tab header
+  (muted, monospace, next to the `N lines` label).
+- `now_local()` (app.rs) formats the clock via `libc::localtime_r` — no new
+  dependency. If the temp file can't be opened, the run continues without it
+  (a stderr note is printed); logging never blocks or aborts an operation.
+
+Verified end-to-end against the fake ECU over a socat pty pair
+(`respond --flash` on one end, GUI `--autoconnect --auto-live` on the other):
+199 lines captured, 194 of them TX/RX frames, byte-for-byte the full session.
+87 tests passing; build warning-free.
+
 ## ← CURRENT TASK (take over from here)
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU

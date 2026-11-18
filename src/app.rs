@@ -8,7 +8,7 @@
 //! (`12 05 14 01` count, `12 05 04 00` entry, `12 05 04 01` shadow,
 //! `12 04 05` clear) with the German text tables in `crate::dtc`.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -248,6 +248,10 @@ pub struct App {
     error: Option<String>,
     ecu: Option<EcuInfo>,
     logs: Vec<String>,
+    /// Full run log, one file per launch in the temp dir — never truncated,
+    /// unlike the in-app panel (which keeps the last 2000 lines).
+    run_log: Option<BufWriter<File>>,
+    run_log_path: PathBuf,
     read_path: String,
     cal_path: String,
     cal_info: Option<(String, usize)>,
@@ -344,6 +348,8 @@ impl App {
             error: None,
             ecu: None,
             logs: vec!["DDE3 Toolkit started".into()],
+            run_log: None,
+            run_log_path: PathBuf::new(),
             read_path: default_path("dde3_full.bin"),
             cal_path: default_path("dde3_cal.bin"),
             cal_info: None,
@@ -392,6 +398,7 @@ impl App {
             patch_notice: None,
             patch_target_ok: None,
         };
+        app.open_run_log(demo);
         app.refresh_ports();
         if demo {
             app.demo();
@@ -636,9 +643,41 @@ impl App {
     }
 
     fn push_log(&mut self, line: String) {
+        // The run-log file gets every line, untruncated (the panel below
+        // keeps only the most recent 2000).
+        if let Some(f) = self.run_log.as_mut() {
+            let (_, stamp) = now_local();
+            let _ = writeln!(f, "{stamp} {line}");
+            let _ = f.flush();
+        }
         self.logs.push(line);
         if self.logs.len() > 2000 {
             self.logs.drain(0..500);
+        }
+    }
+
+    /// Open this run's full log file, named after the startup time:
+    /// `$TMPDIR/dde3-toolkit/dde3-YYYYmmdd-HHMMSS.log`. Every line pushed to
+    /// the protocol log is appended here for the whole run.
+    fn open_run_log(&mut self, demo: bool) {
+        let (name_stamp, human) = now_local();
+        let dir = std::env::temp_dir().join("dde3-toolkit");
+        let path = dir.join(format!("dde3-{name_stamp}.log"));
+        let opened = std::fs::create_dir_all(&dir)
+            .and_then(|_| OpenOptions::new().create(true).append(true).open(&path));
+        match opened {
+            Ok(file) => {
+                let mut w = BufWriter::new(file);
+                let _ = writeln!(w, "=== dde3-toolkit v{} run log ===", env!("CARGO_PKG_VERSION"));
+                let _ = writeln!(w, "started: {human}");
+                let _ = writeln!(w, "mode: {}", if demo { "demo (simulated ECU)" } else { "K-line" });
+                let _ = writeln!(w, "{human} DDE3 Toolkit started");
+                let _ = w.flush();
+                eprintln!("run log: {}", path.display());
+                self.run_log_path = path;
+                self.run_log = Some(w);
+            }
+            Err(e) => eprintln!("run log: could not open temp log file: {e}"),
         }
     }
 
@@ -3691,7 +3730,7 @@ impl App {
                 ui.ctx().copy_text(self.logs.join("\n"));
             }
             if centered_button(ui, Vec2::new(80.0, 28.0), egui::Button::new("Clear"))
-                .on_hover_text("Clear the protocol log (the file, if logging, is untouched)")
+                .on_hover_text("Clear the protocol log (the run-log file keeps everything)")
                 .clicked()
             {
                 self.logs.clear();
@@ -3701,6 +3740,15 @@ impl App {
                     .size(12.0)
                     .color(MUTED),
             );
+            if !self.run_log_path.as_os_str().is_empty() {
+                ui.label(
+                    RichText::new(format!("→ {}", self.run_log_path.display()))
+                        .size(11.0)
+                        .monospace()
+                        .color(MUTED),
+                )
+                .on_hover_text("Full run log — every line of this run, untruncated");
+            }
         });
         ui.add_space(8.0);
         let log_height = (ui.available_height() - 12.0).max(240.0);
@@ -3733,6 +3781,14 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(f) = self.run_log.as_mut() {
+            let (_, stamp) = now_local();
+            let _ = writeln!(f, "{stamp} run ended");
+            let _ = f.flush();
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
         // Ctrl+O open image, Ctrl+S save image. Skipped while a text field has
@@ -4205,6 +4261,32 @@ fn default_path(name: &str) -> String {
     std::env::var("HOME")
         .map(|h| format!("{h}/{name}"))
         .unwrap_or_else(|_| name.to_string())
+}
+
+/// Local wall clock, now. Returns `(compact, human)`:
+/// - `compact` — `YYYYmmdd-HHMMSS`, safe for a file name (the run-log name);
+/// - `human`   — `YYYY-MM-DD HH:MM:SS.mmm`, for the line prefixes.
+fn now_local() -> (String, String) {
+    let dur = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = dur.as_secs() as i64;
+    let ms = dur.subsec_millis();
+    let t: libc::time_t = secs as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::localtime_r(&t, &mut tm);
+    }
+    let (y, mo, d, h, mi, s) = (
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+    );
+    (
+        format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}"),
+        format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}.{ms:03}"),
+    )
 }
 
 /// Pre-write battery snapshot (ADF id 0x0F65, DDE3 scale 0.02037243 / LSB).
