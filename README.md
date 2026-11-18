@@ -125,12 +125,15 @@ logged. Own replies are matched on the wire and logged as `ECHO`.
 # Verify/correct TDI V3.1 checksums
 ./target/release/dde3-toolkit checksum flash.bin
 
-# Write (requires typing WRITE to confirm)
+# Write (requires typing WRITE to confirm; WRITE192 with --experimental)
 ./target/release/dde3-toolkit write flash.bin --port /dev/ttyUSB1
 ./target/release/dde3-toolkit write-cal cal.bin --port /dev/ttyUSB1
 ```
 
 All subcommands also accept `--baud <rate>`, `--data-delay <ms>` and `--sim`.
+`--experimental` switches flash reads/writes to 192-byte blocks (experimental,
+not car-verified — default is the known-safe 64 B writes / 128 B reads); with
+it, writes additionally require typing **WRITE192** instead of `WRITE`.
 With no arguments the binary launches the GUI; it accepts the same
 `--autoconnect/--auto-read/--auto-write/--demo/...` automation flags as
 dde4-toolkit. Full command list: see `HANDOVER.md` → docs, or just run the
@@ -142,6 +145,10 @@ The loaded image is shown in a status strip on the Write, Checksums and
 Patches tabs (name, size/kind, checksum state) with a **Close image** control,
 and in the side nav while it is loaded. Keyboard: **Ctrl+O** opens an image,
 **Ctrl+S** saves the loaded image. Disabled controls explain why on hover.
+The side nav also has a program-wide **LINK · GLOBAL** section: 192 B blocks
+(EXP, the experimental block size — writes then ask for WRITE192), faster
+9600, fast write, and fast baud 125k. The battery voltage pill sits in the
+top bar next to the CONNECTED status.
 
 ## Testing
 

@@ -454,7 +454,57 @@ uncommitted `write_end()`-per-zone attempt (working tree on top of
 updated with the full analysis. Re-evaluate only when a real
 MPPS/PC-software capture shows the address + timing.
 
+### Session 32 (2026-11-18) — experimental 192-byte flash blocks + global LINK side-nav
+
+User request: an experimental 192-byte block mode for flash read **and**
+write (full + calibration) — "closer to the theoretical block size limit the
+ECU's flash write code will accept" (246 B/frame) — behind a stricter gate,
+plus the link/timing toggles moved out of individual tabs into one
+program-wide place. Default OFF everywhere.
+
+- `src/protocol.rs`: `WRITE_BLOCK_EXP` / `READ_CHUNK_EXP` (=192) next to the
+  known-safe `WRITE_BLOCK` (64) / `READ_CHUNK` (128); `Kline` carries
+  `write_block`/`read_chunk` with `set_experimental_blocks(on)`;
+  `read_full`/`read_range` and `write_full`/`write_calibration` use the
+  configured sizes. The frame builder already allowed ≤246 B.
+- Gating (two independent gates on writes): CLI `--experimental` + typing
+  **WRITE192** (not WRITE); GUI "192 B blocks (EXP)" toggle + WRITE192 in the
+  write dialog.
+- GUI side nav now has a program-wide **LINK · GLOBAL** section: 192 B blocks
+  (EXP), faster 9600, fast write, fast baud 125k — the faster-9600/fast-baud
+  toggles moved off the Live tab, fast write off the Write tab. The battery
+  voltage pill moved from the Read/Write tabs to the top bar beside the
+  CONNECTED status.
+- Side-nav layout: the tab list scrolls on its own (30 px buttons, own
+  ScrollArea); LINK/IMAGE/ECU+version are pinned at the bottom, always
+  visible — the pinned height is measured each frame with an invisible
+  `UiBuilder::invisible()` sizing pass (`pinned_sections`), so nothing clips
+  at any window size.
+- CLI dispatch fix: `--experimental` was in the GUI-flag list, so
+  `dde3-toolkit write x --experimental` launched the GUI. GUI detection is
+  now "no args, or first arg starts with `-`" (CLI commands are first).
+- Tests: `protocol::tests::experimental_block_sizes`,
+  `sim::tests::experimental_192_byte_blocks` (89 passing).
+- Docs: `docs/wire-protocol.md` §32, README (`--experimental`, GUI section).
+
 ## ← CURRENT TASK (take over from here)
+
+**Experimental 192-byte block mode (session 32) — bench, then car.**
+Default OFF everywhere; the known-safe 64 B / 128 B path is untouched.
+Before any on-car use:
+
+1. Bench against the fake ECU: `respond --flash captures/actual_flash.bin`
+   plus a client with `--experimental` (or the GUI toggle) — 192-byte
+   blocks/chunks must run clean in both directions.
+2. On-car read first (non-destructive): `dde3-toolkit read /tmp/full.bin
+   --port /dev/ttyUSB1 --experimental` — 192-byte FLASH_LESEN chunks must
+   yield a byte-identical image to a 128-byte read.
+3. On-car write (destructive — verified backup in hand, do it last):
+   `dde3-toolkit write <backup>.bin --port /dev/ttyUSB1 --experimental`
+   (type WRITE192) — 1024 × 192-byte writes, then read-back compare.
+
+If the ECU NACKs a 192-byte block, the mode stays off and this task is done
+as far as it goes.
 
 **Real-car verification of the session-28 parser fix and the session-30
 two-session write flow.** The LEN-validated `FrameParser` + echo-wait

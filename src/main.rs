@@ -110,11 +110,16 @@ fn print_usage() {
     eprintln!("                             default: run until Ctrl-C)");
     eprintln!("  --baud <rate>              Baud rate (default 9600)");
     eprintln!("  --data-delay <ms>          Per-byte delay for control frames (default 3)");
+    eprintln!("  --experimental           EXPERIMENTAL: 192-byte flash blocks instead of the
+                             known-safe 64 B writes / 128 B reads (closer to the
+                             ECU's acceptance limit of 246 B/block). Not car-verified.
+                             Writes additionally require typing WRITE192 (not WRITE).");
     eprintln!("  --sim                      Run against the built-in ECU simulator");
     eprintln!("                             (frames still go over the wire; the ECU reply");
     eprintln!("                             is simulated because the monitor adapter is passive)");
     eprintln!();
-    eprintln!("Safety: A write requires typing WRITE to confirm. Flash checksums are");
+    eprintln!("Safety: A write requires typing WRITE to confirm (WRITE192 in");
+    eprintln!("--experimental mode). Flash checksums are");
     eprintln!("verified and corrected on write (TDI V3.1 + program chain), byte-for-byte");
     eprintln!("parity with the verified edc15m-checksum-tool and progsum.py.");
 }
@@ -137,12 +142,18 @@ fn read_image(path: &str, expected: usize) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-fn confirm_write() -> Result<()> {
-    print!("Type WRITE to confirm flash write: ");
+/// Write gate: type WRITE — or WRITE192 in `--experimental` mode, where the
+/// stricter word is the second gate on top of the flag itself.
+fn confirm_write(experimental: bool) -> Result<()> {
+    let word = if experimental { "WRITE192" } else { "WRITE" };
+    if experimental {
+        eprintln!("EXPERIMENTAL: 192-byte flash blocks (not car-verified — bench-test first).");
+    }
+    print!("Type {word} to confirm flash write: ");
     io::stdout().flush()?;
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
-    if line.trim() != "WRITE" {
+    if line.trim() != word {
         anyhow::bail!("write cancelled");
     }
     Ok(())
@@ -169,6 +180,9 @@ fn run() -> Result<()> {
     let mut reply_delay_ms: u64 = 5;
     let mut sim: bool = false;
     let mut fast: bool = false;
+    // Experimental 192-byte flash blocks (read + write, full + cal). Writes
+    // additionally require the WRITE192 confirmation word.
+    let mut experimental: bool = false;
     // Target DS2 rate for the `baud` command (the 0x91 patch). 38400 or 125000.
     let mut target_rate: u32 = 38_400;
     // `bench --fast-baud <rate>`: switch up right after IDENT (needs the patch).
@@ -236,6 +250,7 @@ fn run() -> Result<()> {
             }
             "--sim" => sim = true,
             "--fast" => fast = true,
+            "--experimental" => experimental = true,
             "--fast-9600" => fast9600 = true,
             "--reply-delay" => {
                 i += 1;
@@ -331,6 +346,7 @@ fn run() -> Result<()> {
             let out = args.get(2).context("read requires <out.bin>").cloned()?;
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
+            k.set_experimental_blocks(experimental);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
             }
@@ -351,6 +367,7 @@ fn run() -> Result<()> {
                 .cloned()?;
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
+            k.set_experimental_blocks(experimental);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
             }
@@ -366,9 +383,10 @@ fn run() -> Result<()> {
         "write" => {
             let image_path = args.get(2).context("write requires <image.bin>").cloned()?;
             let image = read_image(&image_path, IMAGE_SIZE)?;
-            confirm_write()?;
+            confirm_write(experimental)?;
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
+            k.set_experimental_blocks(experimental);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
             }
@@ -408,9 +426,10 @@ fn run() -> Result<()> {
                 .context("write-cal requires <cal.bin>")
                 .cloned()?;
             let cal = read_image(&cal_path, CAL_LEN)?;
-            confirm_write()?;
+            confirm_write(experimental)?;
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
+            k.set_experimental_blocks(experimental);
             if sim {
                 k.set_sim(crate::sim::SimEcu::new());
             }
@@ -502,6 +521,7 @@ fn run() -> Result<()> {
                     "--write-cal" => mode = bench::Mode::WriteCal,
                     "--live" => mode = bench::Mode::Live,
                     "--info" => mode = bench::Mode::Info,
+                    "--experimental" => experimental = true,
                     _ => {}
                 }
             }
@@ -516,6 +536,7 @@ fn run() -> Result<()> {
                 fast_baud,
                 duration,
                 fast9600,
+                experimental,
             };
             bench::run(args)
         }
@@ -654,25 +675,12 @@ fn run() -> Result<()> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    // GUI when there are no arguments, or when a GUI-only flag is present
+    // GUI when there are no arguments, or when the first argument is a flag
     // (CLI commands are command-first: `dde3-toolkit <command> [options]`).
-    const GUI_FLAGS: &[&str] = &[
-        "--gui",
-        "--demo",
-        "--autoconnect",
-        "--auto-live",
-        "--auto-read",
-        "--auto-cal",
-        "--auto-log",
-        "--auto-write-cal",
-        "--auto-write",
-        "--fast-write",
-        "--show-vars",
-        "--tab",
-        "--width",
-        "--height",
-    ];
-    if args.len() == 1 || args.iter().any(|a| GUI_FLAGS.contains(&a.as_str())) {
+    // Shared flags like --experimental work in both worlds: `dde3-toolkit
+    // write x.bin --experimental` is a CLI write, `dde3-toolkit --experimental`
+    // launches the GUI with the experimental mode pre-enabled.
+    if args.len() == 1 || args[1].starts_with('-') {
         let demo = args.iter().any(|a| a == "--demo");
         let autoconnect = args.iter().any(|a| a == "--autoconnect");
         let auto_live = args.iter().any(|a| a == "--auto-live");
@@ -691,6 +699,8 @@ fn main() {
         let auto_write_cal = args.iter().any(|a| a == "--auto-write-cal");
         let auto_write = args.iter().any(|a| a == "--auto-write");
         let fast_write = args.iter().any(|a| a == "--fast-write");
+        // Program-wide experimental 192-byte block mode (GUI LINK toggle).
+        let experimental = args.iter().any(|a| a == "--experimental");
         // GUI fast-baud target (takes effect when the GUI is launched via another
         // flag, e.g. --autoconnect --auto-live); the Live tab also has a button.
         let gui_fast_baud = args
@@ -751,6 +761,7 @@ fn main() {
                     auto_write,
                     fast_write,
                     gui_fast_baud,
+                    experimental,
                 )))
             }),
         );

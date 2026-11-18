@@ -52,6 +52,9 @@ pub struct BenchArgs {
     /// 1 ms/byte TX pacing). Off by default — the original WinKFP timing
     /// (55 ms poll gap, 3 ms/byte) is used, mirroring the GUI switch.
     pub fast9600: bool,
+    /// Experimental 192-byte flash blocks (read + write) instead of the
+    /// known-safe 64 B / 128 B sizes.
+    pub experimental: bool,
 }
 
 pub fn run(args: BenchArgs) -> Result<()> {
@@ -59,6 +62,7 @@ pub fn run(args: BenchArgs) -> Result<()> {
     let mut k = Kline::open(&args.port, args.baud)
         .with_context(|| format!("cannot open {}", args.port))?;
     k.set_data_delay(args.data_delay);
+    k.set_experimental_blocks(args.experimental);
     if args.sim {
         k.set_sim(crate::sim::SimEcu::new());
     }

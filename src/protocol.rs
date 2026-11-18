@@ -48,6 +48,23 @@ pub const IMAGE_SIZE: usize = 0x40000;
 /// writable image.
 pub const FLASH_WRITE_START: usize = 0x10000;
 
+/// Default FLASH_SCHREIBEN block size — Galletto's 64-byte blocks, the
+/// known-safe wire size.
+pub const WRITE_BLOCK: usize = 0x40;
+
+/// Experimental FLASH_SCHREIBEN block size — 192 bytes, closer to the
+/// ECU's flash-write acceptance limit (the frame format allows up to 246
+/// data bytes, LEN = 9 + N in one byte). Not car-verified: bench-test
+/// before relying on it.
+pub const WRITE_BLOCK_EXP: usize = 0xC0;
+
+/// Default FLASH_LESEN chunk size — 128 bytes.
+pub const READ_CHUNK: u32 = 0x80;
+
+/// Experimental FLASH_LESEN chunk size — 192 bytes (see
+/// [`WRITE_BLOCK_EXP`]).
+pub const READ_CHUNK_EXP: u32 = 0xC0;
+
 // ---------------------------------------------------------------------------
 // Frame
 // ---------------------------------------------------------------------------
@@ -407,7 +424,8 @@ pub fn frame_flash_erase(addr: u32, _count: u8) -> Vec<u8> {
 /// `12 <LEN> 07 02 <A_hi A_mid A_lo> <NN> <data…> [XOR]`, LEN = 0x09 + NN,
 /// NN = data length (1-byte count), address big-endian.
 pub fn frame_flash_write(addr: u32, data: &[u8]) -> Vec<u8> {
-    // LEN = 0x09 + N must fit one byte, so N <= 0xF6. Callers chunk at 0x80.
+    // LEN = 0x09 + N must fit one byte, so N <= 0xF6. Callers chunk at
+    // WRITE_BLOCK (64) or WRITE_BLOCK_EXP (192).
     assert!(data.len() <= 0xF6, "flash write block must be <= 246 bytes (LEN=9+N)");
     let n = data.len() as u8;
     let mut p = Vec::with_capacity(8 + data.len());
@@ -645,6 +663,12 @@ pub struct Kline {
     logs: Vec<String>,
     silence: Duration,
     write_delay: Duration,
+    /// FLASH_SCHREIBEN block size (default [`WRITE_BLOCK`]; [`WRITE_BLOCK_EXP`
+    /// when [`Kline::set_experimental_blocks`] is on).
+    write_block: usize,
+    /// FLASH_LESEN chunk size (default [`READ_CHUNK`]; [`READ_CHUNK_EXP`]
+    /// when [`Kline::set_experimental_blocks`] is on).
+    read_chunk: u32,
     sim: Option<SimEcu>,
     /// Wall clock of the last TX/RX log line — used to stamp every log line
     /// with an absolute time and the gap to the previous line, so a capture
@@ -669,6 +693,8 @@ impl Kline {
             logs: Vec::new(),
             silence: Duration::from_millis(10),
             write_delay: Duration::from_millis(3),
+            write_block: WRITE_BLOCK,
+            read_chunk: READ_CHUNK,
             sim: None,
             last_log: None,
         })
@@ -692,6 +718,24 @@ impl Kline {
 
     pub fn set_data_delay(&mut self, ms: u64) {
         self.write_delay = Duration::from_millis(ms);
+    }
+
+    /// Switch flash read/write block sizes between the known-safe defaults
+    /// (64-byte write blocks, 128-byte read chunks) and the experimental
+    /// 192-byte sizes. Program-wide: one call affects [`Kline::read_full`],
+    /// [`Kline::read_range`], [`Kline::write_full`] and
+    /// [`Kline::write_calibration`]. The 192-byte size is closer to the
+    /// ECU's flash-write acceptance limit (frame allows up to 246) but is
+    /// NOT car-verified — callers must gate it (CLI `--experimental` +
+    /// the `WRITE192` confirmation word, GUI LINK toggle).
+    pub fn set_experimental_blocks(&mut self, on: bool) {
+        if on {
+            self.write_block = WRITE_BLOCK_EXP;
+            self.read_chunk = READ_CHUNK_EXP;
+        } else {
+            self.write_block = WRITE_BLOCK;
+            self.read_chunk = READ_CHUNK;
+        }
     }
 
     pub fn set_baud(&mut self, baud: u32) -> Result<()> {
@@ -1202,12 +1246,15 @@ impl Kline {
         // session (e.g. unlock refused / B0) aborts the read instantly instead of
         // being retried as a flashing-session job.
         self.begin_flash_session()?;
+        // Captured before the closure so the retry below can still mutably
+        // borrow self (set_silence) while the closure is alive.
+        let chunk = self.read_chunk;
         let attempt = |k: &mut Self, progress: &mut dyn FnMut(usize, usize)| -> Result<Vec<u8>> {
             let mut out = Vec::with_capacity(length);
             let mut addr = start as u32;
             let end = (start + length) as u32;
             while addr < end {
-                let count = 0x80u32.min(end - addr) as u8;
+                let count = chunk.min(end - addr) as u8;
                 let req = frame_flash_read(addr, count);
                 // The ECU keeps broadcasting its periodic ~16-byte live block
                 // (`12 10 A0 10 …`) on the K-line even inside the flashing
@@ -1264,11 +1311,12 @@ impl Kline {
     ///
     /// 1. **Program area** `[0x10000, 0x38000)`: flasher session
     ///    (IDENT → UPROG_EIN → AIF read → SEED_KEY) → erase @0x10000 →
-    ///    64-byte `FLASH_SCHREIBEN` blocks → `DIAGNOSE_ENDE` (`12 04 9F`)
-    ///    closes the session.
+    ///    `FLASH_SCHREIBEN` blocks (64 B default, 192 B after
+    ///    [`Kline::set_experimental_blocks`](`on`)) → `DIAGNOSE_ENDE`
+    ///    (`12 04 9F`) closes the session.
     /// 2. **Calibration area** `[0x38000, 0x40000)`: the session is
     ///    re-opened and **re-authenticated from scratch** (IDENT → UPROG_EIN
-    ///    → AIF read → SEED_KEY) → erase @0x38000 → 64-byte blocks →
+    ///    → AIF read → SEED_KEY) → erase @0x38000 → the same block size →
     ///    `DIAGNOSE_ENDE`.
     ///
     /// Galletto never sends `FLASH_SCHREIBEN_ENDE` (`07 0F`); each phase
@@ -1297,8 +1345,8 @@ impl Kline {
             self.begin_flash_session()?;
             self.erase_flash(start as u32, 0x00)?;
             thread::sleep(Duration::from_millis(100));
-            for off in (start..end).step_by(0x40) {
-                let len = 0x40.min(end - off);
+            for off in (start..end).step_by(self.write_block) {
+                let len = self.write_block.min(end - off);
                 self.write_block(off as u32, &image[off..off + len])?;
                 done += len;
                 progress(done, region_len);
@@ -1316,7 +1364,8 @@ impl Kline {
     }
 
     /// Calibration flash write: full flasher session → erase → write blocks →
-    /// `DIAGNOSE_ENDE` (Galletto's phase-2 flow, 64-byte blocks).
+    /// `DIAGNOSE_ENDE` (Galletto's phase-2 flow; 64-byte blocks, or 192-byte
+    /// after [`Kline::set_experimental_blocks`](`on`)).
     pub fn write_calibration(
         &mut self,
         image: &[u8],
@@ -1334,8 +1383,8 @@ impl Kline {
         self.erase_flash(CAL_START as u32, 0x00)?;
         thread::sleep(Duration::from_millis(100));
         let mut done = 0usize;
-        for start in (0..CAL_LEN).step_by(0x40) {
-            let len = 0x40.min(CAL_LEN - start);
+        for start in (0..CAL_LEN).step_by(self.write_block) {
+            let len = self.write_block.min(CAL_LEN - start);
             self.write_block(CAL_START as u32 + start as u32, &image[start..start + len])?;
             done += len;
             progress(done, CAL_LEN);
@@ -1850,6 +1899,23 @@ mod tests {
         assert_eq!(
             frame_flash_write_end(0x38000),
             vec![0x12, 0x09, 0x07, 0x0F, 0x03, 0x80, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn experimental_block_sizes() {
+        // 192-byte write block: LEN = 9 + 192 = 0xC9, still one byte.
+        let data: Vec<u8> = (0..WRITE_BLOCK_EXP).map(|i| (i as u8) ^ 0x5A).collect();
+        let frame = frame_flash_write(0x10000, &data);
+        assert_eq!(frame[0], 0x12);
+        assert_eq!(frame[1], 0x09 + WRITE_BLOCK_EXP as u8);
+        assert_eq!(&frame[2..8], &[0x07, 0x02, 0x01, 0x00, 0x00, 0xC0]);
+        assert_eq!(&frame[8..], &data);
+        // Read chunk 192: `12 09 06 00 <A BE> <count>` — count is the single
+        // wire byte at [7].
+        assert_eq!(
+            frame_flash_read(0x10000, READ_CHUNK_EXP as u8),
+            vec![0x12, 0x09, 0x06, 0x00, 0x01, 0x00, 0x00, 0xC0]
         );
     }
 

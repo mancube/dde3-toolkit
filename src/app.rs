@@ -286,6 +286,12 @@ pub struct App {
     backup_ok: bool,
     write_confirm: String,
     fast_write: bool,
+    /// Program-wide experimental mode (side-nav LINK section): 192-byte
+    /// flash blocks for reads and writes (full + calibration) instead of the
+    /// known-safe 64 B writes / 128 B reads. Not car-verified. In the CLI
+    /// the same mode is gated by `--experimental` + the WRITE192 word; in
+    /// the GUI by this toggle + the WRITE192 confirmation.
+    experimental_blocks: bool,
     auto_live: bool,
     auto_read: bool,
     auto_cal: bool,
@@ -327,6 +333,7 @@ impl App {
         auto_write: bool,
         fast_write: bool,
         fast_baud: Option<u32>,
+        experimental_blocks: bool,
     ) -> Self {
         style(&cc.egui_ctx);
         let (tx, rx) = unbounded();
@@ -378,6 +385,7 @@ impl App {
             backup_ok: false,
             write_confirm: String::new(),
             fast_write,
+            experimental_blocks,
             auto_live,
             auto_read,
             auto_cal,
@@ -739,12 +747,12 @@ impl App {
         if self.auto_write {
             self.tab = Tab::Write;
             self.backup_ok = true;
-            self.write_confirm = "WRITE".into();
+            self.write_confirm = self.confirm_word().into();
             self.start_write();
         } else if self.auto_write_cal {
             self.tab = Tab::Write;
             self.backup_ok = true;
-            self.write_confirm = "WRITE".into();
+            self.write_confirm = self.confirm_word().into();
             self.start_write_cal();
         } else if self.auto_read {
             self.tab = Tab::Read;
@@ -832,6 +840,7 @@ impl App {
         self.active_job = Some(Job::Full);
         self.job_started = Some(Instant::now());
         let path = PathBuf::from(self.read_path.clone());
+        let experimental = self.experimental_blocks;
         self.start(move |link, tx| {
             let mut guard = lock_or_recover(&link);
             let Some(k) = guard.as_mut() else {
@@ -841,6 +850,7 @@ impl App {
             let _ = tx.send(Msg::Status("Reading full flash".into()));
             snapshot_battery(k, &tx);
             k.set_silence(10);
+            k.set_experimental_blocks(experimental);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(
                     done as f32 / total as f32,
@@ -883,6 +893,7 @@ impl App {
         self.active_job = Some(Job::Cal);
         self.job_started = Some(Instant::now());
         let path = PathBuf::from(self.cal_path.clone());
+        let experimental = self.experimental_blocks;
         self.start(move |link, tx| {
             let mut guard = lock_or_recover(&link);
             let Some(k) = guard.as_mut() else {
@@ -892,6 +903,7 @@ impl App {
             let _ = tx.send(Msg::Status("Reading calibration".into()));
             snapshot_battery(k, &tx);
             k.set_silence(10);
+            k.set_experimental_blocks(experimental);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(
                     done as f32 / total as f32,
@@ -925,6 +937,16 @@ impl App {
     // Flash write
     // -----------------------------------------------------------------------
 
+    /// Write-gate confirmation word: `WRITE` normally, `WRITE192` when the
+    /// experimental 192-byte block mode is on (the stricter gate).
+    fn confirm_word(&self) -> &'static str {
+        if self.experimental_blocks {
+            "WRITE192"
+        } else {
+            "WRITE"
+        }
+    }
+
     fn start_write(&mut self) {
         if self.busy {
             self.error = Some("Another operation is still running".into());
@@ -934,8 +956,9 @@ impl App {
             self.error = Some("Connect to the ECU first".into());
             return;
         }
-        if !self.backup_ok || self.write_confirm != "WRITE" {
-            self.error = Some("Confirm the backup and type WRITE".into());
+        let word = self.confirm_word();
+        if !self.backup_ok || self.write_confirm != word {
+            self.error = Some(format!("Confirm the backup and type {word}"));
             return;
         }
         if self.image_is_partial {
@@ -946,6 +969,7 @@ impl App {
             return;
         };
         let fast = self.fast_write;
+        let experimental = self.experimental_blocks;
         self.stop_live();
         self.active_job = Some(Job::Write);
         self.job_started = Some(Instant::now());
@@ -965,6 +989,7 @@ impl App {
             };
             k.set_silence(10);
             k.set_write_delay(3);
+            k.set_experimental_blocks(experimental);
             // DDE3 K-line is fixed at 9600 8E1; `fast` only drops the
             // inter-byte pause (unverified on real hardware).
             let result = k.write_full(&image, 9600, if fast { 0 } else { 3 }, &mut progress);
@@ -993,14 +1018,16 @@ impl App {
             self.error = Some("Connect to the ECU first".into());
             return;
         }
-        if !self.backup_ok || self.write_confirm != "WRITE" {
-            self.error = Some("Confirm the backup and type WRITE".into());
+        let word = self.confirm_word();
+        if !self.backup_ok || self.write_confirm != word {
+            self.error = Some(format!("Confirm the backup and type {word}"));
             return;
         }
         let Some(image) = self.prepare_write_image() else {
             return;
         };
         let fast = self.fast_write;
+        let experimental = self.experimental_blocks;
         self.stop_live();
         self.active_job = Some(Job::WriteCal);
         self.job_started = Some(Instant::now());
@@ -1020,6 +1047,7 @@ impl App {
             };
             k.set_silence(10);
             k.set_write_delay(3);
+            k.set_experimental_blocks(experimental);
             // DDE3 K-line is fixed at 9600 8E1; `fast` only drops the
             // inter-byte pause (unverified on real hardware).
             let result = k.write_calibration(&image, 9600, if fast { 0 } else { 3 }, &mut progress);
@@ -1815,6 +1843,9 @@ impl App {
                         };
                         ui.label(RichText::new(text).size(11.0).color(col).strong());
                         ui.label(RichText::new(dot).color(col));
+                        // Global battery pill (was on the Read/Write tabs): a
+                        // weak battery mid-flash is the classic brick cause.
+                        battery_pill(ui, self.battery_v);
                         if !self.status.is_empty() {
                             ui.label(RichText::new(&self.status).size(12.0).color(MUTED));
                         }
@@ -1832,8 +1863,39 @@ impl App {
                     .inner_margin(Margin::symmetric(12, 14)),
             )
             .show(ctx, |ui| {
-                ui.add_space(4.0);
-                for tab in [
+                // The tab list scrolls on its own; the LINK · GLOBAL, IMAGE
+                // and ECU/version sections below are pinned and always
+                // visible. The pinned content is measured with an invisible
+                // sizing pass each frame, so the tab area is capped at
+                // exactly the remaining height — nothing gets clipped, and
+                // no reserved-height constant can drift from the real
+                // content.
+                let origin = ui.cursor().min;
+                let avail = ui.available_size();
+                let pinned_h = ui
+                    .allocate_new_ui(
+                        egui::UiBuilder::new()
+                            .id_salt("nav-pinned-measure")
+                            .max_rect(egui::Rect::from_min_size(origin, avail))
+                            .invisible(),
+                        |ui| {
+                            self.pinned_sections(ui);
+                        },
+                    )
+                    .response
+                    .rect
+                    .height();
+                let tab_h = (avail.y - pinned_h).max(80.0);
+                ui.allocate_new_ui(
+                    egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                        origin,
+                        Vec2::new(avail.x, tab_h),
+                    )),
+                    |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("nav-tabs")
+                            .show(ui, |ui| {
+                                for tab in [
                     Tab::Overview,
                     Tab::Read,
                     Tab::Write,
@@ -1859,14 +1921,109 @@ impl App {
                         } else {
                             Stroke::NONE
                         })
-                        .min_size(Vec2::new(172.0, 38.0));
+                        .min_size(Vec2::new(172.0, 30.0));
                     if ui.add(button).clicked() {
                         self.tab = tab;
                         if tab != Tab::Live {
                             self.stop_live();
                         }
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(2.0);
+                }
+                        });
+                    },
+                );
+                // Pinned sections (LINK · GLOBAL, IMAGE, ECU/version),
+                // rendered for real at the bottom of the rail.
+                ui.allocate_new_ui(
+                    egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                        pos2(origin.x, origin.y + tab_h),
+                        Vec2::new(avail.x, pinned_h),
+                    )),
+                    |ui| {
+                        self.pinned_sections(ui);
+                    },
+                );
+            });
+    }
+
+    /// The pinned part of the side rail: LINK · GLOBAL toggles, the loaded
+    /// image, and the ECU/version block. Rendered twice per frame — once
+    /// invisibly (sizing pass) to measure its height, once for real at the
+    /// bottom of the rail.
+    fn pinned_sections(&mut self, ui: &mut Ui) {
+                // LINK — program-wide link/timing toggles. They used to live
+                // on the Live tab (faster 9600, fast baud) and the Write tab
+                // (fast write); they affect the whole app, so they are global.
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.label(RichText::new("LINK · GLOBAL").size(9.0).color(MUTED));
+                let exp = RichText::new("192 B blocks (EXP)")
+                    .size(11.0)
+                    .color(if self.experimental_blocks { WARN } else { TEXT });
+                if ui
+                    .checkbox(&mut self.experimental_blocks, exp)
+                    .on_hover_text(
+                        "EXPERIMENTAL: 192-byte flash read/write blocks (full + calibration) instead of the known-safe 64 B / 128 B — closer to the ECU's 246 B acceptance limit, not car-verified. Writes then require typing WRITE192.",
+                    )
+                    .changed()
+                {
+                    self.push_log(if self.experimental_blocks {
+                        "EXPERIMENTAL 192-byte blocks ON (read + write)".into()
+                    } else {
+                        "EXPERIMENTAL 192-byte blocks OFF (64 B / 128 B)".into()
+                    });
+                }
+                let mut fast9600 = self.fast9600.load(Ordering::Relaxed);
+                if ui
+                    .checkbox(&mut fast9600, RichText::new("faster 9600").size(11.0))
+                    .on_hover_text(
+                        "Back-to-back polling (1 ms gap) + 1 ms/byte TX pacing instead of the default 55 ms / 3 ms. Applies immediately.",
+                    )
+                    .changed()
+                {
+                    self.fast9600.store(fast9600, Ordering::Relaxed);
+                    self.push_log(if fast9600 {
+                        "FAST9600 on — back-to-back, 1 ms/byte".into()
+                    } else {
+                        "FAST9600 off — 55 ms poll gap, 3 ms/byte".into()
+                    });
+                }
+                let mut fast_write = self.fast_write;
+                if ui
+                    .checkbox(&mut fast_write, RichText::new("fast write").size(11.0))
+                    .on_hover_text(
+                        "Drops the 3 ms per-byte pacing on flash writes (the DDE3 stays at 9600 baud).",
+                    )
+                    .changed()
+                {
+                    self.fast_write = fast_write;
+                }
+                match self.fast_baud_active {
+                    Some(rate) => {
+                        ui.label(
+                            RichText::new(format!("● fast: {rate} baud"))
+                                .size(11.0)
+                                .color(ACCENT)
+                                .strong(),
+                        );
+                    }
+                    None => {
+                        let mut fast_baud = false;
+                        let resp = ui.add_enabled(
+                            self.connected && !self.busy && !self.live_running,
+                            egui::Checkbox::new(&mut fast_baud, RichText::new("fast baud 125k").size(11.0)),
+                        );
+                        if resp
+                            .on_hover_text(
+                                "Switch the DS2 link up via service 0x91 (needs the baud patch flashed). Reverts on power cycle / reconnect.",
+                            )
+                            .changed()
+                        {
+                            self.switch_fast_baud_async(125_000);
+                        }
+                    }
                 }
                 if self.image.is_some() {
                     ui.add_space(10.0);
@@ -1890,39 +2047,42 @@ impl App {
                         .color(MUTED),
                     );
                 }
-                ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-                    ui.add_space(6.0);
-                    // Version comes from Cargo.toml (bumped by scripts/release.sh),
-                    // so the GUI label can never drift from the release again.
-                    ui.label(
-                        RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                            .size(10.0)
-                            .color(MUTED),
-                    );
-                    ui.label(RichText::new("EDC15M/DDE3").size(11.0).color(MUTED));
-                    ui.separator();
-                    if let Some(ecu) = &self.ecu {
-                        if let Some(i) = &ecu.ident {
-                            ui.label(
-                                RichText::new(format!("SW {}", i.software))
-                                    .size(12.0)
-                                    .color(ACCENT),
-                            );
-                            ui.label(
-                                RichText::new(format!("HW {}", i.hw_number))
-                                    .size(10.0)
-                                    .color(MUTED),
-                            );
-                        } else {
-                            ui.label(
-                                RichText::new(format!("HW {}", ecu.hardware))
-                                    .size(10.0)
-                                    .color(MUTED),
-                            );
-                        }
+                // ECU info + version — a normal trailing section (was a
+                // bottom-up block pinned to the panel bottom, which left no
+                // room for the LINK section once the image was loaded).
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+                if let Some(ecu) = &self.ecu {
+                    ui.label(RichText::new("ECU").size(9.0).color(MUTED));
+                    if let Some(i) = &ecu.ident {
+                        ui.label(
+                            RichText::new(format!("SW {}", i.software))
+                                .size(12.0)
+                                .color(ACCENT),
+                        );
+                        ui.label(
+                            RichText::new(format!("HW {}", i.hw_number))
+                                .size(10.0)
+                                .color(MUTED),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(format!("HW {}", ecu.hardware))
+                                .size(10.0)
+                                .color(MUTED),
+                        );
                     }
-                });
-            });
+                }
+                ui.add_space(6.0);
+                // Version comes from Cargo.toml (bumped by scripts/release.sh),
+                // so the GUI label can never drift from the release again.
+                ui.label(
+                    RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                        .size(10.0)
+                        .color(MUTED),
+                );
+                ui.label(RichText::new("EDC15M/DDE3").size(11.0).color(MUTED));
     }
 
     fn central(&mut self, ctx: &egui::Context) {
@@ -2112,8 +2272,6 @@ impl App {
     fn read_tab(&mut self, ui: &mut Ui) {
         heading(ui, "Read flash", "Full 256 KB read over K-line, 9600 baud.");
         ui.add_space(8.0);
-        battery_pill(ui, self.battery_v);
-        ui.add_space(4.0);
         card(ui, ui.available_width(), |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Save to").color(MUTED));
@@ -2226,8 +2384,6 @@ impl App {
             "Erase and program flash, or calibration only.",
         );
         ui.add_space(8.0);
-        battery_pill(ui, self.battery_v);
-        ui.add_space(4.0);
         let partial = self.image_is_partial;
         card(ui, ui.available_width(), |ui| {
             ui.horizontal(|ui| {
@@ -2310,24 +2466,22 @@ impl App {
                 .show(ui, |ui| {
                     ui.label(RichText::new("Experimental write").color(WARN).strong().size(13.0));
                     ui.label(RichText::new("Full write erases program and calibration. Partial write erases calibration only. Checksums are corrected automatically before writing. Do not interrupt power.").size(12.0).color(TEXT));
+                    if self.experimental_blocks {
+                        ui.label(RichText::new(format!("EXPERIMENTAL: 192-byte flash blocks active (LINK toggle) — not car-verified. Type {} to confirm.", self.confirm_word())).size(12.0).color(WARN).strong());
+                    }
                 });
             ui.add_space(8.0);
-            ui.checkbox(
-                &mut self.fast_write,
-                "Fast write (no inter-byte pause; DDE3 stays at 9600 baud)",
-            );
-            ui.label(RichText::new("Fast mode uses the read-path baud and removes the 3 ms per-byte pacing. Bench-test before relying on it.").size(11.0).color(MUTED));
-            ui.add_space(10.0);
             ui.checkbox(
                 &mut self.backup_ok,
                 "I have a verified full backup of this ECU",
             );
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Type WRITE to confirm").color(MUTED));
+                ui.label(RichText::new(format!("Type {} to confirm", self.confirm_word())).color(MUTED));
                 ui.add(egui::TextEdit::singleline(&mut self.write_confirm).desired_width(120.0));
             });
             ui.add_space(8.0);
-            let ready = self.backup_ok && self.write_confirm == "WRITE" && self.image.is_some();
+            let ready =
+                self.backup_ok && self.write_confirm == self.confirm_word() && self.image.is_some();
             ui.horizontal_wrapped(|ui| {
                 if centered_button_enabled(
                     ui,
@@ -3416,99 +3570,9 @@ impl App {
             {
                 self.show_graph = !self.show_graph;
             }
-            // Link-speed group — frames the "faster 9600" timing switch and the
-            // fast-baud (0x91) toggle as one unit instead of two loose buttons.
-            // The timing switch is rendered as a toggle (sunken dark when off,
-            // selected-accent when on) rather than a plain button: the old
-            // CARD_ALT fill matched egui's disabled widget fill, so it read as
-            // dead.
-            Frame::new()
-                .fill(CARD)
-                .stroke(Stroke::new(1.0_f32, BORDER))
-                .corner_radius(10)
-                .inner_margin(Margin::symmetric(10, 8))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new("LINK SPEED").size(9.0).color(MUTED).strong(),
-                    );
-                    ui.horizontal(|ui| {
-                        // "faster 9600" test switch — back-to-back polling +
-                        // 1 ms/byte TX pacing. Off by default: the link runs the
-                        // original WinKFP timing (55 ms gap, 3 ms/byte). Flipping
-                        // it applies from the next poll, even while live is
-                        // running. Deliberately separate from the fast-baud
-                        // toggle below: that one switches the actual link rate
-                        // via service 0x91 and needs the ECU patch.
-                        let on = self.fast9600.load(Ordering::Relaxed);
-                        let label = RichText::new(if on {
-                            "●  faster 9600"
-                        } else {
-                            "○  faster 9600"
-                        })
-                        .color(TEXT)
-                        .strong();
-                        if centered_button_enabled(
-                            ui,
-                            self.connected,
-                            Vec2::new(130.0, 30.0),
-                            egui::Button::new(label)
-                                .fill(if on { ACCENT_DIM } else { BG })
-                                .stroke(if on {
-                                    Stroke::new(1.0_f32, ACCENT)
-                                } else {
-                                    Stroke::new(1.0_f32, BORDER)
-                                }),
-                        )
-                        .on_hover_text(
-                            "Faster 9600 timing: back-to-back polling (1 ms gap) + 1 ms/byte TX pacing, instead of the default 55 ms / 3 ms. Applies immediately.",
-                        )
-                        .clicked()
-                        {
-                            self.fast9600.store(!on, Ordering::Relaxed);
-                            self.push_log(if on {
-                                "FAST9600 off — 55 ms poll gap, 3 ms/byte".into()
-                            } else {
-                                "FAST9600 on — back-to-back, 1 ms/byte".into()
-                            });
-                        }
-                        // Fast-baud (0x91) toggle — needs the baud patch flashed.
-                        // Once the switch succeeds it turns into a non-clickable
-                        // status chip; the link reverts to 9600 only on a power
-                        // cycle / reconnect.
-                        match self.fast_baud_active {
-                            None => {
-                                if centered_button_enabled(
-                                    ui,
-                                    self.connected && !self.busy && !self.live_running,
-                                    Vec2::new(150.0, 30.0),
-                                    egui::Button::new(RichText::new("Fast baud (125k)").color(BG))
-                                        .fill(ACCENT),
-                                )
-                                .clicked()
-                                {
-                                    // One-off manual switch; does not set
-                                    // self.fast_baud, so a later reconnect will
-                                    // not silently re-issue 0x91.
-                                    self.switch_fast_baud_async(125_000);
-                                }
-                            }
-                            Some(rate) => {
-                                Frame::new()
-                                    .fill(ACCENT_DIM)
-                                    .corner_radius(8)
-                                    .inner_margin(Margin::symmetric(8, 6))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            RichText::new(format!("● fast: {rate} baud"))
-                                                .size(12.0)
-                                                .color(ACCENT)
-                                                .strong(),
-                                        );
-                                    });
-                            }
-                        }
-                    });
-                });
+            // The link-speed group (faster 9600, fast baud 125k) moved to
+            // the side-nav LINK section — it is program-wide, not a Live
+            // tab concern.
             ui.label(
                 RichText::new(if self.live_running {
                     format!("polling at {:.1} Hz", self.live_rate)
@@ -3980,8 +4044,8 @@ fn section_title(ui: &mut Ui, text: &str) {
 }
 
 /// Battery status pill (DDE3 ADF 0x0F65 scale 0.02037243 / LSB).
-/// Shown on the Read/Write tabs: a weak battery mid-flash is the
-/// classic brick cause, worth the glance.
+/// Shown in the top bar (global): a weak battery mid-flash is the classic
+/// brick cause, worth the glance.
 fn battery_pill(ui: &mut Ui, voltage: Option<f64>) {
     match voltage {
         Some(v) if v < 11.5 => pill(ui, &format!("Battery {v:.1} V — critical"), DANGER),
