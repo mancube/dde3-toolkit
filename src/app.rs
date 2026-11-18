@@ -286,12 +286,6 @@ pub struct App {
     backup_ok: bool,
     write_confirm: String,
     fast_write: bool,
-    /// Program-wide experimental mode (side-nav LINK section): 192-byte
-    /// flash blocks for reads and writes (full + calibration) instead of the
-    /// known-safe 64 B writes / 128 B reads. Not car-verified. In the CLI
-    /// the same mode is gated by `--experimental` + the WRITE192 word; in
-    /// the GUI by this toggle + the WRITE192 confirmation.
-    experimental_blocks: bool,
     auto_live: bool,
     auto_read: bool,
     auto_cal: bool,
@@ -333,7 +327,6 @@ impl App {
         auto_write: bool,
         fast_write: bool,
         fast_baud: Option<u32>,
-        experimental_blocks: bool,
     ) -> Self {
         style(&cc.egui_ctx);
         let (tx, rx) = unbounded();
@@ -385,7 +378,6 @@ impl App {
             backup_ok: false,
             write_confirm: String::new(),
             fast_write,
-            experimental_blocks,
             auto_live,
             auto_read,
             auto_cal,
@@ -747,12 +739,12 @@ impl App {
         if self.auto_write {
             self.tab = Tab::Write;
             self.backup_ok = true;
-            self.write_confirm = self.confirm_word().into();
+            self.write_confirm = "WRITE".into();
             self.start_write();
         } else if self.auto_write_cal {
             self.tab = Tab::Write;
             self.backup_ok = true;
-            self.write_confirm = self.confirm_word().into();
+            self.write_confirm = "WRITE".into();
             self.start_write_cal();
         } else if self.auto_read {
             self.tab = Tab::Read;
@@ -840,7 +832,6 @@ impl App {
         self.active_job = Some(Job::Full);
         self.job_started = Some(Instant::now());
         let path = PathBuf::from(self.read_path.clone());
-        let experimental = self.experimental_blocks;
         self.start(move |link, tx| {
             let mut guard = lock_or_recover(&link);
             let Some(k) = guard.as_mut() else {
@@ -850,7 +841,6 @@ impl App {
             let _ = tx.send(Msg::Status("Reading full flash".into()));
             snapshot_battery(k, &tx);
             k.set_silence(10);
-            k.set_experimental_blocks(experimental);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(
                     done as f32 / total as f32,
@@ -893,7 +883,6 @@ impl App {
         self.active_job = Some(Job::Cal);
         self.job_started = Some(Instant::now());
         let path = PathBuf::from(self.cal_path.clone());
-        let experimental = self.experimental_blocks;
         self.start(move |link, tx| {
             let mut guard = lock_or_recover(&link);
             let Some(k) = guard.as_mut() else {
@@ -903,7 +892,6 @@ impl App {
             let _ = tx.send(Msg::Status("Reading calibration".into()));
             snapshot_battery(k, &tx);
             k.set_silence(10);
-            k.set_experimental_blocks(experimental);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(
                     done as f32 / total as f32,
@@ -937,16 +925,6 @@ impl App {
     // Flash write
     // -----------------------------------------------------------------------
 
-    /// Write-gate confirmation word: `WRITE` normally, `WRITE192` when the
-    /// experimental 192-byte block mode is on (the stricter gate).
-    fn confirm_word(&self) -> &'static str {
-        if self.experimental_blocks {
-            "WRITE192"
-        } else {
-            "WRITE"
-        }
-    }
-
     fn start_write(&mut self) {
         if self.busy {
             self.error = Some("Another operation is still running".into());
@@ -956,9 +934,8 @@ impl App {
             self.error = Some("Connect to the ECU first".into());
             return;
         }
-        let word = self.confirm_word();
-        if !self.backup_ok || self.write_confirm != word {
-            self.error = Some(format!("Confirm the backup and type {word}"));
+        if !self.backup_ok || self.write_confirm != "WRITE" {
+            self.error = Some("Confirm the backup and type WRITE".into());
             return;
         }
         if self.image_is_partial {
@@ -969,7 +946,6 @@ impl App {
             return;
         };
         let fast = self.fast_write;
-        let experimental = self.experimental_blocks;
         self.stop_live();
         self.active_job = Some(Job::Write);
         self.job_started = Some(Instant::now());
@@ -989,7 +965,6 @@ impl App {
             };
             k.set_silence(10);
             k.set_write_delay(3);
-            k.set_experimental_blocks(experimental);
             // DDE3 K-line is fixed at 9600 8E1; `fast` only drops the
             // inter-byte pause (unverified on real hardware).
             let result = k.write_full(&image, 9600, if fast { 0 } else { 3 }, &mut progress);
@@ -1018,16 +993,14 @@ impl App {
             self.error = Some("Connect to the ECU first".into());
             return;
         }
-        let word = self.confirm_word();
-        if !self.backup_ok || self.write_confirm != word {
-            self.error = Some(format!("Confirm the backup and type {word}"));
+        if !self.backup_ok || self.write_confirm != "WRITE" {
+            self.error = Some("Confirm the backup and type WRITE".into());
             return;
         }
         let Some(image) = self.prepare_write_image() else {
             return;
         };
         let fast = self.fast_write;
-        let experimental = self.experimental_blocks;
         self.stop_live();
         self.active_job = Some(Job::WriteCal);
         self.job_started = Some(Instant::now());
@@ -1047,7 +1020,6 @@ impl App {
             };
             k.set_silence(10);
             k.set_write_delay(3);
-            k.set_experimental_blocks(experimental);
             // DDE3 K-line is fixed at 9600 8E1; `fast` only drops the
             // inter-byte pause (unverified on real hardware).
             let result = k.write_calibration(&image, 9600, if fast { 0 } else { 3 }, &mut progress);
@@ -1959,22 +1931,6 @@ impl App {
                 ui.separator();
                 ui.add_space(6.0);
                 ui.label(RichText::new("LINK · GLOBAL").size(9.0).color(MUTED));
-                let exp = RichText::new("192 B blocks (EXP)")
-                    .size(11.0)
-                    .color(if self.experimental_blocks { WARN } else { TEXT });
-                if ui
-                    .checkbox(&mut self.experimental_blocks, exp)
-                    .on_hover_text(
-                        "EXPERIMENTAL: 192-byte flash read/write blocks (full + calibration) instead of the known-safe 64 B / 128 B — closer to the ECU's 246 B acceptance limit, not car-verified. Writes then require typing WRITE192.",
-                    )
-                    .changed()
-                {
-                    self.push_log(if self.experimental_blocks {
-                        "EXPERIMENTAL 192-byte blocks ON (read + write)".into()
-                    } else {
-                        "EXPERIMENTAL 192-byte blocks OFF (64 B / 128 B)".into()
-                    });
-                }
                 let mut fast9600 = self.fast9600.load(Ordering::Relaxed);
                 if ui
                     .checkbox(&mut fast9600, RichText::new("faster 9600").size(11.0))
@@ -2466,9 +2422,6 @@ impl App {
                 .show(ui, |ui| {
                     ui.label(RichText::new("Experimental write").color(WARN).strong().size(13.0));
                     ui.label(RichText::new("Full write erases program and calibration. Partial write erases calibration only. Checksums are corrected automatically before writing. Do not interrupt power.").size(12.0).color(TEXT));
-                    if self.experimental_blocks {
-                        ui.label(RichText::new(format!("EXPERIMENTAL: 192-byte flash blocks active (LINK toggle) — not car-verified. Type {} to confirm.", self.confirm_word())).size(12.0).color(WARN).strong());
-                    }
                 });
             ui.add_space(8.0);
             ui.checkbox(
@@ -2476,12 +2429,12 @@ impl App {
                 "I have a verified full backup of this ECU",
             );
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("Type {} to confirm", self.confirm_word())).color(MUTED));
+                ui.label(RichText::new("Type WRITE to confirm").color(MUTED));
                 ui.add(egui::TextEdit::singleline(&mut self.write_confirm).desired_width(120.0));
             });
             ui.add_space(8.0);
             let ready =
-                self.backup_ok && self.write_confirm == self.confirm_word() && self.image.is_some();
+                self.backup_ok && self.write_confirm == "WRITE" && self.image.is_some();
             ui.horizontal_wrapped(|ui| {
                 if centered_button_enabled(
                     ui,

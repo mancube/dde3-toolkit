@@ -486,25 +486,40 @@ program-wide place. Default OFF everywhere.
 - Tests: `protocol::tests::experimental_block_sizes`,
   `sim::tests::experimental_192_byte_blocks` (89 passing).
 - Docs: `docs/wire-protocol.md` §32, README (`--experimental`, GUI section).
+- **On-car verdict (same day): rejected** — see session 33.
+
+### Session 33 (2026-11-18) — 192-byte block mode removed after on-car failure
+
+On-car `write --experimental`: the first two 192-byte `FLASH_SCHREIBEN`
+frames (`12 C9 07 02 01 00 00 C0 …` @0x10000, `… 01 00 C0 C0` @0x100C0)
+each drew a 4-byte write-OKAY (`12 04 A0 …`, status 0xA0 — not the 16-byte
+`12 10 A0 10 …` live broadcast); the third (`… 01 01 80 C0` @0x10180) got
+no reply and no echo — after 3 resends the line was dead. The frame format
+was wire-valid (LEN 0xC9 = 9+192 fits one byte); the ECU's flash-write path
+cannot sustain 192-byte blocks (two "OKAY"s, then a hung ECU).
+
+Removed entirely (user call):
+- `protocol.rs`: `WRITE_BLOCK_EXP`/`READ_CHUNK_EXP`, the
+  `write_block`/`read_chunk` fields, `set_experimental_blocks`,
+  `experimental_block_sizes` test — gone; read/write use the fixed
+  64 B / 128 B constants again.
+- CLI: `--experimental` flag, the `WRITE192` word (back to `WRITE`), bench
+  field — gone.
+- GUI: `experimental_blocks` toggle + banner + `WRITE192` gate — gone.
+  The LINK · GLOBAL side-nav section stays (faster 9600 / fast write /
+  fast baud), as do the battery pill in the top bar, the scrolling tab
+  list with pinned bottom sections, and the first-arg CLI/GUI dispatch rule.
+- Sim: `experimental_192_byte_blocks` test — gone (87 passing).
+- `docs/wire-protocol.md` §32 now records the on-car failure; 64 B / 128 B
+  are the only verified block sizes. Don't re-attempt larger write blocks
+  without a capture proving the ECU's flasher accepts them.
 
 ## ← CURRENT TASK (take over from here)
 
-**Experimental 192-byte block mode (session 32) — bench, then car.**
-Default OFF everywhere; the known-safe 64 B / 128 B path is untouched.
-Before any on-car use:
-
-1. Bench against the fake ECU: `respond --flash captures/actual_flash.bin`
-   plus a client with `--experimental` (or the GUI toggle) — 192-byte
-   blocks/chunks must run clean in both directions.
-2. On-car read first (non-destructive): `dde3-toolkit read /tmp/full.bin
-   --port /dev/ttyUSB1 --experimental` — 192-byte FLASH_LESEN chunks must
-   yield a byte-identical image to a 128-byte read.
-3. On-car write (destructive — verified backup in hand, do it last):
-   `dde3-toolkit write <backup>.bin --port /dev/ttyUSB1 --experimental`
-   (type WRITE192) — 1024 × 192-byte writes, then read-back compare.
-
-If the ECU NACKs a 192-byte block, the mode stays off and this task is done
-as far as it goes.
+**Closed (session 33): 192-byte block mode.** Tried on the car; the ECU
+OKAYed two 192-byte write blocks, then hung on the third (no reply, no
+echo, line dead) — the mode was removed. 64 B writes / 128 B reads are the
+only verified sizes (wire-protocol §32).
 
 **Real-car verification of the session-28 parser fix and the session-30
 two-session write flow.** The LEN-validated `FrameParser` + echo-wait

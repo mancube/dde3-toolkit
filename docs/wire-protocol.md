@@ -189,32 +189,28 @@ with the real reply in flight.
   instead of waiting out the full reply timeout. BUSY resends are unchanged
   (gated by `retry_on_busy`, capped at 50).
 
-## 32. Experimental 192-byte flash blocks (session 32, 2026-11-18)
+## 32. 192-byte flash blocks: TRIED AND REJECTED on the real car (session 32/33, 2026-11-18)
 
 The known-safe block sizes are the Galletto sizes: 64-byte
 `FLASH_SCHREIBEN` writes (`WRITE_BLOCK`) and 128-byte `FLASH_LESEN` reads
 (`READ_CHUNK`). The frame builder allows up to 246 data bytes per frame
-(`assert!(data.len() <= 0xF6)` in `frame_flash_write`), and the ECU's flash
-write code accepts blocks up to that limit, so an **experimental mode**
-switches both to **192 bytes** (`WRITE_BLOCK_EXP` / `READ_CHUNK_EXP` via
-`Kline::set_experimental_blocks(true)`):
+(`assert!(data.len() <= 0xF6)` in `frame_flash_write`), so an experimental
+mode was built to send **192-byte** blocks/chunks in both directions
+(`WRITE_BLOCK_EXP` / `READ_CHUNK_EXP` / `Kline::set_experimental_blocks`),
+gated by CLI `--experimental` + the `WRITE192` confirmation word (GUI: LINK
+toggle + `WRITE192`).
 
-- Writes: 192-byte blocks → 1024 blocks for the 192 KB program region
-  instead of 3072 × 64-byte blocks.
-- Reads: 192-byte chunks instead of 128.
-- Wire shape is unchanged (`12 <LEN> 07 02 <A:3 BE> <N> <data>` /
-  `12 <LEN> 09 06 00 <A:3 BE> <count>`); only N/count grow (LEN = 9+N /
-  9+count still includes the trailing XOR).
-
-**Not car-verified.** Gating is two independent gates on writes:
-
-- CLI: `--experimental` flag **and** typing **`WRITE192`** (not `WRITE`) at
-  the confirm prompt.
-- GUI: the "192 B blocks (EXP)" toggle in the side-nav **LINK · GLOBAL**
-  section **and** typing **`WRITE192`** in the write confirmation.
-
-Default everywhere is **OFF** (64 B writes / 128 B reads). The sim accepts
-192-byte blocks and chunks (`sim::tests::experimental_192_byte_blocks`);
-frame builders are covered by `protocol::tests::experimental_block_sizes`.
-Bench against the fake ECU (`respond --flash …`) before any on-car use; the
-known-safe path is untouched either way.
+**Real-car result: the ECU cannot sustain 192-byte write blocks.**
+On-car `write --experimental` (2026-11-18): the first two 192-byte
+`FLASH_SCHREIBEN` frames (`12 C9 07 02 01 00 00 C0 …` @0x10000,
+`12 C9 07 02 01 00 C0 C0 …` @0x100C0) each drew a 4-byte write-OKAY
+(`12 04 A0 …` — status 0xA0, *not* the 16-byte `12 10 A0 10 …` live
+broadcast); the third (`… 01 01 80 C0` @0x10180) got **no reply and no
+echo** on the line, and after 3 resends the link was dead
+(`no echo of service 0x07 … line dead or ECU not listening`). Two
+"accepted" blocks followed by a hung ECU is not a workable write path.
+The frame format was wire-valid (LEN = 9 + 192 = 0xC9 fits one byte); the
+ECU's flash-write path simply does not take a 192-byte block. The mode was
+**removed** (session 33); 64 B writes / 128 B reads are the only verified
+sizes. Don't re-attempt larger write blocks without a capture proving the
+ECU's flasher accepts them.

@@ -920,28 +920,6 @@ mod tests {
     }
 
     #[test]
-    fn experimental_192_byte_blocks() {
-        // The experimental mode (Kline::set_experimental_blocks) sends
-        // 192-byte FLASH_SCHREIBEN blocks and 192-byte FLASH_LESEN chunks —
-        // the sim must accept both sizes (the ECU's flash-write code takes
-        // up to 246 data bytes per block).
-        let mut s = SimEcu::new();
-        s.handle(&[0x12, 0x04, 0x0D]); // UPROG_EIN
-        let n = crate::protocol::WRITE_BLOCK_EXP;
-        let data: Vec<u8> = (0..n).map(|i| (i as u8) ^ 0x3C).collect();
-        let mut w = vec![0x12, 0x09 + n as u8, 0x07, 0x02, 0x01, 0x00, 0x00, n as u8];
-        w.extend_from_slice(&data);
-        let r = s.handle(&w);
-        assert_eq!(r[2], 0xA0, "192-byte write block must be accepted");
-        assert_eq!(&s.flash_image()[0x10000..0x10000 + n], &data);
-        // 192-byte read chunk back (`12 09 06 00 <A BE> <count>`); reply LEN
-        // is total wire length incl. XOR = 3 + 192 + 1 = 0xC4.
-        let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x01, 0x00, 0x00, n as u8]);
-        assert_eq!(&r[..3], &[0x12, 3 + n as u8 + 1, 0xA0]);
-        assert_eq!(&r[3..3 + n], &data);
-    }
-
-    #[test]
     fn flash_read_serves_file_image() {
         // A real dump (e.g. captures/actual_flash.bin) is served verbatim:
         // FLASH_LESEN returns those bytes and the AIF slot comes from the
