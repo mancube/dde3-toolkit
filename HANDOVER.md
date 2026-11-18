@@ -573,6 +573,28 @@ own fast-baud path is testable end-to-end without a car (branch
   `baud_91_without_patch_keeps_stub_ack`). Docs: `docs/respond-mode.md` §9,
   `docs/baud-0x91-patch.md` (fake-ECU test rig).
 
+### Session 36 (2026-11-18) — fast-baud write/read pacing fixed (bench)
+
+User report: the full write with the 125k patch active was **slower than at
+9600**. Root cause: the bench Write/Read arms passed the default
+`--data-delay 3` (ms/byte — a 9600-baud WinKFP habit) straight to
+`write_full` / the read loop even at 124800. A 73-byte `FLASH_SCHREIBEN`
+frame took 219 ms of pacing vs 5.9 ms of wire → 3072 frames ≈ 11.5 min,
+the 13× wire speedup fully masked. The Live loop and the GUI write job
+already zeroed pacing at fast baud (`if fast { 0 }`); bench was the outlier.
+
+Fix (`src/bench.rs`): when the 0x91 switch succeeds, `set_write_delay(0)` is
+applied for the whole run (covers the read path + bootstrap frames) and the
+Write/WriteCal arms pass the effective delay (0 at fast baud) to
+`write_full` / `write_calibration`, which re-set it from the argument.
+`WRITE_START` now logs the effective delay.
+
+Verified over the pty loopback with **default** flags (no `--data-delay`):
+full write 36.1 s (was ~11.5 min), dump byte-exact over the written span;
+full read 24.3 s, byte-exact. 89 tests passing, clippy clean.
+Docs: `docs/FINDINGS_flash_and_fast_ds2.md` §5 (pacing rule), bench usage
+line.
+
 ## ← CURRENT TASK (take over from here)
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU

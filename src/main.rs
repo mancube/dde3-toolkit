@@ -92,7 +92,9 @@ fn print_usage() {
     eprintln!("    [--info|--read|--read-cal|--write|--write-cal|--live]");
     eprintln!("    [--image <path>] [--out <path>] [--fast-baud 38400|125000] [--duration <s>]");
     eprintln!("    [--fast-9600] (--live only: back-to-back polling + 1 ms/byte pacing;");
-    eprintln!("    default is the original 55 ms / 3 ms timing; --fast-baud needs the patch)");
+    eprintln!("    default is the original 55 ms / 3 ms timing; --fast-baud needs the patch,");
+    eprintln!("    and at the fast rate TX pacing is 0 — back-to-back frames, the 3 ms/byte");
+    eprintln!("    WinKFP pacing is a 9600 habit that would erase the speedup)");
     eprintln!("  checksum <image.bin>       Verify and optionally correct flash checksums");
     eprintln!("  patches [list|show|apply|revert|verify|correct] [name]");
     eprintln!("                             Firmware patch manifests from ./patches (baud 0x91,");
