@@ -18,8 +18,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use eframe::egui::{
-    self, Align, Color32, FontId, Frame, Layout, Margin, RichText, ScrollArea, Stroke, TextStyle,
-    Ui, Vec2,
+    self, Align, Align2, Color32, FontId, Frame, Layout, Margin, RichText, ScrollArea, Stroke,
+    TextStyle, Ui, Vec2, pos2, vec2,
 };
 
 use crate::checksum::{self, CAL_LEN, CAL_START, IMAGE_SIZE};
@@ -264,6 +264,11 @@ pub struct App {
     progress: f32,
     progress_text: String,
     active_job: Option<Job>,
+    /// When the currently displayed job started — the elapsed-time timer
+    /// overlaid on the progress bar. Set by the `start_*` functions; only
+    /// read while `active_job.is_some()`, so a stale value after the job
+    /// ends is never drawn.
+    job_started: Option<Instant>,
     live_running: bool,
     live_stop: Arc<AtomicBool>,
     live_values: Vec<f64>,
@@ -355,6 +360,7 @@ impl App {
             progress: 0.0,
             progress_text: String::new(),
             active_job: None,
+            job_started: None,
             live_running: false,
             live_stop: Arc::new(AtomicBool::new(false)),
             live_values: vec![0.0; LIVE_VARS.len()],
@@ -824,6 +830,7 @@ impl App {
         }
         self.stop_live();
         self.active_job = Some(Job::Full);
+        self.job_started = Some(Instant::now());
         let path = PathBuf::from(self.read_path.clone());
         self.start(move |link, tx| {
             let mut guard = lock_or_recover(&link);
@@ -874,6 +881,7 @@ impl App {
         }
         self.stop_live();
         self.active_job = Some(Job::Cal);
+        self.job_started = Some(Instant::now());
         let path = PathBuf::from(self.cal_path.clone());
         self.start(move |link, tx| {
             let mut guard = lock_or_recover(&link);
@@ -940,6 +948,7 @@ impl App {
         let fast = self.fast_write;
         self.stop_live();
         self.active_job = Some(Job::Write);
+        self.job_started = Some(Instant::now());
         self.start(move |link, tx| {
             let mut guard = lock_or_recover(&link);
             let Some(k) = guard.as_mut() else {
@@ -994,6 +1003,7 @@ impl App {
         let fast = self.fast_write;
         self.stop_live();
         self.active_job = Some(Job::WriteCal);
+        self.job_started = Some(Instant::now());
         self.start(move |link, tx| {
             let mut guard = lock_or_recover(&link);
             let Some(k) = guard.as_mut() else {
@@ -2144,11 +2154,7 @@ impl App {
             });
             if self.active_job == Some(Job::Full) {
                 ui.add_space(8.0);
-                ui.add(
-                    egui::ProgressBar::new(self.progress)
-                        .show_percentage()
-                        .animate(true),
-                );
+                progress_with_timer(ui, self.progress, self.job_started);
             }
         });
         ui.add_space(14.0);
@@ -2194,11 +2200,7 @@ impl App {
             }
             if self.active_job == Some(Job::Cal) {
                 ui.add_space(8.0);
-                ui.add(
-                    egui::ProgressBar::new(self.progress)
-                        .show_percentage()
-                        .animate(true),
-                );
+                progress_with_timer(ui, self.progress, self.job_started);
                 ui.label(RichText::new(&self.progress_text).size(11.0).color(MUTED));
             }
             if let Some((path, size)) = &self.cal_info {
@@ -2377,11 +2379,7 @@ impl App {
             );
             if matches!(self.active_job, Some(Job::Write | Job::WriteCal)) {
                 ui.add_space(8.0);
-                ui.add(
-                    egui::ProgressBar::new(self.progress)
-                        .show_percentage()
-                        .animate(true),
-                );
+                progress_with_timer(ui, self.progress, self.job_started);
                 ui.label(RichText::new(&self.progress_text).size(12.0).color(MUTED));
             }
         });
@@ -3809,6 +3807,45 @@ fn install_fonts(ctx: &egui::Context) {
             .push("dejavu".to_owned());
     }
     ctx.set_fonts(fonts);
+}
+
+/// Elapsed job time for the progress-bar timer: `M:SS`, or `H:MM:SS`
+/// past one hour.
+fn format_job_time(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 3600 {
+        format!("{}:{:02}", s / 60, s % 60)
+    } else {
+        format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+    }
+}
+
+/// Progress bar with the elapsed job time overlaid on its right end.
+/// egui draws the percentage at the LEFT of the bar, so the right end is
+/// free; the near-white monospace timer carries a soft dark shadow so it
+/// stays readable over both the dark track and the teal fill.
+fn progress_with_timer(ui: &mut Ui, progress: f32, started: Option<Instant>) {
+    let response = ui.add(
+        egui::ProgressBar::new(progress)
+            .show_percentage()
+            .animate(true),
+    );
+    if let Some(t0) = started {
+        let rect = response.rect;
+        let text = format_job_time(t0.elapsed());
+        let font = FontId::monospace(11.5);
+        let pos = pos2(rect.right() - 10.0, rect.center().y);
+        let shadow = Color32::from_black_alpha(160);
+        ui.painter()
+            .text(pos + vec2(1.0, 1.0), Align2::RIGHT_CENTER, &text, font.clone(), shadow);
+        ui.painter().text(
+            pos,
+            Align2::RIGHT_CENTER,
+            &text,
+            font,
+            Color32::from_rgb(240, 248, 245),
+        );
+    }
 }
 
 fn centered_button(ui: &mut Ui, size: Vec2, button: egui::Button<'_>) -> egui::Response {
