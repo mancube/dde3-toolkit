@@ -689,6 +689,11 @@ fn main() {
             .position(|a| a == "--port")
             .and_then(|i| args.get(i + 1))
             .cloned();
+        let log_dir = args
+            .iter()
+            .position(|a| a == "--log-dir")
+            .and_then(|i| args.get(i + 1))
+            .map(std::path::PathBuf::from);
         let tab = args
             .iter()
             .position(|a| a == "--tab")
@@ -736,6 +741,7 @@ fn main() {
                     auto_write,
                     fast_write,
                     gui_fast_baud,
+                    log_dir,
                 )))
             }),
         );

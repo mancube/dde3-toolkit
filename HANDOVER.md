@@ -521,8 +521,13 @@ The in-app Protocol log panel keeps only the most recent 2000 lines
 lost from the on-screen record. Now **every GUI launch also writes a full,
 untruncated log to a temp file**, named after the startup time:
 
-- Path: `$TMPDIR/dde3-toolkit/dde3-YYYYmmdd-HHMMSS.log` (one file per run;
+- Path: `<log dir>/dde3-YYYYmmdd-HHMMSS.log` (one file per run;
   `open_run_log` in `app.rs` creates the dir + file in `App::new`).
+  The log dir is configurable, highest priority first: `--log-dir <path>`
+  (GUI flag) > `$DDE3_LOG_DIR` (env, same convention as `DDE3_PATCH_DIR`)
+  > the persistent default `default_log_dir()` =
+  `$XDG_DATA_HOME/dde3-toolkit/logs` or `~/.local/share/dde3-toolkit/logs`
+  (replaces the original `$TMPDIR` location — /tmp is wiped on reboot).
 - Every `push_log` line (all wire TX/RX + operation messages) is appended
   with a wall-clock `YYYY-MM-DD HH:MM:SS.mmm` prefix, **flushed per line**
   (a crash mid-write still leaves a complete log). Original `[+x.xxxs]`

@@ -331,6 +331,7 @@ impl App {
         auto_write: bool,
         fast_write: bool,
         fast_baud: Option<u32>,
+        log_dir: Option<PathBuf>,
     ) -> Self {
         style(&cc.egui_ctx);
         let (tx, rx) = unbounded();
@@ -398,7 +399,7 @@ impl App {
             patch_notice: None,
             patch_target_ok: None,
         };
-        app.open_run_log(demo);
+        app.open_run_log(demo, log_dir);
         app.refresh_ports();
         if demo {
             app.demo();
@@ -657,11 +658,20 @@ impl App {
     }
 
     /// Open this run's full log file, named after the startup time:
-    /// `$TMPDIR/dde3-toolkit/dde3-YYYYmmdd-HHMMSS.log`. Every line pushed to
-    /// the protocol log is appended here for the whole run.
-    fn open_run_log(&mut self, demo: bool) {
+    /// `<log dir>/dde3-YYYYmmdd-HHMMSS.log`. Every line pushed to the
+    /// protocol log is appended here for the whole run. The log dir is the
+    /// `--log-dir` flag, else `$DDE3_LOG_DIR`, else the persistent default
+    /// (`$XDG_DATA_HOME/dde3-toolkit/logs` or `~/.local/share/...`).
+    fn open_run_log(&mut self, demo: bool, log_dir: Option<PathBuf>) {
         let (name_stamp, human) = now_local();
-        let dir = std::env::temp_dir().join("dde3-toolkit");
+        let dir = log_dir
+            .or_else(|| {
+                std::env::var("DDE3_LOG_DIR")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(default_log_dir);
         let path = dir.join(format!("dde3-{name_stamp}.log"));
         let opened = std::fs::create_dir_all(&dir)
             .and_then(|_| OpenOptions::new().create(true).append(true).open(&path));
@@ -4261,6 +4271,22 @@ fn default_path(name: &str) -> String {
     std::env::var("HOME")
         .map(|h| format!("{h}/{name}"))
         .unwrap_or_else(|_| name.to_string())
+}
+
+/// Default run-log directory: `$XDG_DATA_HOME/dde3-toolkit/logs`, falling
+/// back to `~/.local/share/dde3-toolkit/logs` (or `./dde3-toolkit-logs` when
+/// there is no HOME at all).
+fn default_log_dir() -> PathBuf {
+    let home = std::env::var_os("HOME");
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| home.as_ref().map(|h| PathBuf::from(h).join(".local/share")));
+    match base {
+        Some(b) => b.join("dde3-toolkit/logs"),
+        None => PathBuf::from("dde3-toolkit-logs"),
+    }
 }
 
 /// Local wall clock, now. Returns `(compact, human)`:

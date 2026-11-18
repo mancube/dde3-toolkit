@@ -44,9 +44,11 @@ captures. All of that work is written up in [`docs/`](docs) — start with
   [`patches/`](patches)
 - **Protocol log** — every frame with timing; per-operation or continuous,
   to file and CSV. The GUI also writes a full, untruncated run log to
-  `$TMPDIR/dde3-toolkit/dde3-<startup>.log` (one file per launch, path
-  shown in the Log tab and on stderr) — the in-app panel keeps only the
-  most recent 2000 lines
+  `<log dir>/dde3-<startup>.log` (one file per launch, path shown in the
+  Log tab and on stderr) — the in-app panel keeps only the most recent
+  2000 lines. The log dir defaults to
+  `~/.local/share/dde3-toolkit/logs/` (persistent, survives reboots); set
+  `$DDE3_LOG_DIR` or pass `--log-dir <path>` to move it
 - **9-tab GUI** — Overview, Read, Write, Checksum, Patches, Fault codes,
   Live, Logger, Log (egui)
 - **Headless bench** — `bench` subcommand for scripted runs
