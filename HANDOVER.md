@@ -428,6 +428,32 @@ tool/testwrite.txt` @ ~line 7725): program area 0x10000..0x38000, then
 - Docs: FINDINGS §2.1 rewritten (two-session flow, per-phase frame counts),
   README feature line updated.
 
+### Session 31 (2026-11-18) — per-zone `07 0F` write-end rejected (decompilation gap)
+
+User request: end each zone write (program area, calibration area) with
+`FLASH_SCHREIBEN_ENDE` (`07 0F`) before `DIAGNOSE_ENDE` — "an addition like
+a failsafe" — under the rule **"don't implement a command if it's not fully
+understood from the job decompilation"**.
+
+Checked `before/10DDE30.prg`, job `FLASH_SCHREIBEN_ENDE` @0xD782
+(`analysis/winkfp_proto.txt`, run with `tools/prg_vm.py`):
+- understood: frame skeleton `12 09 07 0F <A:3 BE> 00` + XOR, reply =
+  JOBRESULT status at [2]; zero-param VM run → `12 09 07 0F 00 00 00 00`
+  (matches `analysis/frames.md`);
+- **address value NOT determined**: the job copies [4..6] from the
+  caller-supplied BIN-buffer parameter; the .prg never computes an address;
+  parameterized VM runs don't show the clean BE-address layout the read job
+  proves; no real PC-software capture shows the value (Galletto never sends
+  `07 0F` at all);
+- **timing NOT in the .prg**: 33 leaf jobs, no orchestrator, no job jumps
+  to 0xD782 — the call order is in the PC software's C code.
+
+Decision: keep Galletto's flow (zones end with `DIAGNOSE_ENDE` only). The
+uncommitted `write_end()`-per-zone attempt (working tree on top of
+`d584a92`) was reverted — kept in `git stash` for reference. FINDINGS §2.1
+updated with the full analysis. Re-evaluate only when a real
+MPPS/PC-software capture shows the address + timing.
+
 ## ← CURRENT TASK (take over from here)
 
 **Real-car verification of the session-28 parser fix and the session-30
@@ -450,6 +476,13 @@ verified against the real car yet. Next on-car:
    trailing-XOR position, the log will show a `no response` bail — the
    parser drops one byte and resyncs, so look for repeated 1-byte drops in
    the RX log before changing anything.
+
+Note (session 31): the requested per-zone `FLASH_SCHREIBEN_ENDE` (`07 0F`)
+failsafe was **not** implemented — the job decompilation doesn't determine
+the address field or the call timing (FINDINGS §2.1). Rule: don't implement
+a command the decompilation doesn't fully explain. If a real MPPS/PC-
+software capture ever shows a `07 0F` frame, that capture resolves both
+open questions.
 
 **Fake-ECU FS jobs: serve the real M47 error record; clear empties memory.**
 Done in session 25 (`src/sim.rs` `default_faults()` → real M47 reference

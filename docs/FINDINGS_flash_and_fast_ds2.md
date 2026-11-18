@@ -157,6 +157,39 @@ Verified end-to-end against the fake ECU (pty loopback, `bench --write` vs
 the reconstructed dump is byte-identical to the source image over
 `0x10000..0x40000`.
 
+### The `07 0F` write-end is deliberately NOT sent (decompilation gap, 2026-11-18)
+
+The user asked for each zone (program area, calibration area) to end with
+`FLASH_SCHREIBEN_ENDE` before `DIAGNOSE_ENDE` — "an addition like a
+failsafe" — under the rule **"don't implement a command if it's not fully
+understood from the job decompilation"**. Checked against
+`before/10DDE30.prg`, job `FLASH_SCHREIBEN_ENDE` @0xD782
+(`analysis/winkfp_proto.txt`, run with `tools/prg_vm.py`):
+
+- **Understood:** frame skeleton `12 09 07 0F <A_hi A_mid A_lo> 00` + frame
+  XOR (LEN `0x09`, svc `0x07`, subfn `0x0F`); reply = JOBRESULT status byte
+  at [2] (`A0` OKAY / `A1` BUSY-retry / else error) — same as the rest of
+  the `0x07` family. The zero-param VM run emits exactly
+  `12 09 07 0F 00 00 00 00` (matches `analysis/frames.md`).
+- **NOT determined by the decompilation:**
+  - the **address value** at [4..6]: the job copies those bytes from the
+    caller-supplied BIN-buffer string parameter (second `pary`); the .prg
+    never computes an address itself. Parameterized VM runs show a
+    buffer→frame mapping that is *not* the clean BE-address layout the read
+    job proves with its mask/shift constants, and no real PC-software wire
+    capture shows the value the actual job sends (Galletto never sends
+    `07 0F` at all; the only `07 0F` on the wire in our captures is this
+    toolkit's own pre-session-30 write, which used `0x10000` by guess and
+    was only ever answered by the fake ECU).
+  - **when / how often**: the .prg holds 33 leaf job functions and no
+    orchestrator — no job jumps to 0xD782. The call order lives in the PC
+    software's C code, which we don't have.
+- **Decision:** keep Galletto's flow — each zone ends with `DIAGNOSE_ENDE`
+  only. An uncommitted attempt to add `write_end()` per zone (working tree
+  on top of `d584a92`) was reverted (kept in `git stash` for reference).
+  Re-evaluate only when a real MPPS/PC-software capture shows the address
+  and the timing.
+
 ## 3. Real-car capture confirms the rest (`captures/dde3newlog.txt`)
 
 ```
