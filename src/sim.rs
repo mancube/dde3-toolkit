@@ -32,6 +32,33 @@ use anyhow::{Context, Result};
 use crate::protocol::{ECU_ADDR, IMAGE_SIZE};
 
 const SB_OK: u8 = 0xA0;
+/// NACK stub status of the flash services (0x06/0x07) outside the unlocked
+/// programming session — the real ECU answers `12 04 A2` (2026-11-19
+/// capture), not the generic 0xFF NACK.
+const SB_NACK_FLASH: u8 = 0xA2;
+
+/// The ECU's ident string — IDENT (0x00) and the SEED_KEY seed telegram (0x90)
+/// both return these 42 bytes verbatim (real car, 2026-11-19 capture
+/// `captures/dde3-20261119-222226.log`: seed reply == ident reply, byte for
+/// byte; the key is derived from this string, Z = 0x07 → `9C A0 97 96`).
+const IDENT_DATA: [u8; 42] = *b"77868875201124048010281001445G521000000000";
+
+/// UPROG_EIN reply data — the ECU's region/segment descriptor table,
+/// byte-for-byte from the real car (2026-11-19, `captures/actual ecu
+/// UPROG_EIN response.txt`): `03 FF 60` + 42 × FF + the 27-byte tail `03 AE
+/// BE 00 7F E4 … 03 FF 62`, whose last 24 bytes are the flash-region table
+/// stored in flash at 0x3FC9A..0x3FCB2 (right before the AIF slot at
+/// 0x3FCB2). The ECU assembles the reply (the FF padding and the `03 AE BE`
+/// triple are not a pure flash window), so the sim serves the captured bytes
+/// verbatim. Reply frame: `12 4C A0 <72 B>` (LEN 0x4C = 76 wire incl. XOR).
+const UPROG_EIN_DATA: [u8; 72] = [
+    0x03, 0xFF, 0x60, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x03, 0xAE, 0xBE,
+    0x00, 0x7F, 0xE4, 0x03, 0xFF, 0x46, 0x03, 0xFF, 0x48, 0x03, 0x7F, 0xB0,
+    0x03, 0xFC, 0xB2, 0x03, 0xFF, 0x47, 0x03, 0xFC, 0x4F, 0x03, 0xFF, 0x62,
+];
 
 /// AIF programming record: 46 bytes at cal 0x7CB2 = flash 0x3FCB2 (the
 /// calibration area is the last 0x8000 of the 256 KB flash) — the first of 14
@@ -82,6 +109,13 @@ pub struct SimEcu {
     /// Test hook: override the AIF (hardware-ID) programming record served
     /// on the `FLASH_LESEN addr=0 count=46` read; `None` = serve from flash.
     aif_override: Option<[u8; 46]>,
+    /// Seed/key accepted (the real ECU's flash-session unlock latch). The
+    /// flash services (0x06/0x07) NACK with status 0xA2 until UPROG_EIN
+    /// (`in_prog`) AND seed/key (`unlocked`) are both done — verified on the
+    /// real car 2026-11-19 (`captures/actual ecu UPROG_EIN response.txt`:
+    /// UPROG_EIN done, no seed/key → FLASH_LESEN → `12 04 A2`). Cleared by
+    /// DIAGNOSE_ENDE (0x9F).
+    unlocked: bool,
     /// 0x91 baud patch (the `respond --patched-baud` flag): the link rate
     /// the fake ECU switches to when it accepts a `0x91` — the patch's FIXED
     /// rate, already mapped through `protocol::reopen_divisor` (a 125000
@@ -147,6 +181,7 @@ impl SimEcu {
             test_stamp: [0, 0, 0],
             adjustments: BTreeMap::new(),
             aif_override: None,
+            unlocked: false,
             baud_patch: None,
             baud_switch: None,
         }
@@ -176,6 +211,7 @@ impl SimEcu {
             test_stamp: [0, 0, 0],
             adjustments: BTreeMap::new(),
             aif_override: None,
+            unlocked: false,
             baud_patch: None,
             baud_switch: None,
         })
@@ -243,15 +279,18 @@ impl SimEcu {
             // LEN byte 0x2E (the old 43-char variant had counted the trailing
             // XOR byte 0x30 as a fourth '0' — foreign tools reject the frame).
             0x00 => {
-                let s = b"77868875201124048010281001445G521000000000"; // 42 chars
                 let mut r = vec![0x12, 0, SB_OK];
-                r.extend_from_slice(s);
+                r.extend_from_slice(&IDENT_DATA);
                 r
             }
-            // UPROG_EIN: `12 04 0D` — enter programming mode.
+            // UPROG_EIN: `12 04 0D` — enter programming mode. Real car
+            // replies `12 4C A0` + the 72-byte region/segment descriptor
+            // table (2026-11-19 capture) — not a bare status.
             0x0D => {
                 self.in_prog = true;
-                Self::status(p, len_echo, SB_OK)
+                let mut r = vec![0x12, 0, SB_OK];
+                r.extend_from_slice(&UPROG_EIN_DATA);
+                r
             }
             // AIF_LESEN: `12 05 02 <param>` — the param byte is not used by
             // the ECU (it scans its 14-slot table itself; 0x00 and 0xFF both
@@ -281,9 +320,11 @@ impl SimEcu {
                 r.push(0x00);
                 r
             }
-            // DIAGNOSE_ENDE: `12 04 9F` — leave session.
+            // DIAGNOSE_ENDE: `12 04 9F` — leave session (and re-lock the
+            // flash services).
             0x9F => {
                 self.in_prog = false;
+                self.unlocked = false;
                 Self::status(p, len_echo, SB_OK)
             }
             // SEED_KEY family: seed request `12 08 90 42 4D 57 Z` vs key
@@ -501,8 +542,19 @@ impl SimEcu {
         Some((hi as u32) << 16 | (mid as u32) << 8 | lo as u32)
     }
 
+    /// True when the real ECU's flash session is open: UPROG_EIN done AND
+    /// seed/key accepted. Until then 0x06/0x07 are NACK stubs (0xA2) —
+    /// verified on the real car 2026-11-19 (UPROG_EIN done, no seed/key →
+    /// FLASH_LESEN → `12 04 A2`).
+    fn flash_session_open(&self) -> bool {
+        self.in_prog && self.unlocked
+    }
+
     fn flash_read(&mut self, p: &[u8], len_echo: u8) -> Vec<u8> {
         // `12 09 06 00 <A_hi A_mid A_lo> <count@7>` — count is 1 byte at [7].
+        if !self.flash_session_open() {
+            return Self::status(p, 4, SB_NACK_FLASH);
+        }
         if let (Some(addr), Some(count)) = (Self::addr_be(p), p.get(7).copied()) {
             if addr + count as u32 > IMAGE_SIZE as u32 {
                 return Self::status(p, len_echo, 0xB0); // ERROR_SG_PARAMETER
@@ -534,10 +586,10 @@ impl SimEcu {
     fn flash_erase(&mut self, p: &[u8], len_echo: u8) -> Vec<u8> {
         // `12 09 07 06 <A_hi A_mid A_lo> 00` — no count in the frame; the
         // toolkit erases the whole writable area from `addr` to the end.
+        if !self.flash_session_open() {
+            return Self::status(p, 4, SB_NACK_FLASH);
+        }
         if let Some(addr) = Self::addr_be(p) {
-            if !self.in_prog {
-                return Self::nack(p);
-            }
             if addr >= IMAGE_SIZE as u32 {
                 return Self::status(p, len_echo, 0xB0);
             }
@@ -553,17 +605,11 @@ impl SimEcu {
         // blocks in the EDE/EDZ flash sequence. A bare (zero-data) write
         // block is a hand-shake and is ACKed even outside programming mode;
         // only real data writes require UPROG_EIN (`0D`) first.
+        if !self.flash_session_open() {
+            return Self::status(p, 4, SB_NACK_FLASH);
+        }
         if let (Some(addr), Some(n)) = (Self::addr_be(p), p.get(7).copied()) {
-            // In programming mode every write is allowed. Outside it, the
-            // ECU still accepts zero-length control writes; only real data
-            // writes require UPROG_EIN (`0D`) first.
             let data = p.get(8..8 + n as usize).unwrap_or(&[]);
-            if data.is_empty() {
-                return Self::status(p, len_echo, SB_OK);
-            }
-            if !self.in_prog {
-                return Self::nack(p);
-            }
             let end = addr as usize + data.len();
             if end > IMAGE_SIZE {
                 return Self::status(p, len_echo, 0xB0);
@@ -603,9 +649,11 @@ impl SimEcu {
         // Reply payload (the transport appends the trailing XOR and `handle`
         // stamps LEN = payload + 1 = 46 = 0x2E): 12 2E A0 <42 data bytes>.
         let mut r: Vec<u8> = vec![ECU_ADDR, 0x2E, SB_OK];
-        for i in 0..42usize {
-            r.push((z as u8).wrapping_mul(31).wrapping_add(i as u8).wrapping_add(0x27));
-        }
+        // Real ECU: the seed telegram is the ident string, verbatim
+        // (2026-11-19 capture — seed reply == ident reply; the expected key
+        // below is computed on these exact bytes, so Z = 0x07 → 9C A0 97 96
+        // like the real car).
+        r.extend_from_slice(&IDENT_DATA);
         assert_eq!(r.len(), 45, "42-byte seed table + 3 header");
         // Build the full 46-byte wire frame (payload + trailing XOR) — this
         // is what the tester receives and runs its key formula on.
@@ -648,7 +696,12 @@ impl SimEcu {
                 let galletto_key = expected.map(|b| b.wrapping_sub(5));
                 if expected == key || galletto_key == key {
                     self.pending_key = None;
-                    Self::status(p, len_echo, SB_OK)
+                    self.unlocked = true;
+                    // Real car: key check OK is `12 05 A0 00` (status + one
+                    // 0x00 data byte, 2026-11-19 capture).
+                    let mut r = Self::status(p, len_echo, SB_OK);
+                    r.push(0x00);
+                    r
                 } else {
                     Self::status(p, len_echo, 0xB0)
                 }
@@ -779,6 +832,36 @@ impl SimEcu {
 mod tests {
     use super::*;
 
+    /// UPROG_EIN + seed/key — the real ECU's flash-session bootstrap
+    /// (2026-11-19 capture). The flash services (0x06/0x07) NACK with the
+    /// 0xA2 stub until this is done.
+    fn unlock(s: &mut SimEcu) {
+        s.handle(&[0x12, 0x04, 0x0D]);
+        let z: u8 = 0x07;
+        let r = s.handle(&[0x12, 0x08, 0x90, 0x42, 0x4D, 0x57, z]);
+        let key = crate::protocol::key_from_seed_reply(&r, z);
+        s.handle(&[0x12, 0x08, 0x90, key[0], key[1], key[2], key[3]]);
+    }
+
+    /// Real-car parity (2026-11-19 capture, `captures/dde3-20261119-222226.log`):
+    /// UPROG_EIN replies `12 4C A0` + the 72-byte region table; the seed
+    /// telegram is the ident string; Z = 0x07 → key `9C A0 97 96`; the
+    /// key-check reply is `12 05 A0 00`.
+    #[test]
+    fn uprog_ein_and_seed_key_real_car_parity() {
+        let mut s = SimEcu::new();
+        let r = s.handle(&[0x12, 0x04, 0x0D]);
+        assert_eq!(&r[..3], &[0x12, 0x4C, 0xA0], "UPROG_EIN reply shape");
+        assert_eq!(r.len(), 3 + UPROG_EIN_DATA.len());
+        assert_eq!(&r[3..], &UPROG_EIN_DATA, "region table byte-for-byte");
+        let r = s.handle(&[0x12, 0x08, 0x90, 0x42, 0x4D, 0x57, 0x07]);
+        assert_eq!(&r[3..], &IDENT_DATA, "seed telegram == ident string");
+        let key = crate::protocol::key_from_seed_reply(&r, 0x07);
+        assert_eq!(key, [0x9C, 0xA0, 0x97, 0x96], "real-car key for Z=0x07");
+        let rk = s.handle(&[0x12, 0x08, 0x90, key[0], key[1], key[2], key[3]]);
+        assert_eq!(&rk[..4], &[0x12, 0x05, 0xA0, 0x00], "key-check reply shape");
+    }
+
     #[test]
     fn ident_and_status() {
         let mut s = SimEcu::new();
@@ -793,8 +876,11 @@ mod tests {
         assert_eq!(info.hw_number, "0281001445");
         let r = s.handle(&[0x12, 0x04, 0x9F]);
         assert_eq!(&r[..3], &[0x12, 0x04, 0xA0]);
+        // UPROG_EIN: the real car replies `12 4C A0` + the 72-byte region
+        // table (2026-11-19 capture) — not a bare status.
         let r = s.handle(&[0x12, 0x04, 0x0D]);
-        assert_eq!(&r[..3], &[0x12, 0x04, 0xA0]);
+        assert_eq!(&r[..3], &[0x12, 0x4C, 0xA0]);
+        assert_eq!(&r[3..], &UPROG_EIN_DATA);
         // unknown service → NACK
         let r = s.handle(&[0x12, 0x04, 0x55]);
         assert_eq!(&r[..3], &[0x12, 0x04, 0xFF]);
@@ -901,8 +987,10 @@ mod tests {
         // DIAGNOSE_ENDE closes the session.
         assert_eq!(s.handle(&[0x12, 0x04, 0x9F])[2], 0xA0, "DIAGNOSE_ENDE");
 
-        // Without re-auth the data write is NACKed (ECU left prog mode).
-        assert_eq!(s.handle(&w1)[2], 0xFF, "write after DIAGNOSE_ENDE -> NACK");
+        // Without re-auth the data write gets the flash NACK stub (ECU left
+        // prog mode; the real car answers `12 04 A2` outside the unlocked
+        // session, 2026-11-19 capture).
+        assert_eq!(s.handle(&w1)[2], 0xA2, "write after DIAGNOSE_ENDE -> NACK");
 
         // Phase 2: full re-auth, erase @0x38000, write 64 B.
         assert_eq!(s.handle(&[0x12, 0x04, 0x0D])[2], 0xA0, "phase-2 UPROG_EIN");
@@ -938,9 +1026,10 @@ mod tests {
         // The DDE3 job's param-0xFF variant gives the same record.
         let r2 = s.handle(&[0x12, 0x05, 0x02, 0xFF]);
         assert_eq!(&r[1..], &r2[1..]);
-        // Blank the slot in programming mode → empty-slot short reply.
-        // Write to flash address 0x3FCB2 (= cal 0x7CB2, the AIF slot).
-        s.handle(&[0x12, 0x04, 0x0D]);
+        // Blank the slot in the unlocked programming session → empty-slot
+        // short reply. Write to flash address 0x3FCB2 (= cal 0x7CB2, the
+        // AIF slot).
+        unlock(&mut s);
         let mut w = vec![0x12, 0x0B, 0x07, 0x02, 0x03, 0xFC, 0xB2, AIF_LEN as u8];
         w.extend(std::iter::repeat(0xFF).take(AIF_LEN));
         assert_eq!(s.handle(&w)[2], 0xA0);
@@ -952,16 +1041,19 @@ mod tests {
     #[test]
     fn flash_read_round_trip() {
         let mut s = SimEcu::new();
-        // read 0x80 bytes @ addr 0: 12 09 06 00 <A_hi A_mid A_lo> <count@7>
-        // LEN = payload + trailing XOR = 3 + 0x80 + 1 = 0x84.
+        // Outside the unlocked session both read and write get the 0xA2 NACK
+        // stub (real car, 2026-11-19 capture).
+        let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 0x80]);
+        assert_eq!(&r[..3], &[0x12, 0x04, 0xA2], "read pre-unlock -> NACK stub");
+        let r = s.handle(&[0x12, 0x0B, 0x07, 0x02, 0x00, 0x00, 0x00, 0x02, 0xAA, 0xBB]);
+        assert_eq!(r[2], 0xA2, "write pre-unlock -> NACK stub");
+        // Unlock, then read 0x80 bytes @ addr 0: 12 09 06 00 <A_hi A_mid
+        // A_lo> <count@7>; LEN = payload + trailing XOR = 3 + 0x80 + 1 = 0x84.
+        unlock(&mut s);
         let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 0x80]);
         assert_eq!(&r[..3], &[0x12, 0x84, 0xA0]);
         assert_eq!(r.len(), 3 + 0x80);
-        // write needs programming mode: 12 0B 07 02 <addr BE> <N=2> <AA BB>
-        let r = s.handle(&[0x12, 0x0B, 0x07, 0x02, 0x00, 0x00, 0x00, 0x02, 0xAA, 0xBB]);
-        assert_eq!(r[2], 0xFF);
-        // enter prog, write, read back
-        s.handle(&[0x12, 0x04, 0x0D]);
+        // write, read back
         let r = s.handle(&[0x12, 0x0B, 0x07, 0x02, 0x00, 0x00, 0x00, 0x02, 0xAA, 0xBB]);
         assert_eq!(r[2], 0xA0);
         let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 0x02]);
@@ -983,6 +1075,7 @@ mod tests {
         std::fs::write(&path, &img).unwrap();
         let mut s = SimEcu::from_flash_file(&path).unwrap();
         let _ = std::fs::remove_file(&path);
+        unlock(&mut s);
 
         // The tool's actual FLASH_LESEN frame: 0x80 bytes @ 0.
         let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 0x80]);
@@ -1016,7 +1109,7 @@ mod tests {
     #[test]
     fn erase_and_faults() {
         let mut s = SimEcu::new();
-        s.handle(&[0x12, 0x04, 0x0D]);
+        unlock(&mut s);
         let r = s.handle(&[0x12, 0x09, 0x07, 0x06, 0x00, 0x00, 0x00, 0x00]);
         assert_eq!(r[2], 0xA0);
         let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 0x01]);
@@ -1232,6 +1325,7 @@ mod tests {
             a
         };
         s.set_aif(aif);
+        unlock(&mut s);
         let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 46]);
         assert_eq!(&r[..3], &[0x12, 0x32, 0xA0]);
         assert_eq!(r.len(), 3 + AIF_LEN);
@@ -1247,6 +1341,7 @@ mod tests {
         // data) again, instead of a hard-coded string. The `set_aif` override
         // still wins when a foreign tool needs content-matched replies.
         let mut s = SimEcu::new();
+        unlock(&mut s);
         let r = s.handle(&[0x12, 0x09, 0x06, 0x00, 0x00, 0x00, 0x00, 46]);
         // `12 32 A0 <46 B> <XOR>`: LEN = 3 + 46 + XOR = 50 = 0x32.
         assert_eq!(&r[..3], &[0x12, 0x32, 0xA0]);

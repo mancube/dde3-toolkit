@@ -645,6 +645,39 @@ out of the window within 1 s).
 Tests: 91 passing (+2: `app::tests::live_rate_window_is_the_true_mean`,
 `live_rate_window_ages_out_fast_start`). Clippy clean.
 
+### Session 39 (2026-11-21) — fake ECU parity with the 2026-11-19 real-car capture
+
+Analyzed the full real-car run log (`captures/dde3-20261119-222226.log`,
+323 TX/RX pairs) with the new `tools/analyze_run_log.py` (TX/RX pairing,
+LEN/XOR validation of every frame, command classification, reply-shape
+summary, `--image` flash verification). All 323 RX frames validate. Full
+write-up: `docs/SESSION_2026-11-19.md`.
+
+Findings → fixes (`src/sim.rs`):
+- UPROG_EIN (`0x0D`) → `12 4C A0` + **72-byte region/segment table** — not
+  stored in flash (firmware assembles it; the tail 24 B are the flash
+  region table at 0x3FC9A..0x3FCB2). Sim now serves the captured bytes
+  verbatim (`UPROG_EIN_DATA`).
+- Seed telegram = the **ident string verbatim** (42 B) — so Z = 0x07 gives
+  key `9C A0 97 96`, exactly like the real car (was a Z-seeded pseudo
+  pattern). Key-check OK = **`12 05 A0 00`** (status + one 0x00 byte), sets
+  a new `unlocked` latch (cleared by DIAGNOSE_ENDE `0x9F`).
+- Flash services (0x06 read/erase, 0x07 write) gated on
+  `in_prog && unlocked` (`flash_session_open()`); outside the session they
+  answer the **`12 04 A2` NACK stub** — proven by the 3-command capture
+  `captures/actual ecu UPROG_EIN response.txt` (UPROG_EIN done, no
+  seed/key → FLASH_LESEN → `12 04 A2`).
+- 0x0A (`12 05 A0 00`) and IDENT already matched — unchanged. **DTC
+  handlers untouched on purpose** — the toolkit's DTC parse/clear
+  algorithm is known-wrong and stays as-is (separate effort).
+
+Tests: 92 passing (new `uprog_ein_and_seed_key_real_car_parity` +
+`unlock()` helper; 8 sim tests updated for the new shapes/gating).
+E2E: `respond` on a socat pty pair + `read-cal` — the full bootstrap
+(IDENT → UPROG_EIN `12 4C A0 …` → AIF → seed/key → `12 05 A0 00`) then
+256 × 128 B reads, 32768 bytes written, exit 0. The `--sim` flag is
+outdated — `respond` is the only real sim now (candidate for removal).
+
 ## ← CURRENT TASK (take over from here)
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU
