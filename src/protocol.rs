@@ -28,7 +28,6 @@ use anyhow::{bail, Context, Result};
 use serialport::{ClearBuffer, DataBits, Parity, SerialPort, StopBits};
 
 use crate::checksum::{CAL_LEN, CAL_START};
-use crate::sim::SimEcu;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -640,7 +639,6 @@ pub struct Kline {
     logs: Vec<String>,
     silence: Duration,
     write_delay: Duration,
-    sim: Option<SimEcu>,
     /// Wall clock of the last TX/RX log line — used to stamp every log line
     /// with an absolute time and the gap to the previous line, so a capture
     /// shows where time goes (TX pacing, ECU reply latency, silence waits).
@@ -664,17 +662,8 @@ impl Kline {
             logs: Vec::new(),
             silence: Duration::from_millis(10),
             write_delay: Duration::from_millis(3),
-            sim: None,
             last_log: None,
         })
-    }
-
-    /// Enable the in-process ECU simulator (see `src/sim.rs`). The real
-    /// frame is still transmitted on the wire and the bus echo is verified;
-    /// the ECU reply cannot come from the line because the monitor adapter
-    /// is a passive tap that cannot drive the bus.
-    pub fn set_sim(&mut self, sim: SimEcu) {
-        self.sim = Some(sim);
     }
 
     pub fn set_silence(&mut self, ms: u64) {
@@ -748,19 +737,9 @@ impl Kline {
         }
     }
 
-    /// Raw byte write (no DS2 framing / XOR) — for the break-entered service
-    /// protocol (see `src/breakmode.rs`).
-    pub fn raw_write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.port
-            .write_all(bytes)
-            .with_context(|| format!("raw write failed on {}", self.path))?;
-        self.port
-            .flush()
-            .with_context(|| format!("raw flush failed on {}", self.path))?;
-        Ok(())
-    }
-
     /// Raw byte read (no DS2 framing) — up to `n` bytes or `timeout`.
+    /// Used by [`Kline::switch_fast_baud`] to drain the 0x91 ACK that
+    /// arrives at the new rate.
     pub fn raw_read(&mut self, n: usize, timeout: Duration) -> Result<Vec<u8>> {
         let deadline = Instant::now() + timeout;
         let mut out = Vec::with_capacity(n);
@@ -776,16 +755,6 @@ impl Kline {
         Ok(out)
     }
 
-    /// Hold the K-line low for a UART break (the break-entered protocol entry
-    /// trigger, `src/breakmode.rs`).
-    pub fn raw_break(&mut self) -> Result<()> {
-        self.port.set_break()?;
-        thread::sleep(Duration::from_millis(25));
-        self.port.clear_break()?;
-        self.port.flush()?;
-        Ok(())
-    }
-
     fn log(&mut self, line: String) {
         let now = Instant::now();
         let delta = self
@@ -798,8 +767,6 @@ impl Kline {
 
     /// Transmit a full wire frame (payload + trailing XOR) with the
     /// configured per-byte pacing — the same path every request goes out on.
-    /// Used by the `respond` command to send the simulated ECU replies on
-    /// the real wire.
     pub fn write_frame(&mut self, frame: &[u8]) -> Result<()> {
         for (i, b) in frame.iter().enumerate() {
             self.port
@@ -913,16 +880,6 @@ impl Kline {
             ));
             self.write_frame(&frame)?;
 
-            // In-process ECU simulator: the reply cannot come from the wire
-            // (the monitor adapter is a passive tap), so inject it after a
-            // short pause that lets the bus echo land first.
-            if let Some(sim) = self.sim.as_mut() {
-                let r = sim.handle(payload);
-                thread::sleep(Duration::from_millis(10));
-                self.pending.push_back(Frame { payload: r.clone() });
-                self.log(format!("SIM {}", hex(&r)));
-            }
-
             let deadline = Instant::now() + timeout;
             // The echo of our own TX (reflected by the monitor tap) must be
             // on the line by the time the last transmitted byte lands, plus
@@ -1018,42 +975,7 @@ impl Kline {
                 );
             }
             let reply = res.unwrap()?;
-            // With the sim active, confirm the TX actually reached the bus
-            // (echo visible on our own RX) before returning.
-            if self.sim.is_some() {
-                if self.verify_echo(&sent) {
-                    self.log("ECHO confirmed (TX verified on bus)".to_string());
-                } else {
-                    self.log("ECHO missing (TX not seen on bus)".to_string());
-                }
-            }
             return Ok(reply);
-        }
-    }
-
-    /// Wait up to 300 ms for the echo of `sent` on the bus (sim mode only).
-    fn verify_echo(&mut self, sent: &Frame) -> bool {
-        let deadline = Instant::now() + Duration::from_millis(300);
-        loop {
-            while let Some(f) = self.pending.pop_front() {
-                if f.payload == sent.payload {
-                    return true;
-                }
-            }
-            if Instant::now() > deadline {
-                return false;
-            }
-            let chunk = match self.read_chunk() {
-                Ok(c) => c,
-                Err(_) => return false,
-            };
-            if chunk.is_empty() {
-                continue;
-            }
-            self.parser.feed(&chunk);
-            while let Some(f) = self.parser.take_frame() {
-                self.pending.push_back(f);
-            }
         }
     }
 
@@ -1062,9 +984,7 @@ impl Kline {
     /// [`parse_ident`]).
     ///
     /// The real ECU answers with the normal `12 <len> A0 <ascii…>` envelope
-    /// (e.g. the captured `12 2E A0 37 37 38 36 …`); the in-process sim used
-    /// to answer with a bare string, which is still accepted here for
-    /// backwards compatibility.
+    /// (e.g. the captured `12 2E A0 37 37 38 36 …`).
     pub fn identify(&mut self) -> Result<Vec<u8>> {
         let r = self.request(&[0x12, 0x04, 0x00], Duration::from_millis(500))?;
         Ok(strip_reply_envelope(&r).to_vec())

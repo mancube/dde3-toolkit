@@ -42,7 +42,6 @@ pub struct BenchArgs {
     pub mode: Mode,
     pub baud: u32,
     pub data_delay: u64,
-    pub sim: bool,
     /// Switch the DS2 link up via service 0x91 right after IDENT (needs the baud
     /// patch flashed). 38400 or 125000; the port reopens at the actual divisor.
     pub fast_baud: Option<u32>,
@@ -59,9 +58,6 @@ pub fn run(args: BenchArgs) -> Result<()> {
     let mut k = Kline::open(&args.port, args.baud)
         .with_context(|| format!("cannot open {}", args.port))?;
     k.set_data_delay(args.data_delay);
-    if args.sim {
-        k.set_sim(crate::sim::SimEcu::new());
-    }
     let ident = k.identify().context("ECU did not answer A2")?;
     eprintln!(
         "IDENT {} ({})",

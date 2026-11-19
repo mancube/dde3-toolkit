@@ -121,7 +121,8 @@ parse against the real car.
    link is strictly request/response. Consequences: a "listen, don't poll"
    logger does not exist at 9600, the 16-byte block is the 5-id reply, and
    the only speed levers are tester-side pacing (Tier 0) and the 38.4 k break
-   channel (Tier 2). If the key-turn event ever matters, re-run `capture`
+   channel (Tier 2 — since removed: DS2 is the only protocol the ECU can
+   actually use). If the key-turn event ever matters, re-run `capture`
    with `--out` while cycling the key.
 3. **MW live reply** to `12 0F 0B 10 <5 ids>`: `12 10 A0 10 00 <u16 BE per id>
    ` — for ids `[0F83 0F10 0F40 0F00 0F65]` the values were `[0, 0, 990, 2854,
@@ -147,8 +148,8 @@ parse against the real car.
   a **length-matching** filter (`f[1] == 6 + 2*n`) so a 5-id poll (whose reply
   equals the broadcast) still resolves while a 1-id battery read skips the
   16-byte block.
-- **`src/sim.rs`** updated to the `0x12` convention so `--sim` stays consistent
-  (status/nack/ident/mw all emit `0x12`, not `0x92`).
+- **`src/sim.rs`** updated to the `0x12` convention so the sim stays
+  consistent (status/nack/ident/mw all emit `0x12`, not `0x92`).
 - **5 new real-car fixture tests** (bytes taken verbatim from the capture):
   `real_car_live_reply_splits_echo`, `real_car_live_values_decode`,
   `real_car_ident_reply_is_raw_string`, `ident_valid_accepts_plain_string`,

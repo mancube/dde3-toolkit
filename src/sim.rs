@@ -1,12 +1,10 @@
-//! In-process DDE3 ECU simulator.
+//! DDE3 ECU simulator — the state machine behind the `respond` fake ECU.
 //!
-//! Hardware topology (2026-11-09): the FT232R (`/dev/ttyUSB1`) drives the
-//! K-line and its RX sees its own transmission (bus echo). The UART-LPT
-//! (`/dev/ttyUSB0`) is a **passive tap** — it sees exactly what the ECU
-//! receives but cannot drive the bus, so an ECU-side reply cannot come from
-//! the serial line. The simulator therefore runs inside the toolkit:
-//! `Kline::request()` writes the real frame to the FT232, reads back the
-//! bus echo (TX path verified), and injects the simulated ECU reply.
+//! `SimEcu` answers DS2 frames exactly like the real ECU does (see
+//! `src/respond.rs` for the wire front end: it feeds every received frame
+//! into [`SimEcu::handle`] and transmits the returned reply). It is the
+//! only simulator in the toolkit — the old in-process `--sim` flag that
+//! injected replies into `Kline::request()` is gone.
 //!
 //! Reply convention (2026-11-09 real M47 capture): the ECU replies with its
 //! OWN address (0x12) — not the DS2 0x92 response prefix the toolkit first
@@ -120,7 +118,7 @@ pub struct SimEcu {
     /// the fake ECU switches to when it accepts a `0x91` — the patch's FIXED
     /// rate, already mapped through `protocol::reopen_divisor` (a 125000
     /// patch runs at 124800, the S0BG divisor). `None` = no patch: the 0x91
-    /// stub ACK stays (so `--sim` fast-baud runs still verify) and nothing
+    /// stub ACK stays (so a plain `respond` still answers 0x91) and nothing
     /// switches. Like the shipped v1 patch images, the frame's baud field
     /// is ignored — only the patch's fixed rate is used.
     baud_patch: Option<u32>,
@@ -338,8 +336,8 @@ impl SimEcu {
             // patch writes S0BG before the ACK is transmitted) — the switch
             // is reported to the transport via `take_baud_switch()`. The
             // frame's baud field is ignored, like the shipped v1 patches.
-            // Without the patch the stub ACK is kept so a `--sim` fast-baud
-            // switch still verifies (real stock firmware NACKs this).
+            // Without the patch the stub ACK is kept (real stock firmware
+            // NACKs this).
             0x91 => {
                 if let Some(rate) = self.baud_patch {
                     self.baud_switch = Some(rate);
@@ -1373,8 +1371,8 @@ mod tests {
 
     #[test]
     fn baud_91_without_patch_keeps_stub_ack() {
-        // No --patched-baud: the legacy stub ACK stays (so `--sim` fast-baud
-        // runs still verify) and no link switch is reported.
+        // No --patched-baud: the legacy stub ACK stays and no link switch is
+        // reported.
         let mut s = SimEcu::new();
         let r = s.handle(&[0x12, 0x08, 0x91, 0x00, 0x00, 0x09, 0x60, 0x03]);
         assert_eq!(&r[..3], &[0x12, 0x04, 0xA0], "stub ACK");

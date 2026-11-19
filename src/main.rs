@@ -13,7 +13,6 @@
 mod app;
 mod bench;
 mod capture;
-mod breakmode;
 mod checksum;
 mod dtc;
 mod live;
@@ -28,7 +27,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::checksum::{correct, verify, CAL_LEN, CAL_START, IMAGE_SIZE};
-use crate::protocol::{Kline, FLASH_WRITE_START};
+use crate::protocol::Kline;
 
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 
@@ -103,8 +102,6 @@ fn print_usage() {
     eprintln!("                             chain included; `correct --image` just fixes checksums");
     eprintln!("                             on an already-patched read. Nothing is sent to the ECU.");
     eprintln!("  uprog-ein                  Enter programming mode (12 04 0D)");
-    eprintln!("  break-probe              Enter the break-entered service protocol, send one
-                             probe byte, dump the response (--fast for 38.4k)");
     eprintln!("  diagnose-ende              Leave session / end diagnostics (12 04 9F)");
     eprintln!("  baud [--rate 38400|125000] Switch the DS2 link up via service 0x91 (needs the baud patch)");
     eprintln!("                             (requires the 0x91 flash patch: patches/e46_baud<rate>.bin,");
@@ -117,9 +114,6 @@ fn print_usage() {
     eprintln!("                             default: run until Ctrl-C)");
     eprintln!("  --baud <rate>              Baud rate (default 9600)");
     eprintln!("  --data-delay <ms>          Per-byte delay for control frames (default 3)");
-    eprintln!("  --sim                      Run against the built-in ECU simulator");
-    eprintln!("                             (frames still go over the wire; the ECU reply");
-    eprintln!("                             is simulated because the monitor adapter is passive)");
     eprintln!();
     eprintln!("Safety: A write requires typing WRITE to confirm. Flash checksums are");
     eprintln!("verified and corrected on write (TDI V3.1 + program chain), byte-for-byte");
@@ -175,8 +169,6 @@ fn run() -> Result<()> {
     // `respond --reply-delay`: pause (ms) between the peer's last byte and the
     // first reply byte of the fake ECU (default 5 ms, ECU-like latency).
     let mut reply_delay_ms: u64 = 5;
-    let mut sim: bool = false;
-    let mut fast: bool = false;
     // Target DS2 rate for the `baud` command (the 0x91 patch). 38400 or 125000.
     let mut target_rate: u32 = 38_400;
     // `bench --fast-baud <rate>`: switch up right after IDENT (needs the patch).
@@ -245,8 +237,6 @@ fn run() -> Result<()> {
                         .with_context(|| format!("invalid fast-baud rate: {}", args[i]))?,
                 );
             }
-            "--sim" => sim = true,
-            "--fast" => fast = true,
             "--fast-9600" => fast9600 = true,
             "--reply-delay" => {
                 i += 1;
@@ -340,9 +330,6 @@ fn run() -> Result<()> {
         "ident" => {
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
-            if sim {
-                k.set_sim(crate::sim::SimEcu::new());
-            }
             let r = k.identify()?;
             match protocol::parse_ident(&r) {
                 Some(i) => {
@@ -361,9 +348,6 @@ fn run() -> Result<()> {
             let out = args.get(2).context("read requires <out.bin>").cloned()?;
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
-            if sim {
-                k.set_sim(crate::sim::SimEcu::new());
-            }
             // Same code path as the GUI's full-flash read, including its
             // single retry with 20 ms silence on a non-link error.
             let mut progress = |done: usize, total: usize| {
@@ -381,9 +365,6 @@ fn run() -> Result<()> {
                 .cloned()?;
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
-            if sim {
-                k.set_sim(crate::sim::SimEcu::new());
-            }
             // Same code path as the GUI's calibration read.
             let mut progress = |done: usize, total: usize| {
                 println!("read cal 0x{done:05X} / 0x{total:05X}");
@@ -399,9 +380,6 @@ fn run() -> Result<()> {
             confirm_write()?;
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
-            if sim {
-                k.set_sim(crate::sim::SimEcu::new());
-            }
             // Same erase → write → end sequence as the GUI, including the
             // post-erase settle delay and the per-write-block byte delay.
             let mut progress = |done: usize, total: usize| {
@@ -409,27 +387,6 @@ fn run() -> Result<()> {
             };
             k.write_full(&image, baud, data_delay_ms, &mut progress)?;
             println!("write complete");
-            if sim {
-                println!("verifying read-back...");
-                let rb = k.read_full(&mut |_d, _t| {})?;
-                // The full write only programs [FLASH_WRITE_START, IMAGE_SIZE)
-                // (0x10000..0x40000); compare the written region, not the bytes
-                // below 0x10000 that were never touched.
-                if rb.len() == image.len() && rb[FLASH_WRITE_START..] == image[FLASH_WRITE_START..] {
-                    println!(
-                        "read-back verified: bytes 0x{:X}..0x{:X} of the image match the written region",
-                        FLASH_WRITE_START,
-                        image.len()
-                    );
-                } else {
-                    let m = rb[FLASH_WRITE_START..]
-                        .iter()
-                        .zip(&image[FLASH_WRITE_START..])
-                        .position(|(a, b)| a != b)
-                        .unwrap_or(0);
-                    anyhow::bail!("read-back mismatch at offset 0x{:X}", FLASH_WRITE_START + m);
-                }
-            }
             Ok(())
         }
         "write-cal" => {
@@ -441,25 +398,12 @@ fn run() -> Result<()> {
             confirm_write()?;
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
-            if sim {
-                k.set_sim(crate::sim::SimEcu::new());
-            }
             // Same sequence as the GUI's calibration write.
             let mut progress = |done: usize, total: usize| {
                 println!("wrote cal 0x{done:05X} / 0x{total:05X}");
             };
             k.write_calibration(&cal, baud, data_delay_ms, &mut progress)?;
             println!("calibration write complete");
-            if sim {
-                println!("verifying calibration read-back...");
-                let rb = k.read_range(0x38000, 0x8000, &mut |_d, _t| {})?;
-                if rb == cal {
-                    println!("read-back verified: 32 KB calibration matches written image");
-                } else {
-                    let m = rb.iter().zip(&cal).position(|(a, b)| a != b).unwrap_or(0);
-                    anyhow::bail!("read-back mismatch at offset 0x{m:X}");
-                }
-            }
             Ok(())
         }
         "seed-key" => {
@@ -467,9 +411,6 @@ fn run() -> Result<()> {
             let z = parse_hex_u8(&z_str)?;
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
-            if sim {
-                k.set_sim(crate::sim::SimEcu::new());
-            }
             let req = crate::protocol::frame_seed_key(z);
             let r = k.request(&req, Duration::from_secs(3))?;
             println!("SEED_KEY reply: {}", protocol::hex(&r));
@@ -478,9 +419,6 @@ fn run() -> Result<()> {
         "fault-clear" => {
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
-            if sim {
-                k.set_sim(crate::sim::SimEcu::new());
-            }
             let req = crate::protocol::frame_fault_clear();
             let r = k.request(&req, Duration::from_secs(5))?;
             println!("FAULT_CLEAR reply: {}", protocol::hex(&r));
@@ -489,9 +427,6 @@ fn run() -> Result<()> {
         "dtc" => {
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
-            if sim {
-                k.set_sim(crate::sim::SimEcu::new());
-            }
             let dtcs = match k.read_dtcs() {
                 Ok(dtcs) => dtcs,
                 // Same trace dump as `bench`: the wire log is the only evidence
@@ -515,9 +450,6 @@ fn run() -> Result<()> {
         "ds2-clear" => {
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
-            if sim {
-                k.set_sim(crate::sim::SimEcu::new());
-            }
             k.clear_faults_ds2()?;
             println!("DS2 fault memory cleared");
             Ok(())
@@ -542,7 +474,6 @@ fn run() -> Result<()> {
                 mode,
                 baud,
                 data_delay: data_delay_ms,
-                sim,
                 fast_baud,
                 duration,
                 fast9600,
@@ -593,54 +524,13 @@ fn run() -> Result<()> {
         "uprog-ein" => {
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
-            if sim {
-                k.set_sim(crate::sim::SimEcu::new());
-            }
             let _ = k.request(&crate::protocol::frame_uprog_ein(), Duration::from_secs(3))?;
             println!("UPROG_EIN sent");
-            Ok(())
-        }
-        "break-probe" => {
-            let mut k = Kline::open(&port, baud)?;
-            k.set_data_delay(data_delay_ms);
-            // Requires a prior DS2 unlock (UPROG_EIN + SEED_KEY); see FINDINGS §4.
-            println!(
-                "break-entered service probe (fast={}): bauds 9600->{} (handshake),{}",
-                fast,
-                breakmode::BAUD_10_4K,
-                if fast { format!(" -> {}", breakmode::BAUD_38_4K) } else { String::new() }
-            );
-            match breakmode::enter(&mut k, fast) {
-                Ok(mut h) => {
-                    // Probe sequence (FINDINGS §4.4): verified opcodes first,
-                    // then the legacy 0x51 byte. The expected answers are the
-                    // capture reference for the on-wire layout.
-                    if let Ok(r) = h.reset_block() {
-                        println!("block handshake 02A/11: {}", protocol::hex(&[r.tag, r.data, r.hi]));
-                    }
-                    if let Ok(c) = h.checksum() {
-                        println!("checksum (0x1B): {c:02X}");
-                    }
-                    if let Ok(a) = h.get_addr() {
-                        println!("address (0x04/0x07): {a:04X}");
-                    }
-                    // Legacy probe: opcode 0x51 clamps to slot 0x50 → default
-                    // A reply [00 02 ED 00].
-                    h.raw_write(&[0x01, 0x51, 0x00, 0x00])?;
-                    let r = h.raw_read(4, Duration::from_millis(500))?;
-                    println!("secondary response (0x51 probe): {}", protocol::hex(&r));
-                    h.exit();
-                }
-                Err(e) => println!("break entry failed: {e}"),
-            }
             Ok(())
         }
         "diagnose-ende" => {
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
-            if sim {
-                k.set_sim(crate::sim::SimEcu::new());
-            }
             let _ = k.request(
                 &crate::protocol::frame_diagnose_ende(),
                 Duration::from_secs(3),

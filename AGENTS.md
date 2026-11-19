@@ -23,7 +23,7 @@ the knowledge base; don't re-derive or guess against it.
 | Handing over to the next agent | `HANDOVER.md` — when instructed, reduce it to: status + task at hand; push deep detail into `docs/` first |
 | Wire facts | `docs/wire-protocol.md` |
 | Fault/DTC protocol | `docs/dtc-fault-protocol.md` |
-| Checksums / break-mode / 0x91 patch | `docs/checksum.md`, `docs/break-mode.md`, `docs/baud-0x91-patch.md` |
+| Checksums / 0x91 patch | `docs/checksum.md`, `docs/baud-0x91-patch.md` |
 | Firmware patches (manifests, builders, CLI/GUI) | `docs/patches.md`, `patches/README.md`, `src/patches.rs` |
 | RE background (VM, .prg, jobs) | `docs/reverse-engineering.md`, `tools/prg_vm.py` |
 | Historical context | `docs/session-log.md`, `docs/SESSION_2026-11-09.md` |
@@ -33,8 +33,9 @@ the knowledge base; don't re-derive or guess against it.
 - **Verify before committing:** `cargo build` clean, `cargo test` passes.
   Commit per `GIT.md`; update `HANDOVER.md` (and the matching `docs/`
   file) in the same commit when the change moves project state.
-- **No hardware?** Use `--sim` (any subcommand) or the GUI `--demo` — the
-  in-process ECU sim mirrors the real wire convention.
+- **No hardware?** Use the `respond` fake ECU (pty pair, see README
+  "Quick start") or the GUI `--demo` — the sim mirrors the real wire
+  convention.
 - **Never commit** runtime artifacts (captures, `*.log`, csv logs) — they
   are git-ignored on purpose.
 - **Don't change framing assumptions** (`B8`-free, `0x12` prefix) without a

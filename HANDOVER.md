@@ -19,7 +19,6 @@ chip, DDE 3.0 hardware name).
 | `docs/wire-protocol.md` | **Authoritative** on-the-wire facts: framing, reply convention (`0x12` prefix, not `0x92`), XOR checksum, timing, ECU identity |
 | `docs/dtc-fault-protocol.md` | 4-step fault-read protocol, 50-byte fault record layout, DTC text tables in `DDE30DS0.prg` |
 | `docs/checksum.md` | TDI V3.1 checksum algorithm, block discovery, the false-BAD fix, the cold-start program chain |
-| `docs/break-mode.md` | Break-entered service protocol (10.4 k / 38.4 k) + decoded command set |
 | `docs/baud-0x91-patch.md` | DS2 0x91 baud-change ECU patch + `baud` command |
 | `docs/patches.md` | Manifest-driven firmware patches (CLI `patches` + GUI tab), builders, prebuilt images |
 | `docs/reverse-engineering.md` | .prg format, the 33 jobs, WinkFP VM status, DDE4 parallels, job re-scope |
@@ -678,6 +677,36 @@ E2E: `respond` on a socat pty pair + `read-cal` — the full bootstrap
 256 × 128 B reads, 32768 bytes written, exit 0. The `--sim` flag is
 outdated — `respond` is the only real sim now (candidate for removal).
 
+### Session 40 (2026-11-20) — old `--sim` flag and break-mode removed
+
+User: remove the outdated `--sim` flag + its unused code, and remove
+break-mode **altogether** — DS2 is the only protocol the ECU can actually
+use. `respond` (the only real sim) must remain fully functional.
+
+- **`--sim` gone**: the flag in `main.rs` + all 11 `set_sim` injection
+  blocks (incl. the sim-only read-back verify in `write`/`write-cal`), the
+  `BenchArgs.sim` field, and the in-process sim plumbing in `protocol.rs`
+  (`sim` field, `set_sim()`, the reply injection in `do_request`,
+  `verify_echo()`). `Kline` is now purely wire-based; the GUI `--demo`
+  (fake UI state, no `SimEcu`) is untouched.
+- **Break-mode gone**: `src/breakmode.rs` (813 lines, 12 tests), the
+  `break-probe` command, the `--fast` flag (break-probe-only),
+  `Kline::raw_write`/`raw_break` (break-only; `raw_read` **kept** —
+  `switch_fast_baud` uses it to drain the 0x91 ACK at the new rate),
+  `docs/break-mode.md`.
+- **Docs**: README (feature bullet, quick start now shows the `respond`
+  pty-pair workflow, layout, doc table, known limits), AGENTS.md, HANDOVER
+  (doc index + open item #3 closed), `docs/simulator.md`,
+  `docs/respond-mode.md`, `docs/wire-protocol.md`, `docs/session-log.md`,
+  `sim.rs` module doc (now "the state machine behind `respond`").
+- `src/sim.rs` behaviour unchanged — still the full DS2 state machine.
+  Tests: 80 passing (was 92; the 12 removed were breakmode's).
+- **`respond` E2E verified untouched**: socat pty pair +
+  `read-cal --flash captures/actual_flash.bin` — full bootstrap (IDENT →
+  UPROG_EIN `12 4C A0 …` → AIF → SEED_KEY), 256 × 128 B reads, 32768
+  bytes written, **byte-exact** vs `actual_flash.bin` over the calibration
+  region, exit 0.
+
 ## ← CURRENT TASK (take over from here)
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU
@@ -886,9 +915,10 @@ UI/UX polish requested, no behaviour changes.
    captured 2026-11-10 (`captures/dde3newlog.txt`).
 2. **MW live-data ADF ids** — the ADF table comes from the EDC15M export;
    ids to be confirmed on the real ECU (battery 0x0F65 already confirmed).
-3. **Break-mode T2.1 capture** — `break-probe` + `tools/monitor.py` on
-   `/dev/ttyUSB0` to confirm the on-wire 4-byte layout, then wire the
-   byte-addressed reads into CLI/GUI (`docs/break-mode.md`).
+3. ~~**Break-mode T2.1 capture**~~ — **removed** (session 40): the
+   break-entered service is not a protocol the ECU can actually use; DS2 is
+   the only protocol. `breakmode.rs`, the `break-probe` command and
+   `docs/break-mode.md` are gone.
 4. ~~**0x91 patch bench test**~~ — the fake-ECU half is done (session 35:
    `respond --patched-baud` mirrors the patch, `baud` / `bench --fast-baud`
    verified end-to-end over a pty loopback). On-car half remains: flash

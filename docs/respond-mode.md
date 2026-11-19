@@ -135,8 +135,8 @@ But `SimEcu` was *echoing the request's LEN byte* in its replies, so
 every service answered with the wrong LEN (IDENT request LEN 4 → reply
 LEN 4 instead of 46; DTC request LEN 5 → reply LEN 5 instead of 27; …).
 The toolkit's own `do_request` never validates LEN (it frames on the
-XOR terminator), which is why `--sim` bench mode never noticed — but
-foreign tools do validate it.
+XOR terminator), which is why the in-process sim bench runs never noticed —
+but foreign tools do validate it.
 
 Fix: `SimEcu::handle()` now stamps every reply with
 `r[1] = r.len() + 1` (payload + trailing XOR). The `0x0A`
@@ -316,8 +316,8 @@ Wire semantics mirror the real patch exactly:
   S0BG divisor 124800, the same mapping the tester side uses to reopen.
 - The link stays at the new rate until `respond` is restarted (= power
   cycle; the real ECU reverts to 9600 after sleep/wake).
-- Without `--patched-baud` the legacy stub ACK stays (no switch), so
-  `--sim` fast-baud runs keep working as before.
+- Without `--patched-baud` the legacy stub ACK stays (no switch) — a plain
+  `respond` still answers 0x91 with the stub ACK.
 
 Implementation: `SimEcu::set_baud_patch(rate)` arms the sim; the `0x91`
 handler records a pending switch (`take_baud_switch()`, consumed once) and

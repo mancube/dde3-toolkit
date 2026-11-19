@@ -4,8 +4,8 @@ A CLI + GUI tool for talking to **BMW EDC15 "DDE 3.0"** engine ECUs over the
 K-line (ISO 9141/14230, DS2) at 9600 baud. Written in Rust.
 
 It reads and writes the ECU's flash memory, reads/clears fault codes, shows
-live data, and logs the raw protocol — with an in-process ECU simulator
-(`--sim`) so the full workflow can be exercised without hardware.
+live data, and logs the raw protocol — with a fake-ECU responder
+(`respond`) so the full workflow can be exercised without hardware.
 
 The DDE3 protocol has no public documentation; it was reverse-engineered
 from the OEM WinKFP program `10DDE30.prg` and confirmed against real-car
@@ -34,8 +34,6 @@ captures. All of that work is written up in [`docs/`](docs) — start with
   plus the cold-start **program chain** at `0x38B7C`, which any edit in the
   program area invalidates
 - **Seed/key** — `12 08 90 42 4D 57 05 <Z>`, Z = seconds mod 46
-- **Break-entered service protocol** — UART break → 10.4 k → 38.4 k with the
-  decoded byte-addressed command set (`breakmode.rs`)
 - **Firmware patches** — manifest-driven apply/revert of the shipped baud
   (`0x91`) and EWS-delete patches; fit is decided by the manifest's `before`
   bytes (any read of the same calibration works), checksums — including the
@@ -52,8 +50,9 @@ captures. All of that work is written up in [`docs/`](docs) — start with
 - **9-tab GUI** — Overview, Read, Write, Checksum, Patches, Fault codes,
   Live, Logger, Log (egui)
 - **Headless bench** — `bench` subcommand for scripted runs
-- **In-process ECU simulator** — `--sim` on any subcommand, or `--demo` in
-  the GUI (no hardware needed)
+- **Fake-ECU responder** — `respond` runs the full `SimEcu` state machine on
+  a serial port (the only simulator; see below), plus `--demo` in the GUI
+  (no hardware needed)
 
 ## Build
 
@@ -88,10 +87,14 @@ scripts/release.sh 0.2
 ## Quick start (no hardware)
 
 ```sh
-# Run the full workflow against the built-in simulator
-./target/release/dde3-toolkit bench --sim --read --out /tmp/full.bin
+# Fake ECU on a pty pair, then run the toolkit against it
+socat -d -d pty,raw,echo=0,link=/tmp/ecu-pty pty,raw,echo=0,link=/tmp/tool-pty &
+./target/release/dde3-toolkit respond --port /tmp/ecu-pty --out fake_ecu.log &
+./target/release/dde3-toolkit bench --read --port /tmp/tool-pty --out /tmp/full.bin
 ./target/release/dde3-toolkit --demo        # GUI with a fake ECU
 ```
+
+See the `respond` section below for the full fake-ECU options.
 
 ## Using it with a real ECU
 
@@ -141,7 +144,7 @@ logged. Own replies are matched on the wire and logged as `ECHO`.
 ./target/release/dde3-toolkit write-cal cal.bin --port /dev/ttyUSB1
 ```
 
-All subcommands also accept `--baud <rate>`, `--data-delay <ms>` and `--sim`.
+All subcommands also accept `--baud <rate>` and `--data-delay <ms>`.
 With no arguments the binary launches the GUI; it accepts the same
 `--autoconnect/--auto-read/--auto-write/--demo/...` automation flags as
 dde4-toolkit. Full command list: see `HANDOVER.md` → docs, or just run the
@@ -160,7 +163,7 @@ next to the CONNECTED status.
 ## Testing
 
 ```sh
-cargo test        # protocol frames, parser, checksum, DTC tables, break mode
+cargo test        # protocol frames, parser, checksum, DTC tables, sim
 ```
 
 ## Repository layout
@@ -172,8 +175,7 @@ cargo test        # protocol frames, parser, checksum, DTC tables, break mode
 │   ├── checksum.rs      # TDI V3.1 flash checksum
 │   ├── dtc.rs           # GENERATED DTC tables (tools/gen_dtc_rs.py)
 │   ├── live.rs          # GENERATED live-data ADF table (tools/gen_live_rs.py)
-│   ├── breakmode.rs     # break-entered 10.4k/38.4k service protocol
-│   ├── sim.rs           # in-process ECU simulator
+│   ├── sim.rs           # ECU simulator (the `respond` fake-ECU state machine)
 │   ├── bench.rs         # headless bench runner
 │   └── app.rs           # egui GUI (8 tabs)
 ├── tools/               # Python: WinkFP VM, frame extraction, wire monitor
@@ -193,7 +195,6 @@ cargo test        # protocol frames, parser, checksum, DTC tables, break mode
 | Fault/DTC protocol + record layout | [`docs/dtc-fault-protocol.md`](docs/dtc-fault-protocol.md) |
 | Checksums (TDI V3.1 + program chain) | [`docs/checksum.md`](docs/checksum.md) |
 | Firmware patches (baud, EWS delete) | [`docs/patches.md`](docs/patches.md), [`patches/README.md`](patches/README.md) |
-| Break-entered service protocol | [`docs/break-mode.md`](docs/break-mode.md) |
 | Reverse-engineering notes (VM, jobs) | [`docs/reverse-engineering.md`](docs/reverse-engineering.md) |
 | Historical session log | [`docs/session-log.md`](docs/session-log.md) |
 
@@ -204,8 +205,6 @@ cargo test        # protocol frames, parser, checksum, DTC tables, break mode
 - The checksum-status reply was captured (`12 04 0A` → `12 05 A0 00`,
   2026-11-10), but the program-chain correction and the patched images have
   not been hardware-tested — bench-test before flashing a patched image.
-- The 38.4 k break-mode secondary commands are decoded from the firmware but
-  still pending one hardware capture.
 
 ## Safety
 
