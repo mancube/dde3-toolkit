@@ -55,12 +55,13 @@ pub fn name_service(payload: &[u8]) -> &'static str {
     match (sid, sub) {
         (0x00, _) => "IDENT",
         (0x0D, _) => "UPROG_EIN",
+        (0x02, _) => "AIF_LESEN",
         (0x0A, _) => "STATUS_CODIER_CHECKSUMME",
         (0x9F, _) => "DIAGNOSE_ENDE",
         (0x6D, _) => "STATUS_SYNC_MODE",
         (0x90, Some(0x42)) => "SEED_KEY",
         (0x90, Some(0x56)) => "SCHALTE_PROTOKOLL_DS2_NACH_K2",
-        (0x90, _) => "service 0x90",
+        (0x90, _) => "KEY_SEND",
         (0x91, _) => "BAUD_UMSTELLUNG (0x91)",
         (0x06, _) => "FLASH_LESEN",
         (0x07, Some(0x06)) => "FLASH_LOESCHEN (ERASE!)",
@@ -523,6 +524,9 @@ mod tests {
         assert_eq!(name_service(&[0x12, 0x09, 0x07, 0x06]), "FLASH_LOESCHEN (ERASE!)");
         assert_eq!(name_service(&[0x12, 0x09, 0x07, 0x02]), "FLASH_SCHREIBEN (WRITE!)");
         assert_eq!(name_service(&[0x12, 0x08, 0x90, 0x42]), "SEED_KEY");
+        // AIF / programming-record read (sid 0x02) and the 0x90 key send.
+        assert_eq!(name_service(&[0x12, 0x05, 0x02, 0x00, 0x15]), "AIF_LESEN");
+        assert_eq!(name_service(&[0x12, 0x08, 0x90, 0x39, 0x3C, 0x3F, 0x42]), "KEY_SEND");
         assert_eq!(name_service(&[0x12, 0x0F, 0x0B, 0x10]), "MW_SELECT_LESEN (live data)");
         assert_eq!(name_service(&[0x12, 0x05, 0x14, 0x01]), "FS_QUICK_LESEN (DTC count)");
         assert_eq!(name_service(&[0x12, 0x04, 0x05]), "FS_LOESCHEN (DTC clear)");
