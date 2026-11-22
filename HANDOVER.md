@@ -707,7 +707,46 @@ use. `respond` (the only real sim) must remain fully functional.
   bytes written, **byte-exact** vs `actual_flash.bin` over the calibration
   region, exit 0.
 
+### Session 41 (2026-11-22) — MPPS-style calibration write (224-B blocks, `07 0F`, DTC prep)
+
+User request: the calibration write should mimic **MPPS** (100% on-car
+success, per the user) instead of the Galletto flow. New branch
+`feature/mpps-style-calibration-write`.
+
+- **224-byte calibration blocks** (`CAL_WRITE_BLOCK = 0xE0`): 146×224 + 1×64
+  = 32768 (the 32 KB calibration area). Distinct from §32's rejected
+  192-byte *program-area* blocks — the MPPS capture
+  (`captures/mpps capture/mppswrite.txt`) proves 224-byte *calibration-area*
+  blocks. `write_full` keeps 64-byte blocks.
+- **`07 0F` write-end** (`frame_flash_write_end(addr)`): sent **once** before
+  the erase, at **0x03FCE0** (MPPS sends it twice; the address was the
+  session-31 open question, now resolved by the capture).
+- **DTC read+clear prep** (`read_and_clear_dtcs()`): `12 05 04 00` (FS_LESEN
+  entry) + `12 04 05` (FS_LOESCHEN), sent **once** via a new `dtc_prep` flag
+  on `begin_flash_session` — runs before reads (`read_full`/`read_range`) and
+  writes (`write_full` first phase, `write_calibration`), matching MPPS.
+- `DIAGNOSE_ENDE` kept (harmless; MPPS omits it, Galletto sends it).
+- Tests: `flash_write_end_matches_mpps`, `cal_write_block_covers_32kb`,
+  `sim::tests::mpps_style_cal_write_preamble` (83 passing).
+- **E2E** (socat pty pair, `bench --write-cal` vs `respond`): 147 FLASH_SCHREIBEN
+  + 1 FLASH_SCHREIBEN_ENDE + 1 FS_LESEN + 1 FS_LOESCHEN + 1 DIAGNOSE_ENDE;
+  the reconstructed 0x38000..0x40000 span is **byte-identical** to the source
+  image.
+- Docs: `docs/wire-protocol.md` §33, `docs/FINDINGS_mpps_vs_galletto_calibration.md`.
+
 ## ← CURRENT TASK (take over from here)
+
+**MPPS-style calibration write (session 41, branch
+`feature/mpps-style-calibration-write`) — on-car verification pending.** The
+calibration write now mimics MPPS: 224-byte blocks (146×224 + 1×64), a single
+`07 0F` write-end @0x03FCE0 before the erase, and a one-shot DTC read+clear
+prep (also before reads). Verified byte-exact against the fake ECU
+(`bench --write-cal` vs `respond`, 147 blocks + 1 `07 0F` + DTC prep, dump
+identical to source). Next on-car: `dde3-toolkit write-cal <cal.bin> --port
+/dev/ttyUSB1` and confirm the 147×224-B writes + `07 0F` + DTC prep run clean
+and the calibration area matches. The 224-B size is proven by the MPPS capture
+(wire-protocol §33); §32's 192-B rejection was the *program* area, a different
+case.
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU
 OKAYed two 192-byte write blocks, then hung on the third (no reply, no

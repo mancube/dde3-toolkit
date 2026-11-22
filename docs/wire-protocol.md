@@ -215,3 +215,43 @@ ECU's flash-write path simply does not take a 192-byte block. The mode was
 **removed** (session 33); 64 B writes / 128 B reads are the only verified
 sizes. Don't re-attempt larger write blocks without a capture proving the
 ECU's flasher accepts them.
+
+## 33. MPPS-style calibration write: 224-byte blocks + `07 0F` + DTC prep (2026-11-22)
+
+The calibration-area write (`write_calibration` / `bench --write-cal`) now
+mirrors **MPPS's** calibration write, tested with 100% on-car success
+(`captures/mpps capture/mppswrite.txt`; side-by-side in
+`docs/FINDINGS_mpps_vs_galletto_calibration.md`). This is **distinct from
+§32**: §32 rejected **192-byte program-area** blocks (the ECU hung at
+0x10000); MPPS's **224-byte calibration-area** blocks (0x38000–0x40000) are
+proven by the capture. The full write (`write_full`, program area) keeps the
+64-byte Galletto size (`WRITE_BLOCK`).
+
+**Sequence** (`Kline::write_calibration`):
+
+1. `begin_flash_session(true)` — IDENT → UPROG_EIN → AIF read → **DTC
+   read+clear** → SEED_KEY → key. The DTC prep is MPPS's pre-flash step, sent
+   **once** (the `dtc_prep` flag is true only for the first session of a full
+   write):
+   - `12 05 04 00` — FS_LESEN entry (read the fault count)
+   - `12 04 05` — FS_LOESCHEN (clear the fault memory)
+2. `12 09 07 0F 03 FC E0 00` — FLASH_SCHREIBEN_ENDE (`07 0F`) at **0x03FCE0**,
+   sent **once**, before the erase (MPPS sends it twice; one is sufficient).
+3. `12 09 07 06 03 80 00 00` — FLASH_LOESCHEN (erase @0x038000).
+4. 147 × FLASH_SCHREIBEN: **146×224-byte blocks + 1×64-byte trailing block**
+   (`CAL_WRITE_BLOCK = 0xE0`), spanning 0x038000–0x40000.
+5. `12 04 9F` — DIAGNOSE_ENDE (end-of-write signal; kept, harmless — MPPS
+   omits it, Galletto sends it).
+
+The same DTC read+clear (step 1) also runs **once** before reads
+(`read_full` / `read_range` → `read_flash` → `begin_flash_session(true)`),
+matching MPPS's read session (`captures/mpps capture/mppsread.txt`).
+
+**Code** (`src/protocol.rs`): `CAL_WRITE_BLOCK` (0xE0),
+`frame_flash_write_end(addr)`, `Kline::read_and_clear_dtcs()`, and
+`begin_flash_session(dtc_prep: bool)`. The `07 0F` builder and the 224-byte
+block math are unit-tested; `sim::tests::mpps_style_cal_write_preamble`
+drives the full preamble through the fake ECU. End-to-end
+(`bench --write-cal` vs `respond` on a socat pty pair) writes 147 blocks and
+the reconstructed 0x38000–0x40000 span matches the source image
+byte-for-byte.

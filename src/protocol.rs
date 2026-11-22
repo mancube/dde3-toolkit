@@ -53,6 +53,13 @@ pub const FLASH_WRITE_START: usize = 0x10000;
 /// FLASH_SCHREIBEN frames — see docs/wire-protocol.md §32.)
 pub const WRITE_BLOCK: usize = 0x40;
 
+/// Calibration-area FLASH_SCHREIBEN block size — MPPS's 224-byte (0xE0) blocks
+/// (the frame max, LEN = 0x09 + NN), with a trailing remainder block: the 32 KB
+/// calibration is 146×224 + 1×64. MPPS uses this for calibration writes with
+/// 100% on-car success (docs/FINDINGS_mpps_vs_galletto_calibration.md). The
+/// full-write path keeps the 64-byte Galletto size ([`WRITE_BLOCK`]).
+pub const CAL_WRITE_BLOCK: usize = 0xE0; // 224
+
 /// FLASH_LESEN chunk size — 128 bytes.
 pub const READ_CHUNK: u32 = 0x80;
 
@@ -432,6 +439,24 @@ pub fn frame_flash_write(addr: u32, data: &[u8]) -> Vec<u8> {
     ]);
     p.extend_from_slice(data);
     p
+}
+
+/// Flash write-end (FLASH_SCHREIBEN_ENDE, service 0x07 subfn 0x0F):
+/// `12 09 07 0F <A_hi A_mid A_lo> 00 [XOR]`. MPPS sends this once at
+/// `0x03FCE0` in its calibration-write preamble, before the erase
+/// (`captures/mpps capture/mppswrite.txt`). The full-write path (Galletto)
+/// never sends it.
+pub fn frame_flash_write_end(addr: u32) -> Vec<u8> {
+    vec![
+        0x12,
+        0x09,
+        0x07,
+        0x0F,
+        (addr >> 16) as u8,
+        (addr >> 8) as u8,
+        addr as u8,
+        0x00,
+    ]
 }
 
 /// Fault clear (K-line BAP): `12 09 07 0E 42 41 50 00`.
@@ -1049,7 +1074,7 @@ impl Kline {
     /// flash. This is what the full-flash read now does — previously the chunk
     /// loop sent `FLASH_LESEN` frames directly and never performed the session
     /// setup.
-    pub fn begin_flash_session(&mut self) -> Result<()> {
+    pub fn begin_flash_session(&mut self, dtc_prep: bool) -> Result<()> {
         // 1) One more identify — (re-)open / verify the diagnostic session.
         //    Single-shot: exactly one of each flashing-session frame, no retry.
         self.request_once(&frame_ident(), Duration::from_millis(500))
@@ -1060,6 +1085,15 @@ impl Kline {
         // 3) AIF / programming-record read (the flasher's VIN / record gate).
         self.request_once(&frame_aif_read(0x00), Duration::from_secs(3))
             .with_context(|| "FLASH_READ bootstrap: AIF read failed")?;
+        // 3b) MPPS-style pre-flash DTC prep: read + clear the fault memory
+        //     once, before the seed/key unlock. MPPS sends exactly these two
+        //     frames here (FS_LESEN `12 05 04 00` + FS_LOESCHEN `12 04 05`),
+        //     in the programming session, before unlock
+        //     (captures/mpps capture/mppsread.txt). `dtc_prep` is true only
+        //     for the first session of a full write, so it runs exactly once.
+        if dtc_prep {
+            self.read_and_clear_dtcs()?;
+        }
         // 4) Unlock: seed telegram -> key -> key check. A failing key check
         //    (NRC, e.g. B0 not-unlocked) aborts the session immediately.
         let z: u8 = 0x07; // SEED_KEY job: Z = seconds mod 0x2E (Galletto's captured read session used Z=0x07)
@@ -1071,6 +1105,23 @@ impl Kline {
         let key_send = [0x12, 0x08, 0x90, key[0], key[1], key[2], key[3]];
         self.request_once(&key_send, Duration::from_secs(3))
             .with_context(|| "FLASH_READ bootstrap: SEED_KEY key check failed")?;
+        Ok(())
+    }
+
+    /// MPPS-style pre-flash DTC prep: read the fault count (FS_LESEN entry,
+    /// `12 05 04 00`) and clear the fault memory (FS_LOESCHEN, `12 04 05`).
+    /// These are exactly the two DTC frames MPPS sends in its pre-flash
+    /// session, before the seed/key unlock
+    /// (`captures/mpps capture/mppsread.txt`). Called once per flash
+    /// read/write via [`Kline::begin_flash_session`]'s `dtc_prep` flag.
+    fn read_and_clear_dtcs(&mut self) -> Result<()> {
+        // FS_LESEN entry: read the fault count (the ECU replies with the count
+        // and the first fault header; we only need the read to succeed).
+        self.request_filtered(&frame_dtc_entry(), Duration::from_secs(5), is_not_live_broadcast)
+            .with_context(|| "pre-flash DTC prep: FS_LESEN (fault count) failed")?;
+        // FS_LOESCHEN: clear the fault memory.
+        self.request_filtered(&frame_dtc_clear(), Duration::from_secs(5), is_not_live_broadcast)
+            .with_context(|| "pre-flash DTC prep: FS_LOESCHEN (fault clear) failed")?;
         Ok(())
     }
 
@@ -1117,7 +1168,7 @@ impl Kline {
         // always run this setup first. The session runs once here; a failed
         // session (e.g. unlock refused / B0) aborts the read instantly instead of
         // being retried as a flashing-session job.
-        self.begin_flash_session()?;
+        self.begin_flash_session(true)?;
         let attempt = |k: &mut Self, progress: &mut dyn FnMut(usize, usize)| -> Result<Vec<u8>> {
             let mut out = Vec::with_capacity(length);
             let mut addr = start as u32;
@@ -1198,12 +1249,15 @@ impl Kline {
         self.set_write_delay(data_delay_ms);
         let region_len = IMAGE_SIZE - FLASH_WRITE_START;
         let mut done = 0usize;
-        // The two Galletto phases: program area, then calibration area.
+        // The two Galletto phases: program area, then calibration area. The
+        // MPPS-style DTC read/clear runs once, in the first phase's session.
+        let mut dtc_prep = true;
         for (start, end) in [(FLASH_WRITE_START, CAL_START), (CAL_START, IMAGE_SIZE)] {
             // (Re-)open the flasher session and unlock. After phase 1's
             // DIAGNOSE_ENDE the ECU is back in normal mode, so phase 2
             // repeats the whole bootstrap (re-authentication).
-            self.begin_flash_session()?;
+            self.begin_flash_session(dtc_prep)?;
+            dtc_prep = false;
             self.erase_flash(start as u32, 0x00)?;
             thread::sleep(Duration::from_millis(100));
             for off in (start..end).step_by(WRITE_BLOCK) {
@@ -1224,8 +1278,15 @@ impl Kline {
         Ok(())
     }
 
-    /// Calibration flash write: full flasher session → erase → write blocks →
-    /// `DIAGNOSE_ENDE` (Galletto's phase-2 flow; 64-byte blocks).
+    /// Calibration flash write — MPPS-style: full flasher session (with the
+    /// one-shot DTC read/clear) → `07 0F` write-end @0x03FCE0 → erase →
+    /// 224-byte blocks + trailing block → `DIAGNOSE_ENDE`.
+    ///
+    /// Mirrors MPPS's calibration write (`captures/mpps capture/mppswrite.txt`),
+    /// tested with 100% on-car success: 224-byte (0xE0) blocks with a trailing
+    /// remainder block, a single `07 0F` write-end before the erase, and the
+    /// DTC read/clear prep. The `DIAGNOSE_ENDE` end-of-write signal is kept
+    /// (harmless; MPPS omits it, Galletto sends it).
     pub fn write_calibration(
         &mut self,
         image: &[u8],
@@ -1237,20 +1298,28 @@ impl Kline {
             bail!("calibration image must be exactly 32 KB");
         }
         self.set_write_delay(data_delay_ms);
-        // Full flasher session before touching flash (Galletto procedure:
-        // IDENT -> UPROG_EIN -> AIF read -> SEED_KEY), then erase → write.
-        self.begin_flash_session()?;
+        // Full flasher session (MPPS-style: DTC read/clear before unlock).
+        self.begin_flash_session(true)?;
+        // MPPS calibration-write preamble: send the write-end (07 0F) once at
+        // 0x03FCE0, before the erase (captures/mpps capture/mppswrite.txt).
+        self.request_filtered(
+            &frame_flash_write_end(0x03FCE0),
+            Duration::from_secs(5),
+            is_not_live_broadcast,
+        )?;
         self.erase_flash(CAL_START as u32, 0x00)?;
         thread::sleep(Duration::from_millis(100));
+        // MPPS block size: 224-byte blocks + a trailing remainder block
+        // (146×224 + 1×64 for the 32 KB calibration).
         let mut done = 0usize;
-        for start in (0..CAL_LEN).step_by(WRITE_BLOCK) {
-            let len = WRITE_BLOCK.min(CAL_LEN - start);
+        for start in (0..CAL_LEN).step_by(CAL_WRITE_BLOCK) {
+            let len = CAL_WRITE_BLOCK.min(CAL_LEN - start);
             self.write_block(CAL_START as u32 + start as u32, &image[start..start + len])?;
             done += len;
             progress(done, CAL_LEN);
         }
-        // Galletto closes the session with DIAGNOSE_ENDE, not a `07 0F`
-        // write-end.
+        // Keep the end-of-write signal (harmless; matches Galletto). MPPS
+        // omits it, but it is not needed to be removed.
         self.request_filtered(
             &frame_diagnose_ende(),
             Duration::from_secs(10),
@@ -1755,6 +1824,31 @@ mod tests {
             frame_flash_write(0x38000, &[0x11, 0x22, 0x33, 0x44]),
             vec![0x12, 0x0D, 0x07, 0x02, 0x03, 0x80, 0x00, 0x04, 0x11, 0x22, 0x33, 0x44]
         );
+    }
+
+    #[test]
+    fn flash_write_end_matches_mpps() {
+        // MPPS calibration-write preamble: 07 0F @0x03FCE0 ->
+        // 12 09 07 0F 03 FC E0 00 (XOR added on the wire).
+        assert_eq!(
+            frame_flash_write_end(0x03FCE0),
+            vec![0x12, 0x09, 0x07, 0x0F, 0x03, 0xFC, 0xE0, 0x00]
+        );
+    }
+
+    #[test]
+    fn cal_write_block_covers_32kb() {
+        // MPPS block math: the 32 KB calibration is 146×224 + 1×64.
+        let n_full = CAL_LEN / CAL_WRITE_BLOCK;
+        let rem = CAL_LEN % CAL_WRITE_BLOCK;
+        assert_eq!(n_full, 146, "146 full 224-byte blocks");
+        assert_eq!(rem, 64, "64-byte trailing block");
+        assert_eq!(n_full * CAL_WRITE_BLOCK + rem, CAL_LEN);
+        // The frame builder accepts the 224-byte block (LEN = 0x09 + 0xE0 = 0xE9).
+        let blk = vec![0xABu8; CAL_WRITE_BLOCK];
+        let f = frame_flash_write(0x38000, &blk);
+        assert_eq!(f[1], 0x09 + CAL_WRITE_BLOCK as u8, "LEN = 9 + 0xE0");
+        assert_eq!(f[7], CAL_WRITE_BLOCK as u8, "data-length byte");
     }
 
     #[test]

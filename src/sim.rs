@@ -1008,6 +1008,53 @@ mod tests {
         assert!(img[0x38000..0x38040].iter().all(|&b| b == 0xBB));
     }
 
+    /// MPPS-style calibration-write preamble, mirroring
+    /// `Kline::write_calibration`: UPROG_EIN → DTC read/clear → unlock →
+    /// `07 0F` write-end @0x03FCE0 → erase → 224-byte block → 64-byte trailing
+    /// block. Verifies the fake ECU accepts every frame and the data lands.
+    #[test]
+    fn mpps_style_cal_write_preamble() {
+        let mut s = SimEcu::new();
+        // UPROG_EIN, then the DTC read/clear (before the seed/key, as MPPS
+        // sends it), then unlock.
+        s.handle(&[0x12, 0x04, 0x0D]);
+        assert_eq!(s.handle(&[0x12, 0x05, 0x04, 0x00])[2], 0xA0, "DTC FS_LESEN entry");
+        assert_eq!(s.handle(&[0x12, 0x04, 0x05])[2], 0xA0, "DTC FS_LOESCHEN");
+        let z: u8 = 0x07;
+        let r = s.handle(&[0x12, 0x08, 0x90, 0x42, 0x4D, 0x57, z]);
+        let key = crate::protocol::key_from_seed_reply(&r, z);
+        assert_eq!(
+            s.handle(&[0x12, 0x08, 0x90, key[0], key[1], key[2], key[3]])[2],
+            0xA0,
+            "key"
+        );
+        // MPPS write-end (07 0F) @0x03FCE0, before the erase.
+        assert_eq!(
+            s.handle(&[0x12, 0x09, 0x07, 0x0F, 0x03, 0xFC, 0xE0, 0x00])[2],
+            0xA0,
+            "07 0F write-end"
+        );
+        // Erase the calibration area.
+        assert_eq!(
+            s.handle(&[0x12, 0x09, 0x07, 0x06, 0x03, 0x80, 0x00, 0x00])[2],
+            0xA0,
+            "erase @0x038000"
+        );
+        // First 224-byte block @0x038000 (LEN = 0x09 + 0xE0 = 0xE9).
+        let mut w = vec![0x12, 0xE9, 0x07, 0x02, 0x03, 0x80, 0x00, 0xE0];
+        w.extend(std::iter::repeat(0xAA).take(224));
+        assert_eq!(s.handle(&w)[2], 0xA0, "224-byte block");
+        // Trailing 64-byte block @0x03FFC0 (the 147th block; 146×224 = 0x7FC0,
+        // so 0x38000 + 0x7FC0 = 0x3FFC0, and 0x3FFC0 + 64 = 0x40000).
+        let mut t = vec![0x12, 0x49, 0x07, 0x02, 0x03, 0xFF, 0xC0, 0x40];
+        t.extend(std::iter::repeat(0xBB).take(64));
+        assert_eq!(s.handle(&t)[2], 0xA0, "64-byte trailing block");
+        // Both blocks landed in the reconstructed image.
+        let img = s.flash_image();
+        assert!(img[0x38000..0x38000 + 224].iter().all(|&b| b == 0xAA));
+        assert!(img[0x3FFC0..0x3FFC0 + 64].iter().all(|&b| b == 0xBB));
+    }
+
     #[test]
     fn aif_read_46_bytes_from_cal_7cb2() {
         let mut s = SimEcu::new();
