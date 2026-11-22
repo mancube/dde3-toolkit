@@ -254,4 +254,42 @@ block math are unit-tested; `sim::tests::mpps_style_cal_write_preamble`
 drives the full preamble through the fake ECU. End-to-end
 (`bench --write-cal` vs `respond` on a socat pty pair) writes 147 blocks and
 the reconstructed 0x38000–0x40000 span matches the source image
-byte-for-byte.
+byte-for-byte. (That socat E2E carries **no monitor-tap echo**, so it never
+exercised the parser's echo path — which is how the §34 buffer bug slipped
+through. Re-verify with a tap, or rely on
+`parser_holds_full_mpps_write_echo`.)
+
+## 34. FrameParser `MAX_BUF` 192 → 512: the 233-byte MPPS write echo (2026-11-23)
+
+**Bug.** The MPPS-style cal write (§33) sends each 224-byte block as one
+**233-byte** wire frame (`12 E9 07 02 <addr3> E0 <224 data> <XOR>`, LEN
+`0xE9`). The `FrameParser` resync bound was `MAX_BUF = 192`, sized back in §21
+for the small Galletto frames (≤ 73 wire). On a line with a monitor tap, the
+ECU echoes our own TX back, so the whole 233-byte write frame arrives at the
+parser. `feed()` saw `buf.len() > 192` and drained the front, keeping only the
+tail half — **destroying the frame's `12 E9` header**. `take_frame` then
+re-anchored on a `0x12` byte *inside the data tail* (a phantom anchor), read a
+LEN that never completes, and swallowed the ECU's real reply. `got_echo` never
+became true → 3 resends → `no echo of service 0x07 … line dead or ECU not
+listening`. It was **data-dependent** (only when the drained tail held a
+`0x12`), which is why a real-car write froze at one specific block instead of
+every block.
+
+**Fix.** `MAX_BUF` 192 → **512** in `src/protocol.rs` (matching the
+`Framer` in `src/capture.rs`, which was already 512). The largest real frame
+(233 B) plus a back-to-back reply (≤ ~130 B) now fits with margin, so the
+resync drain never fires on a legitimate frame. The drain heuristic (keep the
+tail half) is unchanged — it is still the last resort for genuine persistent
+garbage.
+
+**Regression test.** `protocol::tests::parser_holds_full_mpps_write_echo`
+feeds the full 233-byte write frame (with a `0x12` planted in the data tail)
+as the echo, then the 4-byte reply, and asserts both are extracted intact. It
+**fails** on `MAX_BUF=192` (the echo is not extracted) and **passes** on 512.
+
+**E2E proof.** A faithful K-line T-topology tap (two raw ptys; the bridge
+forwards each side's TX to the peer *and* taps it back to the sender's reader —
+no pty `ECHO`, so no feedback loop) + `respond` + `bench --write-cal` on an
+image with a `12 FC` trap in block 5's tail: **old code** fails with the exact
+`no echo of service 0x07` error; **fixed code** writes all 147 blocks and the
+dump matches byte-for-byte.

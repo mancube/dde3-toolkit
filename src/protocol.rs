@@ -125,10 +125,15 @@ pub fn known_status_sb(sb: u8) -> bool {
     matches!(sb, 0xA0 | 0xA1 | 0xA2 | 0xB0 | 0xB1 | 0xB2 | 0xFF | 0x00)
 }
 
-/// Maximum plausible buffer before resync. Must comfortably hold an echo
-/// (≤ ~40 B) plus a full reply (≤ ~130 B) that arrive back-to-back on the
-/// half-duplex K-line.
-const MAX_BUF: usize = 192;
+/// Maximum plausible buffer before resync. Must comfortably hold the largest
+/// frame — the MPPS-style 224-byte cal write, 233 wire bytes
+/// (`12 E9 07 02 <addr3> E0 <224 data> <XOR>`) — plus a full reply (≤ ~130 B)
+/// that arrive back-to-back on the half-duplex K-line. The monitor tap echoes
+/// our own TX, so the whole 233-byte write frame must be held without the
+/// resync drain; a smaller bound truncated it and the parser re-anchored on a
+/// 0x12 inside the data tail, swallowing the ECU's reply ("no echo of service
+/// 0x07"). Sized like the capture [`crate::capture::Framer`] (512).
+const MAX_BUF: usize = 512;
 
 /// Total wire length INCLUDING the trailing XOR of the smallest and largest
 /// real frames; a LEN outside this range marks a false anchor / corruption.
@@ -1626,6 +1631,40 @@ mod tests {
         parser.feed(&build_frame(&[0x12, 0x04, 0x00]));
         let f = parser.take_frame().expect("frame");
         assert_eq!(f.payload, vec![0x12, 0x04, 0x00]);
+    }
+
+    #[test]
+    fn parser_holds_full_mpps_write_echo() {
+        // MPPS-style cal write: a 224-byte data block is one 233-byte wire
+        // frame (`12 E9 07 02 <addr3> E0 <224 data> <XOR>`). The monitor tap
+        // echoes our own TX back, so the parser must hold the whole 233-byte
+        // echo WITHOUT the MAX_BUF resync draining it, then extract the ECU's
+        // reply that follows back-to-back.
+        //
+        // The data tail deliberately contains a 0x12 (offset 200, inside the
+        // last-96 bytes). With the old MAX_BUF=192 the 233-byte echo overflowed
+        // the buffer, the resync drained the frame's `12 E9` header, and the
+        // parser re-anchored on this in-band 0x12 — a phantom frame that never
+        // completes, swallowing the real reply. That is the "no echo of service
+        // 0x07" freeze the MPPS cal write hit on real hardware.
+        let mut payload = vec![0x12, 0xE9, 0x07, 0x02, 0x03, 0x84, 0x60, 0xE0];
+        for i in 0..224u16 {
+            payload.push(if i == 200 { 0x12 } else { 0x55u8.wrapping_add(i as u8) });
+        }
+        let wire = build_frame(&payload);
+        assert_eq!(wire.len(), 233, "MPPS cal-write frame is 233 bytes on the wire");
+
+        let mut p = FrameParser::default();
+        p.feed(&wire);
+        let echo = p.take_frame().expect("echo of the 233-byte write must be extracted");
+        assert_eq!(echo.payload, payload, "echo must round-trip intact");
+
+        // The ECU's ack follows on the same line, back-to-back.
+        let reply = build_frame(&[0x12, 0x04, 0xA0]);
+        p.feed(&reply);
+        let f = p.take_frame().expect("reply after the big echo");
+        assert_eq!(f.payload, vec![0x12, 0x04, 0xA0]);
+        assert!(p.take_frame().is_none(), "buffer drained");
     }
 
     // ---- Real-car (2026-11-09 M47) fixtures from `dde3 toolkit log.txt` ----

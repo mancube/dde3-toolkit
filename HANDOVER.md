@@ -734,15 +734,42 @@ success, per the user) instead of the Galletto flow. New branch
   image.
 - Docs: `docs/wire-protocol.md` §33, `docs/FINDINGS_mpps_vs_galletto_calibration.md`.
 
+### Session 42 (2026-11-23) — FrameParser `MAX_BUF` 192 → 512 (the 233-B MPPS write echo)
+
+On-car `write-cal` (session 41's feature) froze mid-write with
+`no echo of service 0x07 (12 E9 07 02 03 84 60 E0 …) … line dead or ECU not
+listening` after a few 224-byte blocks. Root cause: each 224-byte block is one
+**233-byte** wire frame (LEN `0xE9`), but `FrameParser::MAX_BUF` was still 192
+(sized in §21 for the ≤73-B Galletto frames). With a monitor tap, the ECU
+reflects our own TX back, so the 233-B write frame hit the parser, overflowed
+192, and the resync drained the front — destroying the `12 E9` header. The
+parser re-anchored on a `0x12` *inside the data tail* (a phantom anchor that
+never completes) and swallowed the ECU's reply → `got_echo` never set → 3
+resends → the error. Data-dependent (only when the drained tail held a `0x12`),
+so it froze at one specific block, not every block.
+
+- **Fix:** `MAX_BUF` 192 → **512** in `src/protocol.rs` (matches the
+  `Framer` in `src/capture.rs`, already 512). Drain heuristic unchanged.
+- **Regression test:** `protocol::tests::parser_holds_full_mpps_write_echo`
+  (feeds the full 233-B frame + a trailing reply; fails on 192, passes on 512).
+- **E2E proof:** faithful K-line T-topology tap (two raw ptys; bridge forwards
+  each TX to the peer *and* taps it back to the sender's reader — no pty
+  `ECHO`, so no feedback loop) + `respond` + `bench --write-cal` on an image
+  with a `12 FC` trap in block 5's tail: **old code** → the exact `no echo`
+  error; **fixed** → all 147 blocks, dump byte-identical.
+- Docs: `docs/wire-protocol.md` §34 (+ §33 caveat that the socat E2E had no
+tap echo). `cargo test` → 84 passing.
+
 ## ← CURRENT TASK (take over from here)
 
-**MPPS-style calibration write (session 41, branch
-`feature/mpps-style-calibration-write`) — on-car verification pending.** The
-calibration write now mimics MPPS: 224-byte blocks (146×224 + 1×64), a single
+**MPPS-style calibration write (sessions 41–42, branch
+`feature/mpps-style-calibration-write`) — on-car re-verification pending.** The
+calibration write mimics MPPS: 224-byte blocks (146×224 + 1×64), a single
 `07 0F` write-end @0x03FCE0 before the erase, and a one-shot DTC read+clear
-prep (also before reads). Verified byte-exact against the fake ECU
-(`bench --write-cal` vs `respond`, 147 blocks + 1 `07 0F` + DTC prep, dump
-identical to source). Next on-car: `dde3-toolkit write-cal <cal.bin> --port
+prep (also before reads). The on-car `no echo of service 0x07` freeze is
+**fixed** (session 42): `FrameParser::MAX_BUF` 192 → 512 so the 233-byte
+write echo is held intact; regression test `parser_holds_full_mpps_write_echo`
++ tap E2E both pass. Next on-car: `dde3-toolkit write-cal <cal.bin> --port
 /dev/ttyUSB1` and confirm the 147×224-B writes + `07 0F` + DTC prep run clean
 and the calibration area matches. The 224-B size is proven by the MPPS capture
 (wire-protocol §33); §32's 192-B rejection was the *program* area, a different
