@@ -227,6 +227,14 @@ mirrors **MPPS's** calibration write, tested with 100% on-car success
 proven by the capture. The full write (`write_full`, program area) keeps the
 64-byte Galletto size (`WRITE_BLOCK`).
 
+> **Why a 233-byte frame is accepted at all:** each 224-byte block is one
+> 233-byte wire frame (`LEN 0xE9`), which is larger than the **128-byte**
+> application DS2 receiver limit (firmware-confirmed at `0x1EB34`). It works
+> because these frames are sent **after `UPROG_EIN`**, when the boot-block
+> flash programmer (a second, bigger receiver) owns the K-line. See
+> **`docs/ds2-rx-buffer.md`** for the two-receiver split and the unconfirmable
+> "256" (boot block is all `0xFF` in every dump).
+
 **Sequence** (`Kline::write_calibration`):
 
 1. `begin_flash_session(true)` — IDENT → UPROG_EIN → AIF read → **DTC

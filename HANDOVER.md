@@ -17,6 +17,7 @@ chip, DDE 3.0 hardware name).
 | File | Contents |
 |---|---|
 | `docs/wire-protocol.md` | **Authoritative** on-the-wire facts: framing, reply convention (`0x12` prefix, not `0x92`), XOR checksum, timing, ECU identity |
+| `docs/ds2-rx-buffer.md` | Firmware-confirmed K-line RX buffer & frame limits: 128-byte app receiver (`0x1EB34`), the two-receiver split (why 233-byte MPPS frames work), the unconfirmable "256" (boot block all `0xFF`) |
 | `docs/dtc-fault-protocol.md` | 4-step fault-read protocol, 50-byte fault record layout, DTC text tables in `DDE30DS0.prg` |
 | `docs/checksum.md` | TDI V3.1 checksum algorithm, block discovery, the false-BAD fix, the cold-start program chain |
 | `docs/baud-0x91-patch.md` | DS2 0x91 baud-change ECU patch + `baud` command |

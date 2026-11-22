@@ -22,6 +22,7 @@ the knowledge base; don't re-derive or guess against it.
 | Cutting a release (linux in `dist/`) | `scripts/release.sh <version>` — see `GIT.md` "Releases" and README "Releases" |
 | Handing over to the next agent | `HANDOVER.md` — when instructed, reduce it to: status + task at hand; push deep detail into `docs/` first |
 | Wire facts | `docs/wire-protocol.md` |
+| K-line RX buffer / max frame size | `docs/ds2-rx-buffer.md` — 128-byte app limit (firmware-confirmed), two-receiver split, the unconfirmable "256" |
 | Fault/DTC protocol | `docs/dtc-fault-protocol.md` |
 | Checksums / 0x91 patch | `docs/checksum.md`, `docs/baud-0x91-patch.md` |
 | Firmware patches (manifests, builders, CLI/GUI) | `docs/patches.md`, `patches/README.md`, `src/patches.rs` |
