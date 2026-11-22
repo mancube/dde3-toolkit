@@ -743,10 +743,6 @@ impl App {
                                     "WARNING: ident looks erased/corrupt; the application may be incomplete".into(),
                                 ));
                             }
-                            // Checksum-status link probe; its payload is no
-                            // longer used for the SW label — the ident string
-                            // is the source of truth.
-                            let _ = k.read_app(0x7BFB0, 10);
                             snapshot_battery(&mut k, &tx);
                             let logs = k.take_logs();
                             *guard = Some(k);

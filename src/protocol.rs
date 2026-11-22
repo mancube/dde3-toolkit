@@ -1046,17 +1046,6 @@ impl Kline {
         false
     }
 
-    /// Read application data using STATUS_CODIER_CHECKSUMME (`12 04 0A`) as the
-    /// closest DDE3 equivalent to DDE4's `read_app`. Returns the reply payload.
-    pub fn read_app(&mut self, _off: usize, _len: usize) -> Result<Vec<u8>> {
-        // DDE3 has no pointer-table read equivalent. Use checksum status to probe
-        // the link; return its payload as a stand-in for software version bytes.
-        match self.request(&[0x12, 0x04, 0x0A], Duration::from_millis(500)) {
-            Ok(r) => Ok(r),
-            Err(e) => Err(e),
-        }
-    }
-
     /// Full flasher session bootstrap — mirrors the flasher tools' captured
     /// full-flash / full-write procedure (`captures/galletto capture with
     /// respond tool/testread.txt` read session, `fakewritegalleto.txt` write
