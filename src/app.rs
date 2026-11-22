@@ -880,7 +880,6 @@ impl App {
                 return;
             };
             let _ = tx.send(Msg::Status("Reading full flash".into()));
-            snapshot_battery(k, &tx);
             k.set_silence(10);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(
@@ -935,7 +934,6 @@ impl App {
                 return;
             };
             let _ = tx.send(Msg::Status("Reading calibration".into()));
-            snapshot_battery(k, &tx);
             k.set_silence(10);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(
@@ -1007,7 +1005,6 @@ impl App {
                 return;
             };
             let _ = tx.send(Msg::Status("Erasing and writing".into()));
-            snapshot_battery(k, &tx);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(
                     done as f32 / total as f32,
@@ -1063,7 +1060,6 @@ impl App {
                 return;
             };
             let _ = tx.send(Msg::Status("Erasing and writing calibration".into()));
-            snapshot_battery(k, &tx);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(
                     done as f32 / total as f32,
