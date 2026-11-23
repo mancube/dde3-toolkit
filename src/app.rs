@@ -193,7 +193,7 @@ impl LogWriter {
                 .unwrap_or(0);
             let i = LIVE_VARS.iter().position(|v| v.id == *id);
             let phys = match i {
-                Some(i) => raw as f64 * LIVE_VARS[i].factor + LIVE_VARS[i].offset,
+                Some(i) => LIVE_VARS[i].decode(raw),
                 None => raw as f64,
             };
             let _ = write!(self.file, ",{phys:.4}");
@@ -622,7 +622,7 @@ impl App {
                     }
                     for (id, raw) in vals {
                         if let Some(i) = LIVE_VARS.iter().position(|v| v.id == id) {
-                            let v = raw as f64 * LIVE_VARS[i].factor + LIVE_VARS[i].offset;
+                            let v = LIVE_VARS[i].decode(raw);
                             self.live_values[i] = v;
                             let h = &mut self.live_history[i];
                             h.push(v as f32);

@@ -792,6 +792,32 @@ cadence comparison).
   asleep, a logged `IDENT no reply (…) — K-line wake break, retrying` line
   followed by a successful bootstrap.
 
+### Session 44 (2026-11-23) — signed 16-bit live/logger values decoded correctly
+
+User finding: the value logger showed negative parameters as huge positives —
+SB injection start setpoint/actual read **655.34** instead of e.g. **-0.02**
+(Grad KW). Root cause: every ADF value was decoded as unsigned
+(`raw as f64 * factor + offset`), but the ECU reports some ADFs as
+two's-complement i16.
+
+- **Signedness source:** the tool32 ADF export's `DATA_TYPE` column —
+  **7 = signed i16, 5 = unsigned u16** (22 of the 81 variables are type 7;
+  exactly the negative-capable set: SB injection start setpoint/actual,
+  SBR PI output, acceleration, MSR intervention, M_E correction/quantity
+  deltas, friction quantity). Cross-checked against the user's on-car
+  observation (0x0F52/0x0F53 are type 7).
+- `LiveVar` gains `signed: bool` + `LiveVar::decode(raw)` (sign-extend,
+  then `raw * factor + offset`); `tools/gen_live_rs.py` emits both from the
+  CSV and `src/live.rs` was regenerated (also emits the `mod tests` hook so
+  regeneration can't drop it).
+- Both decode sites use it: the live display update (`Msg::Live`) and the
+  CSV logger (`LogWriter::write_row`) — the logger tab, live tab, charts
+  and CSV all flow from those two points.
+- Tests: `live::tests` — the 655.34 → -0.02 regression case, unsigned
+  full-range kept (WTF 3000 → 26.86 °C, 0xFFFF stays positive),
+  monotonicity over each variable's domain, and the 22-id signed set pinned
+  against the ADF export (88 passing, clippy clean).
+
 ## ← CURRENT TASK (take over from here)
 
 **MPPS-style calibration write (sessions 41–43) — on-car re-verification of
