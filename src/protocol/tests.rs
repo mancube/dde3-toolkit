@@ -431,6 +431,49 @@ fn parser_drops_leading_garbage_before_frame() {
     assert_eq!(f.payload, vec![0x12, 0x04, 0x00]);
 }
 
+// --- pty-based regression tests (K-line wake / port reopen) ---------------
+
+/// Open a pty pair and return (master, slave_path). The slave path is what a
+/// [`Kline`] opens; the master is the test's side of the wire (held open for
+/// the test's duration so the pty stays alive).
+#[cfg(unix)]
+fn pty_pair() -> (std::fs::File, String) {
+    use std::os::fd::FromRawFd;
+    let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    assert!(master_fd >= 0, "posix_openpt failed: {}", std::io::Error::last_os_error());
+    assert_eq!(unsafe { libc::grantpt(master_fd) }, 0, "grantpt failed");
+    assert_eq!(unsafe { libc::unlockpt(master_fd) }, 0, "unlockpt failed");
+    let mut name = [0 as libc::c_char; 256];
+    assert_eq!(
+        unsafe { libc::ptsname_r(master_fd, name.as_mut_ptr(), name.len()) },
+        0,
+        "ptsname_r failed"
+    );
+    let slave_path = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    let master = unsafe { std::fs::File::from_raw_fd(master_fd) };
+    (master, slave_path)
+}
+
+#[cfg(unix)]
+#[test]
+fn wake_kline_succeeds_and_port_stays_usable() {
+    // Regression: wake_kline's drain read used to propagate the port's 10 ms
+    // soft timeout as a hard "Operation timed out" error (the line is empty
+    // after the clear), so the bootstrap IDENT retry in begin_flash_session
+    // never ran and the calibration write died. wake_kline must now return Ok
+    // on an empty line, and the port (reopened inside it) must still work.
+    let (_master, slave) = pty_pair();
+    let mut k = Kline::open(&slave, 9600).expect("open Kline on pty");
+    k.wake_kline().expect("wake_kline must not error on an empty line");
+    // reopen_port ran inside wake_kline — the port must still be writable.
+    let frame = build_frame(&[0x12, 0x04, 0x00]);
+    k.write_frame(&frame)
+        .expect("port must be usable after wake_kline");
+}
+
 #[test]
 fn parser_resyncs_on_bad_xor() {
     // A frame whose declared LEN is present but whose trailing XOR does

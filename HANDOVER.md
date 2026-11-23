@@ -868,21 +868,92 @@ Implementation:
 Open: on-desk visual pass of the four view modes + preset CRUD with the
 user; merge to main when satisfied.
 
+### Session 46 (2026-11-23) — the v0.5 K-line wake fix was itself broken (drain-read timeout)
+
+On-car `write-cal` (v0.5, the session-43 self-healing bootstrap) still failed
+— the calibration write "didn't even want to do" anything. The car logs
+(`captures/dde3-20261123-200017.log`, `…-200207.log`) showed the tell-tale:
+
+```
+TX 12 04 00 16
+IDENT no reply (no response to service 0x00 (12 04 00), link /dev/ttyUSB0) — K-line wake break, retrying
+ERROR calibration write failed: Operation timed out
+```
+
+Two defects in the session-43 fix (`176774e`):
+
+1. **The retry IDENT never ran.** `wake_kline()` drained the RX buffer with
+   `while self.port.read(&mut buf)? > 0 {}`. The port has a **10 ms read
+   timeout**; after `clear(ClearBuffer::All)` the line is empty, so that read
+   blocks 10 ms and returns `Err(TimedOut)` = "Operation timed out", and the
+   `?` propagated it as a **hard error** — `begin_flash_session`'s
+   `self.wake_kline()?` aborted *before* the retry IDENT was sent. The log's
+   "Operation timed out" is the port's `TimedOut`, **not** the custom
+   "FLASH_READ bootstrap: IDENT failed (even after wake break)" context —
+   proof the retry never ran (no second `TX 12 04 00 16` in the capture).
+2. **`set_break` is not the proven wake.** The manual reconnect that worked in
+   v0.4.1 is a full port **close+open** (line-down → line-up pulse).
+   `set_break()`/`clear_break()` is adapter-dependent; the adapter accepted it
+   (no "set_break unsupported" log) but that doesn't guarantee the ECU saw a
+   break.
+
+Fix (`src/protocol.rs`):
+- The `wake_kline` drain read now matches `ErrorKind::TimedOut` and treats it
+  as "no more data" (break out of the drain) instead of propagating it — the
+  retry IDENT now actually runs.
+- `Kline::port` is now `Option<Box<dyn SerialPort>>`; a new
+  `Kline::reopen_port()` closes the port (all fds → line-down) and reopens it
+  fresh at the current baud (line-up) — the proven reconnect wake. `wake_kline`
+  calls it after the best-effort `set_break`. A `baud` field is kept so the
+  reopen uses the current rate (`set_baud` / `recover_link_for` update it).
+- Regression test `protocol::tests::wake_kline_succeeds_and_port_stays_usable`
+  opens a `Kline` on a libc pty and asserts `wake_kline()` returns `Ok` on an
+  empty line (the old code failed it with exactly `Operation timed out`).
+
+Tests: 94 passing (was 93), clippy clean. Docs: `docs/wire-protocol.md` §35.3.
+
+**Follow-up (same session, §35.4):** re-reading the car logs showed the wake
+was running **too late** — `begin_flash_session` sent the IDENT first and only
+called `wake_kline()` *after* it timed out, so the IDENT always went out on a
+stale line. The logs prove it: the bootstrap IDENT fails even **~2 s after a
+fresh connect** (20:01:30 connect, 20:01:33 write IDENT no reply) — far too
+soon for a 20 s sleep, so the module re-sleeps *between* transactions and only
+a fresh line pulse wakes it. Now fixed: `begin_flash_session` calls
+`wake_kline()` **before** the bootstrap IDENT (the IDENT goes out on a
+freshly-woken line, the same fresh-open wake the connect gets from
+`Kline::open`), and `wake_kline` no longer calls `set_break`/`clear_break`
+(adapter-dependent, never the proven wake, and can leave the line dominant if
+`clear_break` is unsupported) — the port **reopen** (close → line-down,
+open → line-up) *is* the wake. Docs: `docs/wire-protocol.md` §35.4.
+
+**On-car re-verification pending:** one more `write-cal` — the bootstrap IDENT
+should now succeed on the first try (it goes out on a freshly-woken line), so
+the log should show `TX 12 04 00 16` → `RX 12 2E A0 …` with **no**
+"IDENT no reply" line at all.
+
 ## ← CURRENT TASK (take over from here)
 
-**MPPS-style calibration write (sessions 41–43) — on-car re-verification of
-the session-43 fixes pending.** The calibration write mimics MPPS:
-224-byte blocks (146×224 + 1×64), a single `07 0F` write-end @0x03FCE0
-before the erase, and a one-shot DTC read+clear prep (also before reads).
-It ran to completion on the real car (session 43, car started afterwards),
-but at the old 3 ms/byte pacing and only after a manual reconnect fixed the
-slept K-line. Session 43 added: unpaced (0 ms/byte) data frames — MPPS
-parity, expect ~330–350 ms/frame — and the self-healing bootstrap
-(`wake_kline()` break + IDENT retry). Next on-car: `dde3-toolkit write-cal
-<cal.bin> --port /dev/ttyUSB1`; confirm the cadence in the log
-(`tools/analyze_realcar_write.py`) and that a cold ECU bootstraps on the
-retry. The 224-B size is proven by the MPPS capture (wire-protocol §33);
-§32's 192-B rejection was the *program* area, a different case.
+**MPPS-style calibration write (sessions 41–43, 46) — on-car re-verification
+pending.** The calibration write mimics MPPS: 224-byte blocks (146×224 +
+1×64), a single `07 0F` write-end @0x03FCE0 before the erase, and a one-shot
+DTC read+clear prep (also before reads). It ran to completion on the real car
+(session 43, car started afterwards), but at the old 3 ms/byte pacing and only
+after a manual reconnect fixed the slept K-line. Session 43 added: unpaced
+(0 ms/byte) data frames — MPPS parity, expect ~330–350 ms/frame — and the
+self-healing bootstrap. **Session 46 fixed the broken wake in two passes**
+(wire-protocol §35.3–35.4): (1) `wake_kline`'s drain read no longer turns the
+port's 10 ms soft timeout into a hard "Operation timed out" error, and it does
+a real port close+open (`reopen_port()`, the proven reconnect wake); (2) the
+wake now runs **before** the bootstrap IDENT (not after it timed out), so the
+IDENT goes out on a freshly-woken line — the car logs showed the IDENT failing
+even ~2 s after a fresh connect, so the module re-sleeps between transactions
+and only a fresh line pulse wakes it. `set_break` is dropped (adapter-
+dependent, never the proven wake). Next on-car: `dde3-toolkit write-cal
+<cal.bin> --port /dev/ttyUSB1`; confirm in the log
+(`tools/analyze_realcar_write.py`) that the bootstrap IDENT **succeeds on the
+first try** (`TX 12 04 00 16` → `RX 12 2E A0 …`, no "IDENT no reply" line).
+The 224-B size is proven by the MPPS capture (wire-protocol §33); §32's 192-B
+rejection was the *program* area, a different case.
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU
 OKAYed two 192-byte write blocks, then hung on the third (no reply, no

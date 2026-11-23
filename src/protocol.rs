@@ -656,8 +656,12 @@ const MAX_BUSY_RETRIES: u32 = 50;
 const MAX_TX_RETRIES: u32 = 3;
 
 pub struct Kline {
-    port: Box<dyn SerialPort>,
+    port: Option<Box<dyn SerialPort>>,
     path: String,
+    /// Current baud rate — kept so [`Kline::reopen_port`] can reopen the port
+    /// with the same settings (the wake pulse needs a fresh open at the
+    /// current rate).
+    baud: u32,
     parser: FrameParser,
     pending: VecDeque<Frame>,
     logs: Vec<String>,
@@ -679,7 +683,8 @@ impl Kline {
             .open()
             .with_context(|| format!("cannot open {path}"))?;
         Ok(Self {
-            port,
+            port: Some(port),
+            baud,
             path: path.to_string(),
             parser: FrameParser::default(),
             pending: VecDeque::new(),
@@ -688,6 +693,17 @@ impl Kline {
             write_delay: Duration::from_millis(3),
             last_log: None,
         })
+    }
+
+    /// The live serial port. Panics only if called while the port is
+    /// transiently closed inside [`Kline::reopen_port`] — no other code path
+    /// closes it.
+    fn serial(&mut self) -> &mut dyn SerialPort {
+        std::ops::DerefMut::deref_mut(
+            self.port
+                .as_mut()
+                .expect("Kline port is open (transiently closed only inside reopen_port)"),
+        )
     }
 
     pub fn set_silence(&mut self, ms: u64) {
@@ -704,10 +720,11 @@ impl Kline {
 
 
     pub fn set_baud(&mut self, baud: u32) -> Result<()> {
-        self.port
+        self.baud = baud;
+        self.serial()
             .set_baud_rate(baud)
             .with_context(|| format!("cannot set {} to {baud} baud", self.path))?;
-        let _ = self.port.clear(ClearBuffer::All);
+        let _ = self.serial().clear(ClearBuffer::All);
         thread::sleep(Duration::from_millis(100));
         self.parser = FrameParser::default();
         self.pending.clear();
@@ -769,7 +786,7 @@ impl Kline {
         let mut out = Vec::with_capacity(n);
         let mut buf = [0u8; 256];
         while out.len() < n && Instant::now() < deadline {
-            match self.port.read(&mut buf) {
+            match self.serial().read(&mut buf) {
                 Ok(0) => {}
                 Ok(k) => out.extend_from_slice(&buf[..k]),
                 Err(e) if e.kind() == ErrorKind::TimedOut => {}
@@ -799,19 +816,19 @@ impl Kline {
             // between bytes), but the host returns in one syscall instead of
             // one write_all+flush per byte — that per-byte host time is what
             // cost ~700 ms/frame at 3 ms/byte (MPPS sends back-to-back).
-            self.port
+            self.serial()
                 .write_all(frame)
                 .with_context(|| format!("serial write failed on {}", self.path))?;
-            self.port
+            self.serial()
                 .flush()
                 .with_context(|| format!("serial flush failed on {}", self.path))?;
             return Ok(());
         }
         for (i, b) in frame.iter().enumerate() {
-            self.port
+            self.serial()
                 .write_all(&[*b])
                 .with_context(|| format!("serial write failed on {} at byte {i}", self.path))?;
-            self.port
+            self.serial()
                 .flush()
                 .with_context(|| format!("serial flush failed on {}", self.path))?;
             if !self.write_delay.is_zero() {
@@ -827,7 +844,7 @@ impl Kline {
         let mut out = Vec::new();
         while start.elapsed() < Duration::from_millis(250) {
             let mut buf = [0u8; 512];
-            match self.port.read(&mut buf) {
+            match self.serial().read(&mut buf) {
                 Ok(0) => {}
                 Ok(n) => {
                     out.extend_from_slice(&buf[..n]);
@@ -1031,31 +1048,67 @@ impl Kline {
         Ok(strip_reply_envelope(&r).to_vec())
     }
 
-    /// Wake the ECU's K-line interface: hold the line dominant (break) for a
-    /// few ms, then drain whatever trickled in. The ECU's K-line module
-    /// sleeps after ~20 s of line silence and drops plain data frames while
-    /// asleep — the first real-car write capture shows two bootstrap IDENTs
-    /// dropped after 23 s of idle, then restored by a port close+open (whose
-    /// line pulse acts as a break). Flasher tools get that pulse for free
-    /// because they open the port fresh for every session; we keep the port
-    /// open, so we send the break explicitly (see [`Kline::begin_flash_session`]).
+    /// Wake the ECU's K-line interface with a fresh port open — the proven
+    /// wake (the same line-down → line-up pulse the user's manual reconnect
+    /// produces). The ECU's K-line module drops plain data frames unless the
+    /// line has recently seen a fresh open; the connect gets that for free
+    /// (Kline::open), but the write job reuses the port, so a cold bootstrap
+    /// IDENT times out. We reopen the port (close then open at the current
+    /// baud) and drain whatever trickled in, so the caller's next frame goes
+    /// out on a freshly-woken line (see [`Kline::begin_flash_session`]).
     pub fn wake_kline(&mut self) -> Result<()> {
-        // Best effort: some adapters don't support break — the retry itself
-        // may still succeed if the ECU was actually awake.
-        match self.port.set_break() {
-            Ok(()) => {
-                thread::sleep(Duration::from_millis(10));
-                let _ = self.port.clear_break();
-            }
-            Err(e) => self.log(format!("K-line wake: set_break unsupported ({e})")),
-        }
-        // Give the ECU's receiver time to re-arm, then clear the line.
+        // The proven wake is a fresh port open (the user's manual reconnect):
+        // closing the port drops all file descriptors (line-down pulse) and the
+        // fresh open re-asserts the line (line-up pulse). set_break alone is
+        // adapter-dependent and was not reliably waking the module (and can
+        // leave the line dominant if clear_break is unsupported), so it is no
+        // longer used — the reopen IS the wake.
+        self.reopen_port()?;
+        // Give the ECU's receiver time to re-arm, then clear the line. The
+        // drain read must treat the port's soft timeout as "no more data" —
+        // the port has a 10 ms read timeout, so a plain `?` would turn the
+        // empty line into a hard "Operation timed out" error and abort the
+        // wake before the caller's retry ever ran.
         thread::sleep(Duration::from_millis(100));
-        let _ = self.port.clear(ClearBuffer::All);
+        let _ = self.serial().clear(ClearBuffer::All);
         let mut buf = [0u8; 512];
-        while self.port.read(&mut buf)? > 0 {}
+        loop {
+            match self.serial().read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(e) if e.kind() == ErrorKind::TimedOut => break,
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("K-line wake drain read failed on {}", self.path))
+                }
+            }
+        }
         self.parser.clear();
         self.pending.clear();
+        Ok(())
+    }
+
+    /// Close and reopen the serial port — a real line-level pulse, the same
+    /// effect as the user's manual reconnect (the proven way to wake the ECU's
+    /// sleeping K-line module; see docs/wire-protocol.md §35.1). The port is
+    /// dropped (all fds closed → line-down) before the fresh open (line-up),
+    /// which is what generates the wake pulse; an open-then-close would leave
+    /// the control lines asserted and produce no pulse.
+    fn reopen_port(&mut self) -> Result<()> {
+        // Drop the current port: closing the last fd deasserts the control
+        // lines and produces the line-down part of the pulse.
+        self.port = None;
+        thread::sleep(Duration::from_millis(50));
+        // Fresh open at the current baud: reasserts the lines (line-up) and
+        // gives the ECU a clean start.
+        let port = serialport::new(&self.path, self.baud)
+            .data_bits(DataBits::Eight)
+            .parity(Parity::Even)
+            .stop_bits(StopBits::One)
+            .timeout(Duration::from_millis(10))
+            .open()
+            .with_context(|| format!("cannot reopen {}", self.path))?;
+        self.port = Some(port);
         Ok(())
     }
 
@@ -1067,8 +1120,9 @@ impl Kline {
 
     /// Like [`recover_link`], but waits up to `timeout` for a slow application boot.
     pub fn recover_link_for(&mut self, timeout: Duration) -> bool {
-        let _ = self.port.set_baud_rate(9600);
-        let _ = self.port.clear(ClearBuffer::All);
+        self.baud = 9600;
+        let _ = self.serial().set_baud_rate(9600);
+        let _ = self.serial().clear(ClearBuffer::All);
         thread::sleep(Duration::from_millis(100));
         self.parser.clear();
         self.pending.clear();
@@ -1115,12 +1169,17 @@ impl Kline {
         //    out (first real-car capture: two dropped IDENTs after 23 s of
         //    idle). Wake it with a break — the same line pulse a fresh port
         //    open produces — and retry once.
-        if let Err(e) = self.request_once(&frame_ident(), Duration::from_millis(1000)) {
-            self.log(format!("IDENT no reply ({e}) — K-line wake break, retrying"));
-            self.wake_kline()?;
-            self.request_once(&frame_ident(), Duration::from_millis(1000))
-                .with_context(|| "FLASH_READ bootstrap: IDENT failed (even after wake break)")?;
-        }
+        // The ECU's K-line module drops plain data frames unless the line has
+        // recently seen a fresh open (line-down → line-up pulse). The connect
+        // gets that for free (Kline::open), but the write job reuses the port,
+        // so a cold bootstrap IDENT times out — even just seconds after a
+        // connect (the module re-sleeps between transactions). Wake it the
+        // proven way (a fresh port open, the same pulse the user's manual
+        // reconnect produces) IMMEDIATELY before the IDENT, so the IDENT goes
+        // out on a freshly-woken line.
+        self.wake_kline()?;
+        self.request_once(&frame_ident(), Duration::from_millis(1000))
+            .with_context(|| "FLASH_READ bootstrap: IDENT failed")?;
         // 2) Set to programming mode.
         self.request_once(&frame_uprog_ein(), Duration::from_secs(3))
             .with_context(|| "FLASH_READ bootstrap: UPROG_EIN failed")?;

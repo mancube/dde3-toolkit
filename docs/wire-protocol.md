@@ -341,9 +341,14 @@ GUI toggle was a red herring: it only paces the live loop, and the
 successful write ran at the default 3 ms/byte.
 
 **Fix** (`src/protocol.rs`):
-- `Kline::wake_kline()` — `set_break()` / `clear_break()` (10 ms) + 100 ms
-  settle + drain + parser/pending reset. Best-effort: adapters without break
-  support log a note and the retry may still succeed.
+- `Kline::wake_kline()` — a best-effort `set_break()` / `clear_break()` (10 ms)
+  nudge, then a **real port close+open** (`reopen_port()`: drop the port →
+  line-down pulse → fresh open → line-up pulse — the exact wake the user's
+  manual reconnect produced), then 100 ms settle + drain + parser/pending
+  reset. The drain read treats the port's 10 ms soft timeout as "no more
+  data" (a plain `?` turns the empty line into a hard "Operation timed out"
+  error — see 35.3). `set_break` alone is adapter-dependent and was not
+  reliably waking the module, so the port reopen is the actual wake.
 - `begin_flash_session()`: the bootstrap IDENT (now 1000 ms, see 35.2) is
   retried **once** after `wake_kline()` on failure, with a log line
   (`IDENT no reply (…) — K-line wake break, retrying`). This makes the flash
@@ -382,3 +387,70 @@ Reply latencies measured on the real ECU (for timeout sizing): IDENT
 473–516 ms, UPROG_EIN 687 ms, AIF 543 ms, FS_LESEN 256 ms, FS_LOESCHEN
 272 ms, seed 448 ms, key 256 ms, erase 623 ms, write-end 80 ms,
 DIAGNOSE_ENDE 64 ms, SCHREIBEN reply ~50–100 ms after the last TX byte.
+
+### 35.3 The v0.5 wake fix was itself broken — the retry never ran
+
+The 35.1 fix shipped in v0.5 (commit `176774e`) but the calibration write
+still failed on the car (`captures/dde3-20261123-200017.log`,
+`…-200207.log`). The logs show the tell-tale sequence:
+
+```
+TX 12 04 00 16
+IDENT no reply (no response to service 0x00 (12 04 00), link /dev/ttyUSB0) — K-line wake break, retrying
+ERROR calibration write failed: Operation timed out
+```
+
+Two things were wrong:
+
+1. **The retry IDENT never ran.** `wake_kline()` drained the RX buffer with
+   `while self.port.read(&mut buf)? > 0 {}`. The port has a **10 ms read
+   timeout** (`Kline::open`); after `clear(ClearBuffer::All)` the line is
+   empty, so that `read` blocks 10 ms and returns `Err(TimedOut)` =
+   "Operation timed out", and the `?` propagated it as a **hard error**.
+   `begin_flash_session`'s `self.wake_kline()?` therefore aborted *before*
+   the retry IDENT was sent. The "Operation timed out" in the log is the
+   port's `TimedOut` — **not** the custom "FLASH_READ bootstrap: IDENT failed
+   (even after wake break)" context — which is the proof the retry never ran
+   (there is no second `TX 12 04 00 16` in the capture).
+2. **`set_break` is not the proven wake.** The manual reconnect that worked in
+   v0.4.1 is a full port **close+open** (line-down → line-up pulse).
+   `set_break()`/`clear_break()` is adapter-dependent; the adapter accepted
+   the command (no "set_break unsupported" log) but that does not guarantee the
+   ECU detected a break. Relying on it alone was the wrong bet for a real-car
+   flash.
+
+**Fix** (`src/protocol.rs`, this session):
+- The `wake_kline` drain read now matches `ErrorKind::TimedOut` and treats it
+  as "no more data" (break out of the drain) instead of propagating it. The
+  retry IDENT in `begin_flash_session` now actually runs.
+- `Kline::port` is now `Option<Box<dyn SerialPort>>` and a new
+  `Kline::reopen_port()` closes the port (all fds → line-down) and reopens it
+  fresh at the current baud (line-up) — the proven reconnect wake. `wake_kline`
+  calls it after the best-effort `set_break`. A `baud` field is kept so the
+  reopen uses the current rate; `set_baud` / `recover_link_for` update it.
+- Regression test `protocol::tests::wake_kline_succeeds_and_port_stays_usable`
+  opens a `Kline` on a libc pty and asserts `wake_kline()` returns `Ok` on an
+  empty line (the old code failed it with exactly `Operation timed out`).
+
+### 35.4 The wake ran too late — and `set_break` is gone
+
+Even with the 35.3 fix (the retry IDENT now runs), the car logs
+(`captures/dde3-20261123-200017.log`) show the bootstrap IDENT failing
+*before* the wake could help: `begin_flash_session` sent the IDENT first and
+only called `wake_kline()` **after** it timed out. The tell is that the IDENT
+fails even **~2 s after a fresh connect** (20:01:30 connect, 20:01:33 write
+IDENT no reply) — far too soon for a 20 s sleep, so the module re-sleeps
+*between* transactions and only a fresh line pulse wakes it. Sending the
+IDENT on a stale line and waking after the fact can never succeed on the first
+try.
+
+**Fix** (`src/protocol.rs`, this session):
+- `begin_flash_session()` now calls `wake_kline()` **before** the bootstrap
+  IDENT (not after a failure), so the IDENT goes out on a freshly-woken line
+  — the same fresh-open wake the connect gets for free from `Kline::open`.
+- `wake_kline()` no longer calls `set_break()`/`clear_break()`: it is
+  adapter-dependent, was never the proven wake, and can leave the line
+  dominant if `clear_break` is unsupported (which would itself block the
+  reply). The port **reopen** (close → line-down, open → line-up) *is* the
+  wake; the `set_break` nudge is dropped. The 35.3 drain-read timeout handling
+  is unchanged and still required (the drain runs after every reopen).
