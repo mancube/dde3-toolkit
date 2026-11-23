@@ -823,6 +823,51 @@ The branch was merged to `main` via PR #2 and shipped as **v0.5**
 (`scripts/release.sh 0.5`, tag `v0.5`, Gitea release with the linux binary
 + .sha256).
 
+### Session 45 (2026-11-23) — live/logger presets + Live view modes (branch `feature/live-presets-views`)
+
+User request (on a dedicated branch, main untouched): presets for the
+variable selections — remember the last session, plus named presets
+(create / rename / delete) — and more Live-data display options beyond the
+single graph.
+
+Design (user decisions, asked via questionnaire):
+- **Presets are variable sets only**, shared by both tabs. The **Value
+  logger** keeps its own selection (labels with changing values, unchanged
+  behaviour); the **Live** tab has its own selection **and** a view-mode
+  setting, and can adopt the same presets for parameter selection. The two
+  selections are **separate** (previously one shared `live_enabled` vec —
+  now `live_enabled` + `logger_enabled`).
+- **Four Live view modes** (toolbar buttons, persisted): **Line** (the old
+  graph card), **Labels** (plain name/value/unit rows, two columns on wide
+  windows), **Gauges** (in-car style 240° arc gauges, auto-scaled over the
+  recent history window, needle + value), **Cards** (the original
+  sparkline cards — the old default look).
+- Storage: `~/.config/dde3-toolkit/presets.json` (`$DDE3_CONFIG` >
+  `$XDG_CONFIG_HOME/dde3-toolkit` > `~/.config/...`), one file with the
+  named presets + both selections + view mode, stored as **ADF ids**
+  (stable across `live.rs` regeneration), saved on every change
+  (selection, view mode, preset ops). Load is tolerant: unknown ids
+  dropped, corrupt file → defaults.
+
+Implementation:
+- New `src/presets.rs` (`Preset`, `Settings`, `LiveView`,
+  `load`/`save`, `ids_to_enabled`/`enabled_to_ids` + 5 tests).
+- `src/app.rs`: `PickerTarget {Logger, Live}` replaces the single
+  `show_var_picker` bool — the picker window is now per-tab ("Logger
+  variables" / "Live variables") with a preset row (combo + Apply /
+  Save as… / Rename… / Delete, inline name dialog, duplicate names
+  refused); `show_graph` → `live_view: LiveView`; new `labels_card` /
+  `gauges_grid` / `gauge_card` / `arc_points` renderers (egui 0.31 has no
+  arc primitive — arcs are polylines, ~5°/segment); `start_live` polls the
+  **union** of both selections while logging (the CSV writer filters to
+  its own ids); `save_session()` persists on change; `apply_selection_change`
+  keeps the old "changes apply after logging stops" rule.
+- GUI smoke-tested via `--demo` (live tab, picker up, logger tab — no
+  panics). Tests: 93 passing (was 88), clippy clean.
+
+Open: on-desk visual pass of the four view modes + preset CRUD with the
+user; merge to main when satisfied.
+
 ## ← CURRENT TASK (take over from here)
 
 **MPPS-style calibration write (sessions 41–43) — on-car re-verification of

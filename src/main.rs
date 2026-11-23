@@ -17,6 +17,7 @@ mod checksum;
 mod dtc;
 mod live;
 mod patches;
+mod presets;
 mod protocol;
 mod respond;
 mod sim;
