@@ -454,3 +454,35 @@ try.
   reply). The port **reopen** (close → line-down, open → line-up) *is* the
   wake; the `set_break` nudge is dropped. The 35.3 drain-read timeout handling
   is unchanged and still required (the drain runs after every reopen).
+
+### 35.5 The real root cause: the bootstrap IDENT went out unpaced (no sleep)
+
+The 35.1 "sleep" theory is **not supported by the firmware decompilation** and
+the idle gaps in the logs (16 s, 2 s, 13 s) are not consistent with a single
+sleep timeout. The actual regression is a **serial-timing change** introduced
+by the MPPS-speed pacing commit (`176774e`):
+
+- `start_write_cal` / `start_write` now call `set_write_delay(0)` for the
+  **entire** write, and `write_calibration` / `write_full` set it again at the
+  top. So the **bootstrap IDENT** (and UPROG_EIN, AIF, seed/key, DTC prep,
+  write-end, erase, DIAGNOSE_ENDE) all went out **unpaced (bulk `write_all`)**
+  for the first time. In the working v0.4.1 build the IDENT went out at
+  **3 ms/byte** and answered in 473–516 ms.
+- The MPPS reference capture
+  (`captures/mpps capture/mppswrite.txt`) confirms the intended split: the
+  **data frames** (`FLASH_SCHREIBEN`, 236 B) run **~327 ms/frame back-to-back**
+  (245 ms wire + ~80 ms reply — a 3 ms/byte pace would be ~710 ms/frame, so
+  they are definitively unpaced), while the **bootstrap commands** are small
+  frames sent at the normal cadence. MPPS finishes a 32 KB cal in ~50 s
+  precisely because only the data frames are unpaced.
+
+**Fix** (`src/protocol.rs`, this session): `write_calibration` / `write_full`
+now set `write_delay` per phase — **3 ms/byte** for the bootstrap and
+session-control commands (IDENT, UPROG_EIN, AIF, seed/key, DTC prep,
+write-end, erase, DIAGNOSE_ENDE), and **`data_delay_ms` (0)** only around the
+`write_block` data-frame loop. The 35.4 pre-IDENT wake is kept as a
+belt-and-braces line refresh, but the pacing is the actual fix.
+
+**On-car re-verification pending:** one more `write-cal` — the bootstrap IDENT
+should now succeed (paced, as in v0.4.1), and the data frames should run at
+~327 ms/frame (MPPS parity).

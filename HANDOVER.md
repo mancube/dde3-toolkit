@@ -926,10 +926,28 @@ freshly-woken line, the same fresh-open wake the connect gets from
 `clear_break` is unsupported) — the port **reopen** (close → line-down,
 open → line-up) *is* the wake. Docs: `docs/wire-protocol.md` §35.4.
 
+**Root cause (same session, §35.5) — it was not a sleep.** The 35.1 sleep
+theory is not supported by the firmware decompilation, and the log idle gaps
+(16 s, 2 s, 13 s) don't fit a single sleep timeout. The real regression is a
+**serial-timing change** from the MPPS-speed pacing commit (`176774e`):
+`start_write_cal` / `start_write` now call `set_write_delay(0)` for the
+**entire** write, so the **bootstrap IDENT** (and UPROG_EIN, AIF, seed/key,
+DTC prep, write-end, erase, DIAGNOSE_ENDE) all went out **unpaced (bulk)** for
+the first time. In the working v0.4.1 build the IDENT went out at **3 ms/byte**
+and answered in 473–516 ms. The MPPS reference capture confirms the intended
+split: the **data frames** run ~327 ms/frame back-to-back (unpaced — a 3 ms/byte
+pace would be ~710 ms/frame), while the **bootstrap commands** are small frames
+at the normal cadence. MPPS finishes a 32 KB cal in ~50 s precisely because
+only the data frames are unpaced. Now fixed: `write_calibration` / `write_full`
+set `write_delay` per phase — **3 ms/byte** for the bootstrap and session-
+control commands, **0** only around the `write_block` data-frame loop. The 35.4
+pre-IDENT wake is kept as a belt-and-braces line refresh, but the pacing is the
+actual fix. Docs: `docs/wire-protocol.md` §35.5.
+
 **On-car re-verification pending:** one more `write-cal` — the bootstrap IDENT
-should now succeed on the first try (it goes out on a freshly-woken line), so
-the log should show `TX 12 04 00 16` → `RX 12 2E A0 …` with **no**
-"IDENT no reply" line at all.
+should now succeed (paced, as in v0.4.1), and the data frames should run at
+~327 ms/frame (MPPS parity). The log should show `TX 12 04 00 16` →
+`RX 12 2E A0 …` with **no** "IDENT no reply" line.
 
 ## ← CURRENT TASK (take over from here)
 
@@ -940,20 +958,25 @@ DTC read+clear prep (also before reads). It ran to completion on the real car
 (session 43, car started afterwards), but at the old 3 ms/byte pacing and only
 after a manual reconnect fixed the slept K-line. Session 43 added: unpaced
 (0 ms/byte) data frames — MPPS parity, expect ~330–350 ms/frame — and the
-self-healing bootstrap. **Session 46 fixed the broken wake in two passes**
-(wire-protocol §35.3–35.4): (1) `wake_kline`'s drain read no longer turns the
-port's 10 ms soft timeout into a hard "Operation timed out" error, and it does
-a real port close+open (`reopen_port()`, the proven reconnect wake); (2) the
-wake now runs **before** the bootstrap IDENT (not after it timed out), so the
-IDENT goes out on a freshly-woken line — the car logs showed the IDENT failing
-even ~2 s after a fresh connect, so the module re-sleeps between transactions
-and only a fresh line pulse wakes it. `set_break` is dropped (adapter-
-dependent, never the proven wake). Next on-car: `dde3-toolkit write-cal
-<cal.bin> --port /dev/ttyUSB1`; confirm in the log
-(`tools/analyze_realcar_write.py`) that the bootstrap IDENT **succeeds on the
-first try** (`TX 12 04 00 16` → `RX 12 2E A0 …`, no "IDENT no reply" line).
-The 224-B size is proven by the MPPS capture (wire-protocol §33); §32's 192-B
-rejection was the *program* area, a different case.
+self-healing bootstrap. **Session 46 found the real root cause was not a
+sleep but a serial-timing regression** (wire-protocol §35.3–35.5): the
+MPPS-speed pacing commit (`176774e`) made `start_write_cal` / `start_write`
+call `set_write_delay(0)` for the **entire** write, so the **bootstrap IDENT**
+(and UPROG_EIN, AIF, seed/key, DTC prep, write-end, erase, DIAGNOSE_ENDE) all
+went out **unpaced (bulk)** for the first time — in the working v0.4.1 build
+the IDENT went out at 3 ms/byte and answered in 473–516 ms. The MPPS reference
+confirms the intended split: only the **data frames** are unpaced (~327 ms/frame
+back-to-back; a 3 ms/byte pace would be ~710 ms/frame), the bootstrap commands
+are paced. Now fixed: `write_calibration` / `write_full` set `write_delay` per
+phase — 3 ms/byte for the bootstrap and session-control commands, 0 only around
+the `write_block` data-frame loop. (The §35.3 drain-timeout fix and §35.4
+pre-IDENT wake are kept as belt-and-braces, but the pacing is the actual fix.)
+Next on-car: `dde3-toolkit write-cal <cal.bin> --port /dev/ttyUSB1`; confirm in
+the log (`tools/analyze_realcar_write.py`) that the bootstrap IDENT **succeeds
+on the first try** (`TX 12 04 00 16` → `RX 12 2E A0 …`, no "IDENT no reply"
+line) and the data frames run at ~327 ms/frame (MPPS parity). The 224-B size is
+proven by the MPPS capture (wire-protocol §33); §32's 192-B rejection was the
+*program* area, a different case.
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU
 OKAYed two 192-byte write blocks, then hung on the third (no reply, no

@@ -1347,7 +1347,14 @@ impl Kline {
         if image.len() != IMAGE_SIZE {
             bail!("image must be exactly 256 KB");
         }
-        self.set_write_delay(data_delay_ms);
+        // The bootstrap / session-control commands (IDENT, UPROG_EIN, AIF,
+        // seed/key, DTC prep, erase, DIAGNOSE_ENDE) are "regular commands" —
+        // send them with the normal per-byte pacing (3 ms/byte), the way the
+        // working v0.4.1 did. v0.5 set write_delay 0 for the whole write, so
+        // the bootstrap IDENT went out unpaced (bulk) for the first time and
+        // the ECU dropped it. Only the flash DATA frames go unpaced (MPPS
+        // sends them back-to-back to finish in ~50 s).
+        self.set_write_delay(3);
         let region_len = IMAGE_SIZE - FLASH_WRITE_START;
         let mut done = 0usize;
         // The two Galletto phases: program area, then calibration area. The
@@ -1361,6 +1368,8 @@ impl Kline {
             dtc_prep = false;
             self.erase_flash(start as u32, 0x00)?;
             thread::sleep(Duration::from_millis(100));
+            // Data frames: unpaced (bulk write), MPPS parity.
+            self.set_write_delay(data_delay_ms);
             for off in (start..end).step_by(WRITE_BLOCK) {
                 let len = WRITE_BLOCK.min(end - off);
                 self.write_block(off as u32, &image[off..off + len])?;
@@ -1368,7 +1377,8 @@ impl Kline {
                 progress(done, region_len);
             }
             // Close the session — Galletto sends no `07 0F` write-end, just
-            // DIAGNOSE_ENDE.
+            // DIAGNOSE_ENDE. Regular command — back to pacing.
+            self.set_write_delay(3);
             self.request_filtered(
                 &frame_diagnose_ende(),
                 Duration::from_secs(10),
@@ -1398,7 +1408,14 @@ impl Kline {
         if image.len() != CAL_LEN {
             bail!("calibration image must be exactly 32 KB");
         }
-        self.set_write_delay(data_delay_ms);
+        // The bootstrap / session-control commands (IDENT, UPROG_EIN, AIF,
+        // seed/key, DTC prep, write-end, erase, DIAGNOSE_ENDE) are "regular
+        // commands" — send them with the normal per-byte pacing (3 ms/byte),
+        // the way the working v0.4.1 did. v0.5 set write_delay 0 for the whole
+        // write, so the bootstrap IDENT went out unpaced (bulk) for the first
+        // time and the ECU dropped it. Only the flash DATA frames go unpaced
+        // (MPPS sends them back-to-back to finish a 32 KB cal in ~50 s).
+        self.set_write_delay(3);
         // Full flasher session (MPPS-style: DTC read/clear before unlock).
         self.begin_flash_session(true)?;
         // MPPS calibration-write preamble: send the write-end (07 0F) once at
@@ -1410,6 +1427,8 @@ impl Kline {
         )?;
         self.erase_flash(CAL_START as u32, 0x00)?;
         thread::sleep(Duration::from_millis(100));
+        // Data frames: unpaced (bulk write), MPPS parity (~327 ms/frame).
+        self.set_write_delay(data_delay_ms);
         // MPPS block size: 224-byte blocks + a trailing remainder block
         // (146×224 + 1×64 for the 32 KB calibration).
         let mut done = 0usize;
@@ -1419,6 +1438,8 @@ impl Kline {
             done += len;
             progress(done, CAL_LEN);
         }
+        // DIAGNOSE_ENDE is a regular command — back to pacing.
+        self.set_write_delay(3);
         // Keep the end-of-write signal (harmless; matches Galletto). MPPS
         // omits it, but it is not needed to be removed.
         self.request_filtered(
