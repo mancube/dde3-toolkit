@@ -940,9 +940,9 @@ pace would be ~710 ms/frame), while the **bootstrap commands** are small frames
 at the normal cadence. MPPS finishes a 32 KB cal in ~50 s precisely because
 only the data frames are unpaced. Now fixed: `write_calibration` / `write_full`
 set `write_delay` per phase — **3 ms/byte** for the bootstrap and session-
-control commands, **0** only around the `write_block` data-frame loop. The 35.4
-pre-IDENT wake is kept as a belt-and-braces line refresh, but the pacing is the
-actual fix. Docs: `docs/wire-protocol.md` §35.5.
+control commands, **0** only around the `write_block` data-frame loop. The
+§35.4 pre-IDENT wake was subsequently **dropped entirely** (wire-protocol
+§35.6) — pacing is the only fix. Docs: `docs/wire-protocol.md` §35.5–35.6.
 
 **On-car re-verification pending:** one more `write-cal` — the bootstrap IDENT
 should now succeed (paced, as in v0.4.1), and the data frames should run at
@@ -970,7 +970,8 @@ back-to-back; a 3 ms/byte pace would be ~710 ms/frame), the bootstrap commands
 are paced. Now fixed: `write_calibration` / `write_full` set `write_delay` per
 phase — 3 ms/byte for the bootstrap and session-control commands, 0 only around
 the `write_block` data-frame loop. (The §35.3 drain-timeout fix and §35.4
-pre-IDENT wake are kept as belt-and-braces, but the pacing is the actual fix.)
+pre-IDENT wake were subsequently **dropped entirely** — wire-protocol §35.6 —
+since pacing is the only real fix.)
 Next on-car: `dde3-toolkit write-cal <cal.bin> --port /dev/ttyUSB1`; confirm in
 the log (`tools/analyze_realcar_write.py`) that the bootstrap IDENT **succeeds
 on the first try** (`TX 12 04 00 16` → `RX 12 2E A0 …`, no "IDENT no reply"

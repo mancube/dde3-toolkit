@@ -390,6 +390,11 @@ DIAGNOSE_ENDE 64 ms, SCHREIBEN reply ~50–100 ms after the last TX byte.
 
 ### 35.3 The v0.5 wake fix was itself broken — the retry never ran
 
+> **Superseded** — the `wake_kline` / `reopen_port` / `baud`-field /
+> `Option`-port machinery described here (and in §35.4) was later **removed
+> entirely** once §35.5 showed pacing was the real fix. See §35.6. Kept for
+> the record.
+
 The 35.1 fix shipped in v0.5 (commit `176774e`) but the calibration write
 still failed on the car (`captures/dde3-20261123-200017.log`,
 `…-200207.log`). The logs show the tell-tale sequence:
@@ -433,6 +438,8 @@ Two things were wrong:
   empty line (the old code failed it with exactly `Operation timed out`).
 
 ### 35.4 The wake ran too late — and `set_break` is gone
+
+> **Superseded** — `wake_kline` no longer exists; see §35.6.
 
 Even with the 35.3 fix (the retry IDENT now runs), the car logs
 (`captures/dde3-20261123-200017.log`) show the bootstrap IDENT failing
@@ -480,9 +487,29 @@ by the MPPS-speed pacing commit (`176774e`):
 now set `write_delay` per phase — **3 ms/byte** for the bootstrap and
 session-control commands (IDENT, UPROG_EIN, AIF, seed/key, DTC prep,
 write-end, erase, DIAGNOSE_ENDE), and **`data_delay_ms` (0)** only around the
-`write_block` data-frame loop. The 35.4 pre-IDENT wake is kept as a
-belt-and-braces line refresh, but the pacing is the actual fix.
+`write_block` data-frame loop. This matches MPPS exactly and is the actual fix.
 
 **On-car re-verification pending:** one more `write-cal` — the bootstrap IDENT
 should now succeed (paced, as in v0.4.1), and the data frames should run at
 ~327 ms/frame (MPPS parity).
+
+### 35.6 The wake mechanism was dropped entirely
+
+With §35.5 identifying pacing as the real fix, the port-reopen wake was
+removed in full — it was a heavy close+open on every write, for a problem (the
+"sleep") that the firmware decompilation does not support. Removed:
+
+- `Kline::wake_kline()` and `Kline::reopen_port()` — gone.
+- `Kline::port` reverted to `Box<dyn SerialPort>` (no longer `Option`); the
+  `baud` field and the `serial()` accessor are gone.
+- `begin_flash_session()` sends the bootstrap IDENT directly (no pre-IDENT
+  wake call).
+- The `protocol::tests::wake_kline_succeeds_and_port_stays_usable` pty
+  regression test is gone.
+
+The connect still gets a fresh-open wake for free from `Kline::open` (the
+port is opened once at connect), and the paced bootstrap IDENT is the same
+frame v0.4.1 sent successfully. If a paced IDENT ever times out on the car,
+the line-state question comes back — but the v0.4.1→v0.5 delta isolates
+pacing as the only thing that changed for the IDENT, so that is the fix to
+verify first.
