@@ -5,7 +5,10 @@
 //!
 //! These are the measurement values the ECU actually exposes for live
 //! data and value logging. Telegram: `12 05 0B 10 <id_hi> <id_lo>`.
-//! Scaling: physical = raw * factor + offset.
+//! Scaling: physical = raw * factor + offset. Variables with
+//! `signed: true` (ADF DATA_TYPE 7) are two's-complement i16 on the
+//! wire — the ECU reports them signed (e.g. SB injection start);
+//! the rest are unsigned u16.
 
 #[derive(Clone)]
 pub struct LiveVar {
@@ -14,102 +17,115 @@ pub struct LiveVar {
     pub id: u16,
     pub factor: f64,
     pub offset: f64,
+    pub signed: bool,
     pub group: &'static str,
     pub default_on: bool,
+}
+
+impl LiveVar {
+    /// Decode a raw 16-bit ECU value to the physical value
+    /// (`raw * factor + offset`), sign-extending i16 variables first.
+    pub fn decode(&self, raw: u16) -> f64 {
+        let v = if self.signed { raw as i16 as f64 } else { raw as f64 };
+        v * self.factor + self.offset
+    }
 }
 
 // 81 ADF variables.
 pub const LIVE_VARS: &[LiveVar] = &[
     // Injection
-    LiveVar { name: "N Idle speed setpoint", unit: "1/min", id: 0x0E02, factor: 1.0, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "V Target speed for diagnosis", unit: "km/h", id: 0x0F09, factor: 1.0, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E Current injection quantity (without ARD)", unit: "mg/Hub", id: 0x0F80, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E Resulting start quantity setpoint", unit: "mg/Hub", id: 0x0F82, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "PWG Filtered accelerator pedal position", unit: "%", id: 0x0F83, factor: 0.01, offset: 0.0, group: "Injection", default_on: true },
-    LiveVar { name: "M_E Desired quantity = f(PWG) from driving behavior map", unit: "mg/Hub", id: 0x0F84, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E Desired quantity from FGR", unit: "mg/Hub", id: 0x0F85, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E Driver demand quantity from PWG or FGR", unit: "mg/Hub", id: 0x0F86, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E External torque intervention MSR", unit: "mg/Hub", id: 0x0F89, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E Resulting limit quantity", unit: "mg/Hub", id: 0x0F8A, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E Driver demand quantity after external quantity intervention", unit: "mg/Hub", id: 0x0F8B, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E Injection quantity after ARD", unit: "mg/Hub", id: 0x0F8C, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E Quantity from idle control", unit: "mg/Hub", id: 0x0F8D, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E Calibration value for start quantity correction", unit: "mg/Hub", id: 0x0F94, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "F_ME Calibration factor for limit quantity", unit: "-", id: 0x0F95, factor: 0.0001, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "External switch to limit class", unit: "-", id: 0x0F96, factor: 1.0, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "Uncorrected pump quantity", unit: "mg/Hub", id: 0x0F97, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "Nozzle correction quantity", unit: "mg/Hub", id: 0x0F98, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E Target quantity before monitoring", unit: "mg/Hub", id: 0x0F99, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E Target quantity to PSG", unit: "mg/Hub", id: 0x0F9A, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "Quantity correction map deviation", unit: "-", id: 0x0F9B, factor: 0.00391, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E Pre-injection quantity", unit: "mg/Hub", id: 0x0F9C, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
-    LiveVar { name: "M_E Limited calibration quantity", unit: "mg/Hub", id: 0x1F8E, factor: 0.01, offset: 0.0, group: "Injection", default_on: false },
+    LiveVar { name: "N Idle speed setpoint", unit: "1/min", id: 0x0E02, factor: 1.0, offset: 0.0, signed: false, group: "Injection", default_on: false },
+    LiveVar { name: "V Target speed for diagnosis", unit: "km/h", id: 0x0F09, factor: 1.0, offset: 0.0, signed: false, group: "Injection", default_on: false },
+    LiveVar { name: "M_E Current injection quantity (without ARD)", unit: "mg/Hub", id: 0x0F80, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "M_E Resulting start quantity setpoint", unit: "mg/Hub", id: 0x0F82, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "PWG Filtered accelerator pedal position", unit: "%", id: 0x0F83, factor: 0.01, offset: 0.0, signed: false, group: "Injection", default_on: true },
+    LiveVar { name: "M_E Desired quantity = f(PWG) from driving behavior map", unit: "mg/Hub", id: 0x0F84, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "M_E Desired quantity from FGR", unit: "mg/Hub", id: 0x0F85, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "M_E Driver demand quantity from PWG or FGR", unit: "mg/Hub", id: 0x0F86, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "M_E External torque intervention MSR", unit: "mg/Hub", id: 0x0F89, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "M_E Resulting limit quantity", unit: "mg/Hub", id: 0x0F8A, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "M_E Driver demand quantity after external quantity intervention", unit: "mg/Hub", id: 0x0F8B, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "M_E Injection quantity after ARD", unit: "mg/Hub", id: 0x0F8C, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "M_E Quantity from idle control", unit: "mg/Hub", id: 0x0F8D, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "M_E Calibration value for start quantity correction", unit: "mg/Hub", id: 0x0F94, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "F_ME Calibration factor for limit quantity", unit: "-", id: 0x0F95, factor: 0.0001, offset: 0.0, signed: false, group: "Injection", default_on: false },
+    LiveVar { name: "External switch to limit class", unit: "-", id: 0x0F96, factor: 1.0, offset: 0.0, signed: false, group: "Injection", default_on: false },
+    LiveVar { name: "Uncorrected pump quantity", unit: "mg/Hub", id: 0x0F97, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "Nozzle correction quantity", unit: "mg/Hub", id: 0x0F98, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "M_E Target quantity before monitoring", unit: "mg/Hub", id: 0x0F99, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "M_E Target quantity to PSG", unit: "mg/Hub", id: 0x0F9A, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "Quantity correction map deviation", unit: "-", id: 0x0F9B, factor: 0.00391, offset: 0.0, signed: false, group: "Injection", default_on: false },
+    LiveVar { name: "M_E Pre-injection quantity", unit: "mg/Hub", id: 0x0F9C, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
+    LiveVar { name: "M_E Limited calibration quantity", unit: "mg/Hub", id: 0x1F8E, factor: 0.01, offset: 0.0, signed: true, group: "Injection", default_on: false },
     // Engine
-    LiveVar { name: "Idle speed increase when AC compressor is on", unit: "1/min", id: 0x0E05, factor: 1.0, offset: 0.0, group: "Engine", default_on: false },
-    LiveVar { name: "Speed referenced to camshaft (PSG speed)", unit: "1/min NW", id: 0x0E10, factor: 1.0, offset: 0.0, group: "Engine", default_on: false },
-    LiveVar { name: "Pump temperature", unit: "Grad C", id: 0x0E11, factor: 0.1, offset: -273.14, group: "Engine", default_on: false },
-    LiveVar { name: "PSG status word", unit: "-", id: 0x0E12, factor: 1.0, offset: 0.0, group: "Engine", default_on: false },
-    LiveVar { name: "PSG self-test result", unit: "-", id: 0x0E13, factor: 1.0, offset: 0.0, group: "Engine", default_on: false },
-    LiveVar { name: "Actuation duration MV final stage", unit: "Grad NW", id: 0x0E14, factor: 0.01, offset: 0.0, group: "Engine", default_on: false },
-    LiveVar { name: "Customer service response 1", unit: "-", id: 0x0E15, factor: 1.0, offset: 0.0, group: "Engine", default_on: false },
-    LiveVar { name: "Customer service response 2", unit: "-", id: 0x0E17, factor: 1.0, offset: 0.0, group: "Engine", default_on: false },
-    LiveVar { name: "Customer service response 3", unit: "-", id: 0x0E18, factor: 1.0, offset: 0.0, group: "Engine", default_on: false },
-    LiveVar { name: "Customer service response 4", unit: "-", id: 0x0E19, factor: 1.0, offset: 0.0, group: "Engine", default_on: false },
-    LiveVar { name: "N Engine speed (simple average)", unit: "1/min", id: 0x0F10, factor: 1.0, offset: 0.0, group: "Engine", default_on: true },
-    LiveVar { name: "N Engine speed from secondary sensor", unit: "1/min", id: 0x0F11, factor: 1.0, offset: 0.0, group: "Engine", default_on: false },
+    LiveVar { name: "Idle speed increase when AC compressor is on", unit: "1/min", id: 0x0E05, factor: 1.0, offset: 0.0, signed: false, group: "Engine", default_on: false },
+    LiveVar { name: "Speed referenced to camshaft (PSG speed)", unit: "1/min NW", id: 0x0E10, factor: 1.0, offset: 0.0, signed: false, group: "Engine", default_on: false },
+    LiveVar { name: "Pump temperature", unit: "Grad C", id: 0x0E11, factor: 0.1, offset: -273.14, signed: false, group: "Engine", default_on: false },
+    LiveVar { name: "PSG status word", unit: "-", id: 0x0E12, factor: 1.0, offset: 0.0, signed: false, group: "Engine", default_on: false },
+    LiveVar { name: "PSG self-test result", unit: "-", id: 0x0E13, factor: 1.0, offset: 0.0, signed: false, group: "Engine", default_on: false },
+    LiveVar { name: "Actuation duration MV final stage", unit: "Grad NW", id: 0x0E14, factor: 0.01, offset: 0.0, signed: false, group: "Engine", default_on: false },
+    LiveVar { name: "Customer service response 1", unit: "-", id: 0x0E15, factor: 1.0, offset: 0.0, signed: false, group: "Engine", default_on: false },
+    LiveVar { name: "Customer service response 2", unit: "-", id: 0x0E17, factor: 1.0, offset: 0.0, signed: false, group: "Engine", default_on: false },
+    LiveVar { name: "Customer service response 3", unit: "-", id: 0x0E18, factor: 1.0, offset: 0.0, signed: false, group: "Engine", default_on: false },
+    LiveVar { name: "Customer service response 4", unit: "-", id: 0x0E19, factor: 1.0, offset: 0.0, signed: false, group: "Engine", default_on: false },
+    LiveVar { name: "N Engine speed (simple average)", unit: "1/min", id: 0x0F10, factor: 1.0, offset: 0.0, signed: false, group: "Engine", default_on: true },
+    LiveVar { name: "N Engine speed from secondary sensor", unit: "1/min", id: 0x0F11, factor: 1.0, offset: 0.0, signed: false, group: "Engine", default_on: false },
     // Actuators
-    LiveVar { name: "TV Actuation ARF actuator", unit: "%", id: 0x0E80, factor: 0.01, offset: 0.0, group: "Actuators", default_on: false },
-    LiveVar { name: "TV Actuation boost pressure actuator", unit: "%", id: 0x0E81, factor: 0.01, offset: 0.0, group: "Actuators", default_on: false },
-    LiveVar { name: "TV Actuation glow relay actuator", unit: "%", id: 0x0E87, factor: 0.01, offset: 0.0, group: "Actuators", default_on: false },
-    LiveVar { name: "TV Actuation - pre-supply pump", unit: "%", id: 0x0E91, factor: 0.01, offset: 0.0, group: "Actuators", default_on: false },
-    LiveVar { name: "TV Actuation - engine mount", unit: "%", id: 0x0E93, factor: 0.01, offset: 0.0, group: "Actuators", default_on: false },
-    LiveVar { name: "TV Actuation glow indicator", unit: "%", id: 0x0E94, factor: 0.01, offset: 0.0, group: "Actuators", default_on: false },
-    LiveVar { name: "TV Actuation diagnostic lamp", unit: "%", id: 0x0E96, factor: 0.01, offset: 0.0, group: "Actuators", default_on: false },
-    LiveVar { name: "TV Actuation electric engine fan", unit: "%", id: 0x0E98, factor: 0.01, offset: 0.0, group: "Actuators", default_on: false },
-    LiveVar { name: "TV Actuation AC compressor", unit: "%", id: 0x0E99, factor: 0.01, offset: 0.0, group: "Actuators", default_on: false },
-    LiveVar { name: "TV Actuation exhaust flap control", unit: "%", id: 0x0E9A, factor: 0.01, offset: 0.0, group: "Actuators", default_on: false },
-    LiveVar { name: "TV Actuation - coolant heater", unit: "%", id: 0x0E9B, factor: 0.01, offset: 0.0, group: "Actuators", default_on: false },
+    LiveVar { name: "TV Actuation ARF actuator", unit: "%", id: 0x0E80, factor: 0.01, offset: 0.0, signed: false, group: "Actuators", default_on: false },
+    LiveVar { name: "TV Actuation boost pressure actuator", unit: "%", id: 0x0E81, factor: 0.01, offset: 0.0, signed: false, group: "Actuators", default_on: false },
+    LiveVar { name: "TV Actuation glow relay actuator", unit: "%", id: 0x0E87, factor: 0.01, offset: 0.0, signed: false, group: "Actuators", default_on: false },
+    LiveVar { name: "TV Actuation - pre-supply pump", unit: "%", id: 0x0E91, factor: 0.01, offset: 0.0, signed: false, group: "Actuators", default_on: false },
+    LiveVar { name: "TV Actuation - engine mount", unit: "%", id: 0x0E93, factor: 0.01, offset: 0.0, signed: false, group: "Actuators", default_on: false },
+    LiveVar { name: "TV Actuation glow indicator", unit: "%", id: 0x0E94, factor: 0.01, offset: 0.0, signed: false, group: "Actuators", default_on: false },
+    LiveVar { name: "TV Actuation diagnostic lamp", unit: "%", id: 0x0E96, factor: 0.01, offset: 0.0, signed: false, group: "Actuators", default_on: false },
+    LiveVar { name: "TV Actuation electric engine fan", unit: "%", id: 0x0E98, factor: 0.01, offset: 0.0, signed: false, group: "Actuators", default_on: false },
+    LiveVar { name: "TV Actuation AC compressor", unit: "%", id: 0x0E99, factor: 0.01, offset: 0.0, signed: false, group: "Actuators", default_on: false },
+    LiveVar { name: "TV Actuation exhaust flap control", unit: "%", id: 0x0E9A, factor: 0.01, offset: 0.0, signed: false, group: "Actuators", default_on: false },
+    LiveVar { name: "TV Actuation - coolant heater", unit: "%", id: 0x0E9B, factor: 0.01, offset: 0.0, signed: false, group: "Actuators", default_on: false },
     // Air & boost
-    LiveVar { name: "M_L Current air mass", unit: "mg/Hub Luft", id: 0x0F30, factor: 0.1, offset: 0.0, group: "Air & boost", default_on: false },
-    LiveVar { name: "M_L Setpoint for ARF control", unit: "mg/Hub Luft", id: 0x0F32, factor: 0.1, offset: 0.0, group: "Air & boost", default_on: false },
-    LiveVar { name: "P_L Temperature-corrected boost pressure", unit: "hPa", id: 0x0F33, factor: 1.0, offset: 0.0, group: "Air & boost", default_on: false },
-    LiveVar { name: "P_L Boost pressure setpoint", unit: "hPa", id: 0x0F34, factor: 1.0, offset: 0.0, group: "Air & boost", default_on: false },
-    LiveVar { name: "P_L Current boost pressure (filtered) / air pressure", unit: "hPa", id: 0x0F40, factor: 1.0, offset: 0.0, group: "Air & boost", default_on: true },
-    LiveVar { name: "P_ADF Current atmospheric pressure (from ADF or LDF)", unit: "hPa", id: 0x0F41, factor: 1.0, offset: 0.0, group: "Air & boost", default_on: false },
-    LiveVar { name: "Status boost pressure regulation", unit: "-", id: 0x0F45, factor: 1.0, offset: 0.0, group: "Air & boost", default_on: false },
+    LiveVar { name: "M_L Current air mass", unit: "mg/Hub Luft", id: 0x0F30, factor: 0.1, offset: 0.0, signed: false, group: "Air & boost", default_on: false },
+    LiveVar { name: "M_L Setpoint for ARF control", unit: "mg/Hub Luft", id: 0x0F32, factor: 0.1, offset: 0.0, signed: false, group: "Air & boost", default_on: false },
+    LiveVar { name: "P_L Temperature-corrected boost pressure", unit: "hPa", id: 0x0F33, factor: 1.0, offset: 0.0, signed: false, group: "Air & boost", default_on: false },
+    LiveVar { name: "P_L Boost pressure setpoint", unit: "hPa", id: 0x0F34, factor: 1.0, offset: 0.0, signed: false, group: "Air & boost", default_on: false },
+    LiveVar { name: "P_L Current boost pressure (filtered) / air pressure", unit: "hPa", id: 0x0F40, factor: 1.0, offset: 0.0, signed: false, group: "Air & boost", default_on: true },
+    LiveVar { name: "P_ADF Current atmospheric pressure (from ADF or LDF)", unit: "hPa", id: 0x0F41, factor: 1.0, offset: 0.0, signed: false, group: "Air & boost", default_on: false },
+    LiveVar { name: "Status boost pressure regulation", unit: "-", id: 0x0F45, factor: 1.0, offset: 0.0, signed: false, group: "Air & boost", default_on: false },
     // Sensors
-    LiveVar { name: "WTF Water temperature", unit: "Grad C", id: 0x0F00, factor: 0.1, offset: -273.14, group: "Sensors", default_on: true },
-    LiveVar { name: "PWG Accelerator pedal position (unfiltered)", unit: "%", id: 0x0F60, factor: 0.01, offset: 0.0, group: "Sensors", default_on: false },
-    LiveVar { name: "LMM Analog value air mass meter HFM", unit: "%", id: 0x0F61, factor: 0.01, offset: 0.0, group: "Sensors", default_on: false },
-    LiveVar { name: "LDF Boost / intake manifold pressure", unit: "hPa", id: 0x0F62, factor: 1.0, offset: 0.0, group: "Sensors", default_on: false },
-    LiveVar { name: "ADF Atmospheric pressure", unit: "hPa", id: 0x0F63, factor: 1.0, offset: 0.0, group: "Sensors", default_on: false },
-    LiveVar { name: "UBT Battery voltage", unit: "V", id: 0x0F65, factor: 0.02037243, offset: 0.0, group: "Sensors", default_on: true },
-    LiveVar { name: "U_NBF Voltage signal from NBF", unit: "mV", id: 0x0F66, factor: 53.37248, offset: 0.0, group: "Sensors", default_on: false },
-    LiveVar { name: "PWG Raw value accelerator pedal", unit: "mV", id: 0x0F67, factor: 1.0, offset: 0.0, group: "Sensors", default_on: false },
-    LiveVar { name: "URF Reference voltage", unit: "mV", id: 0x0F93, factor: 4.88759, offset: 0.0, group: "Sensors", default_on: false },
+    LiveVar { name: "WTF Water temperature", unit: "Grad C", id: 0x0F00, factor: 0.1, offset: -273.14, signed: false, group: "Sensors", default_on: true },
+    LiveVar { name: "PWG Accelerator pedal position (unfiltered)", unit: "%", id: 0x0F60, factor: 0.01, offset: 0.0, signed: false, group: "Sensors", default_on: false },
+    LiveVar { name: "LMM Analog value air mass meter HFM", unit: "%", id: 0x0F61, factor: 0.01, offset: 0.0, signed: false, group: "Sensors", default_on: false },
+    LiveVar { name: "LDF Boost / intake manifold pressure", unit: "hPa", id: 0x0F62, factor: 1.0, offset: 0.0, signed: false, group: "Sensors", default_on: false },
+    LiveVar { name: "ADF Atmospheric pressure", unit: "hPa", id: 0x0F63, factor: 1.0, offset: 0.0, signed: false, group: "Sensors", default_on: false },
+    LiveVar { name: "UBT Battery voltage", unit: "V", id: 0x0F65, factor: 0.02037243, offset: 0.0, signed: false, group: "Sensors", default_on: true },
+    LiveVar { name: "U_NBF Voltage signal from NBF", unit: "mV", id: 0x0F66, factor: 53.37248, offset: 0.0, signed: false, group: "Sensors", default_on: false },
+    LiveVar { name: "PWG Raw value accelerator pedal", unit: "mV", id: 0x0F67, factor: 1.0, offset: 0.0, signed: false, group: "Sensors", default_on: false },
+    LiveVar { name: "URF Reference voltage", unit: "mV", id: 0x0F93, factor: 4.88759, offset: 0.0, signed: false, group: "Sensors", default_on: false },
     // Speed
-    LiveVar { name: "V Current speed", unit: "km/h", id: 0x0F08, factor: 0.01, offset: 0.0, group: "Speed", default_on: false },
-    LiveVar { name: "Acceleration", unit: "m/s^2", id: 0x0F0A, factor: 0.08477, offset: 0.0, group: "Speed", default_on: false },
-    LiveVar { name: "V/N Current ratio of speed/engine speed", unit: "(km/h)/(1/min)", id: 0x0F0B, factor: 0.00004, offset: 0.0, group: "Speed", default_on: false },
+    LiveVar { name: "V Current speed", unit: "km/h", id: 0x0F08, factor: 0.01, offset: 0.0, signed: false, group: "Speed", default_on: false },
+    LiveVar { name: "Acceleration", unit: "m/s^2", id: 0x0F0A, factor: 0.08477, offset: 0.0, signed: true, group: "Speed", default_on: false },
+    LiveVar { name: "V/N Current ratio of speed/engine speed", unit: "(km/h)/(1/min)", id: 0x0F0B, factor: 0.00004, offset: 0.0, signed: false, group: "Speed", default_on: false },
     // Timing
-    LiveVar { name: "SB Injection start setpoint", unit: "Grad KW", id: 0x0F52, factor: 0.01, offset: 0.0, group: "Timing", default_on: false },
-    LiveVar { name: "SB Injection start actual value", unit: "Grad KW", id: 0x0F53, factor: 0.01, offset: 0.0, group: "Timing", default_on: false },
-    LiveVar { name: "T_W Water temperature for SBR", unit: "Grad C", id: 0x0F54, factor: 0.1, offset: -273.14, group: "Timing", default_on: false },
-    LiveVar { name: "SBR: PI controller output value", unit: "Grad KW", id: 0x0F57, factor: 0.01, offset: 0.0, group: "Timing", default_on: false },
+    LiveVar { name: "SB Injection start setpoint", unit: "Grad KW", id: 0x0F52, factor: 0.01, offset: 0.0, signed: true, group: "Timing", default_on: false },
+    LiveVar { name: "SB Injection start actual value", unit: "Grad KW", id: 0x0F53, factor: 0.01, offset: 0.0, signed: true, group: "Timing", default_on: false },
+    LiveVar { name: "T_W Water temperature for SBR", unit: "Grad C", id: 0x0F54, factor: 0.1, offset: -273.14, signed: false, group: "Timing", default_on: false },
+    LiveVar { name: "SBR: PI controller output value", unit: "Grad KW", id: 0x0F57, factor: 0.01, offset: 0.0, signed: true, group: "Timing", default_on: false },
     // Fuel
-    LiveVar { name: "FB-KW Target angle", unit: "Grad KW", id: 0x0F55, factor: 0.01, offset: 0.0, group: "Fuel", default_on: false },
-    LiveVar { name: "FB-NW Target angle", unit: "Grad NW", id: 0x0F56, factor: 0.01, offset: 0.0, group: "Fuel", default_on: false },
+    LiveVar { name: "FB-KW Target angle", unit: "Grad KW", id: 0x0F55, factor: 0.01, offset: 0.0, signed: false, group: "Fuel", default_on: false },
+    LiveVar { name: "FB-NW Target angle", unit: "Grad NW", id: 0x0F56, factor: 0.01, offset: 0.0, signed: false, group: "Fuel", default_on: false },
     // Digital
-    LiveVar { name: "Debounced logical states of digital inputs", unit: "-", id: 0x0F70, factor: 1.0, offset: 0.0, group: "Digital", default_on: false },
-    LiveVar { name: "Debounced logical states of digital inputs (high)", unit: "-", id: 0x0F71, factor: 1.0, offset: 0.0, group: "Digital", default_on: false },
-    LiveVar { name: "MFL and CAN digital inputs", unit: "-", id: 0x0F72, factor: 1.0, offset: 0.0, group: "Digital", default_on: false },
+    LiveVar { name: "Debounced logical states of digital inputs", unit: "-", id: 0x0F70, factor: 1.0, offset: 0.0, signed: false, group: "Digital", default_on: false },
+    LiveVar { name: "Debounced logical states of digital inputs (high)", unit: "-", id: 0x0F71, factor: 1.0, offset: 0.0, signed: false, group: "Digital", default_on: false },
+    LiveVar { name: "MFL and CAN digital inputs", unit: "-", id: 0x0F72, factor: 1.0, offset: 0.0, signed: false, group: "Digital", default_on: false },
     // Counters
-    LiveVar { name: "UB Current operating hours counter", unit: "h", id: 0xFFFE, factor: 0.1, offset: 0.0, group: "Counters", default_on: false },
+    LiveVar { name: "UB Current operating hours counter", unit: "h", id: 0xFFFE, factor: 0.1, offset: 0.0, signed: false, group: "Counters", default_on: false },
     // Misc
-    LiveVar { name: "Friction quantity after AC load torque compensation", unit: "mg/Hub", id: 0x0ECB, factor: 0.01, offset: 0.0, group: "Misc", default_on: false },
-    LiveVar { name: "Generator load", unit: "%", id: 0x0ECC, factor: 0.01, offset: 0.0, group: "Misc", default_on: false },
-    LiveVar { name: "AGR status control / actuation / shutdown", unit: "-", id: 0x0EE0, factor: 1.0, offset: 0.0, group: "Misc", default_on: false },
-    LiveVar { name: "Shutdown conditions coolant heater", unit: "-", id: 0x0FB7, factor: 1.0, offset: 0.0, group: "Misc", default_on: false },
-    LiveVar { name: "Identification manual/automatic", unit: "-", id: 0x1C00, factor: 1.0, offset: 0.0, group: "Misc", default_on: false },
-    LiveVar { name: "FGR Shutdown conditions", unit: "-", id: 0xDF08, factor: 1.0, offset: 0.0, group: "Misc", default_on: false },
+    LiveVar { name: "Friction quantity after AC load torque compensation", unit: "mg/Hub", id: 0x0ECB, factor: 0.01, offset: 0.0, signed: true, group: "Misc", default_on: false },
+    LiveVar { name: "Generator load", unit: "%", id: 0x0ECC, factor: 0.01, offset: 0.0, signed: false, group: "Misc", default_on: false },
+    LiveVar { name: "AGR status control / actuation / shutdown", unit: "-", id: 0x0EE0, factor: 1.0, offset: 0.0, signed: false, group: "Misc", default_on: false },
+    LiveVar { name: "Shutdown conditions coolant heater", unit: "-", id: 0x0FB7, factor: 1.0, offset: 0.0, signed: false, group: "Misc", default_on: false },
+    LiveVar { name: "Identification manual/automatic", unit: "-", id: 0x1C00, factor: 1.0, offset: 0.0, signed: false, group: "Misc", default_on: false },
+    LiveVar { name: "FGR Shutdown conditions", unit: "-", id: 0xDF08, factor: 1.0, offset: 0.0, signed: false, group: "Misc", default_on: false },
 ];
+
+#[cfg(test)]
+mod tests;

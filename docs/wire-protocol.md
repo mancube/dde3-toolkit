@@ -121,7 +121,8 @@ parse against the real car.
    link is strictly request/response. Consequences: a "listen, don't poll"
    logger does not exist at 9600, the 16-byte block is the 5-id reply, and
    the only speed levers are tester-side pacing (Tier 0) and the 38.4 k break
-   channel (Tier 2). If the key-turn event ever matters, re-run `capture`
+   channel (Tier 2 — since removed: DS2 is the only protocol the ECU can
+   actually use). If the key-turn event ever matters, re-run `capture`
    with `--out` while cycling the key.
 3. **MW live reply** to `12 0F 0B 10 <5 ids>`: `12 10 A0 10 00 <u16 BE per id>
    ` — for ids `[0F83 0F10 0F40 0F00 0F65]` the values were `[0, 0, 990, 2854,
@@ -147,8 +148,8 @@ parse against the real car.
   a **length-matching** filter (`f[1] == 6 + 2*n`) so a 5-id poll (whose reply
   equals the broadcast) still resolves while a 1-id battery read skips the
   16-byte block.
-- **`src/sim.rs`** updated to the `0x12` convention so `--sim` stays consistent
-  (status/nack/ident/mw all emit `0x12`, not `0x92`).
+- **`src/sim.rs`** updated to the `0x12` convention so the sim stays
+  consistent (status/nack/ident/mw all emit `0x12`, not `0x92`).
 - **5 new real-car fixture tests** (bytes taken verbatim from the capture):
   `real_car_live_reply_splits_echo`, `real_car_live_values_decode`,
   `real_car_ident_reply_is_raw_string`, `ident_valid_accepts_plain_string`,
@@ -214,3 +215,170 @@ ECU's flash-write path simply does not take a 192-byte block. The mode was
 **removed** (session 33); 64 B writes / 128 B reads are the only verified
 sizes. Don't re-attempt larger write blocks without a capture proving the
 ECU's flasher accepts them.
+
+## 33. MPPS-style calibration write: 224-byte blocks + `07 0F` + DTC prep (2026-11-22)
+
+The calibration-area write (`write_calibration` / `bench --write-cal`) now
+mirrors **MPPS's** calibration write, tested with 100% on-car success
+(`captures/mpps capture/mppswrite.txt`; side-by-side in
+`docs/FINDINGS_mpps_vs_galletto_calibration.md`). This is **distinct from
+§32**: §32 rejected **192-byte program-area** blocks (the ECU hung at
+0x10000); MPPS's **224-byte calibration-area** blocks (0x38000–0x40000) are
+proven by the capture. The full write (`write_full`, program area) keeps the
+64-byte Galletto size (`WRITE_BLOCK`).
+
+> **Why a 233-byte frame is accepted at all:** each 224-byte block is one
+> 233-byte wire frame (`LEN 0xE9`), which is larger than the **128-byte**
+> application DS2 receiver limit (firmware-confirmed at `0x1EB34`). It works
+> because these frames are sent **after `UPROG_EIN`**, when the boot-block
+> flash programmer (a second, bigger receiver) owns the K-line. See
+> **`docs/ds2-rx-buffer.md`** for the two-receiver split and the unconfirmable
+> "256" (boot block is all `0xFF` in every dump).
+
+**Sequence** (`Kline::write_calibration`):
+
+1. `begin_flash_session(true)` — IDENT → UPROG_EIN → AIF read → **DTC
+   read+clear** → SEED_KEY → key. The DTC prep is MPPS's pre-flash step, sent
+   **once** (the `dtc_prep` flag is true only for the first session of a full
+   write):
+   - `12 05 04 00` — FS_LESEN entry (read the fault count)
+   - `12 04 05` — FS_LOESCHEN (clear the fault memory)
+2. `12 09 07 0F 03 FC E0 00` — FLASH_SCHREIBEN_ENDE (`07 0F`) at **0x03FCE0**,
+   sent **once**, before the erase (MPPS sends it twice; one is sufficient).
+3. `12 09 07 06 03 80 00 00` — FLASH_LOESCHEN (erase @0x038000).
+4. 147 × FLASH_SCHREIBEN: **146×224-byte blocks + 1×64-byte trailing block**
+   (`CAL_WRITE_BLOCK = 0xE0`), spanning 0x038000–0x40000.
+5. `12 04 9F` — DIAGNOSE_ENDE (end-of-write signal; kept, harmless — MPPS
+   omits it, Galletto sends it).
+
+The same DTC read+clear (step 1) also runs **once** before reads
+(`read_full` / `read_range` → `read_flash` → `begin_flash_session(true)`),
+matching MPPS's read session (`captures/mpps capture/mppsread.txt`).
+
+**Code** (`src/protocol.rs`): `CAL_WRITE_BLOCK` (0xE0),
+`frame_flash_write_end(addr)`, `Kline::read_and_clear_dtcs()`, and
+`begin_flash_session(dtc_prep: bool)`. The `07 0F` builder and the 224-byte
+block math are unit-tested; `sim::tests::mpps_style_cal_write_preamble`
+drives the full preamble through the fake ECU. End-to-end
+(`bench --write-cal` vs `respond` on a socat pty pair) writes 147 blocks and
+the reconstructed 0x38000–0x40000 span matches the source image
+byte-for-byte. (That socat E2E carries **no monitor-tap echo**, so it never
+exercised the parser's echo path — which is how the §34 buffer bug slipped
+through. Re-verify with a tap, or rely on
+`parser_holds_full_mpps_write_echo`.)
+
+## 34. FrameParser `MAX_BUF` 192 → 512: the 233-byte MPPS write echo (2026-11-23)
+
+**Bug.** The MPPS-style cal write (§33) sends each 224-byte block as one
+**233-byte** wire frame (`12 E9 07 02 <addr3> E0 <224 data> <XOR>`, LEN
+`0xE9`). The `FrameParser` resync bound was `MAX_BUF = 192`, sized back in §21
+for the small Galletto frames (≤ 73 wire). On a line with a monitor tap, the
+ECU echoes our own TX back, so the whole 233-byte write frame arrives at the
+parser. `feed()` saw `buf.len() > 192` and drained the front, keeping only the
+tail half — **destroying the frame's `12 E9` header**. `take_frame` then
+re-anchored on a `0x12` byte *inside the data tail* (a phantom anchor), read a
+LEN that never completes, and swallowed the ECU's real reply. `got_echo` never
+became true → 3 resends → `no echo of service 0x07 … line dead or ECU not
+listening`. It was **data-dependent** (only when the drained tail held a
+`0x12`), which is why a real-car write froze at one specific block instead of
+every block.
+
+**Fix.** `MAX_BUF` 192 → **512** in `src/protocol.rs` (matching the
+`Framer` in `src/capture.rs`, which was already 512). The largest real frame
+(233 B) plus a back-to-back reply (≤ ~130 B) now fits with margin, so the
+resync drain never fires on a legitimate frame. The drain heuristic (keep the
+tail half) is unchanged — it is still the last resort for genuine persistent
+garbage.
+
+**Regression test.** `protocol::tests::parser_holds_full_mpps_write_echo`
+feeds the full 233-byte write frame (with a `0x12` planted in the data tail)
+as the echo, then the 4-byte reply, and asserts both are extracted intact. It
+**fails** on `MAX_BUF=192` (the echo is not extracted) and **passes** on 512.
+
+**E2E proof.** A faithful K-line T-topology tap (two raw ptys; the bridge
+forwards each side's TX to the peer *and* taps it back to the sender's reader —
+no pty `ECHO`, so no feedback loop) + `respond` + `bench --write-cal` on an
+image with a `12 FC` trap in block 5's tail: **old code** fails with the exact
+`no echo of service 0x07` error; **fixed code** writes all 147 blocks and the
+dump matches byte-for-byte.
+
+## 35. Real-car capture (2026-11-23): K-line sleep/wake + write pacing parity with MPPS
+
+First full real-car calibration write with the MPPS-style flow
+(`captures/dde3-20261123-122003.log`, analyzed by
+`tools/analyze_realcar_write.py`). Two findings, both now fixed in code.
+
+### 35.1 The ECU's K-line module sleeps after ~20 s of line silence — and data frames don't wake it
+
+Timeline of the capture (relative seconds):
+
+| t | event |
+|---|---|
+| 16.2 | connect (fresh port open) → IDENT OK (reply **516 ms**), battery live OK |
+| 40.3 | write attempt 1: bootstrap IDENT → **no reply** (23.3 s after last traffic) |
+| 53.1 | write attempt 2: bootstrap IDENT → **no reply** (12.8 s after attempt 1) |
+| 63.3 | **reconnect** (port close+open) → IDENT OK (473 ms) |
+| 77.8 | write attempt 3: bootstrap IDENT OK → full 147-frame write OK |
+
+Facts that pin down the mechanism:
+
+- The dropped IDENTs had a **TX echo** (no `no-echo retry` annotation in the
+  log) — the frames reached the bus; the ECU simply did not answer within the
+  (effective ~750 ms) window.
+- Attempt 2 came 12.8 s after attempt 1 and was dropped too — attempt 1's
+  data frame did **not** wake the module (a data-wake with first-frame loss
+  would have made attempt 2 succeed).
+- The port close+open (reconnect) restored the link, and the ECU then stayed
+  responsive for 187 s, including 24.6 s and 24.3 s gaps after the write.
+
+Conclusion: the ECU's K-line interface sleeps after ~20 s of silence; plain
+data frames are ignored while it is asleep; a **line-level pulse (break)**
+wakes it. Flasher tools (MPPS, Galletto, WinKFP) get that pulse for free
+because they open the port fresh for every session — `connect` in this tool
+does too, which is why connect/ident at startup always worked while the
+write-attempt bootstrap (same port, 20+ s idle) failed. The "faster 9600"
+GUI toggle was a red herring: it only paces the live loop, and the
+successful write ran at the default 3 ms/byte.
+
+**Fix** (`src/protocol.rs`):
+- `Kline::wake_kline()` — `set_break()` / `clear_break()` (10 ms) + 100 ms
+  settle + drain + parser/pending reset. Best-effort: adapters without break
+  support log a note and the retry may still succeed.
+- `begin_flash_session()`: the bootstrap IDENT (now 1000 ms, see 35.2) is
+  retried **once** after `wake_kline()` on failure, with a log line
+  (`IDENT no reply (…) — K-line wake break, retrying`). This makes the flash
+  bootstrap self-healing the way the user's manual reconnect did.
+- `identify()` timeout 500 → **1000 ms** (real ECU answers ident in
+  473–516 ms — 500 ms was at the edge even for a healthy link).
+
+### 35.2 Write pacing: 0 ms/byte is wire-identical and matches MPPS
+
+At 9600 baud (10 bits/byte) a byte occupies the line for **1.0417 ms**.
+Host-side per-byte pacing below that is invisible to the ECU — the UART TX
+buffer keeps the wire stream continuous either way. The old 3 ms/byte
+WinKFP habit therefore only added **host** time: a 233-byte write frame
+cost ~700 ms of `write_all`+`flush`+`sleep` per byte.
+
+Measured cadence for the 233-byte `FLASH_SCHREIBEN` frames:
+
+| | per frame | 147 frames (32 KB cal) |
+|---|---|---|
+| our run, 3 ms/byte (this capture) | 830 ms | 130 s |
+| MPPS reference (`captures/mpps capture/mppswrite.txt`) | 327 ms | ~48 s |
+
+MPPS sends back-to-back; its 327 ms ≈ 242 ms of wire (233 × 1.04 ms) + the
+ECU's reply. **Fix** (`src/app.rs`, `src/protocol.rs`):
+- `start_write` / `start_write_cal` now pass `data_delay_ms = 0` (the
+  `fast write` checkbox, which only selected this, is removed — it is now
+  always on).
+- `Kline::write_frame` fast path: with zero delay the frame goes out as one
+  bulk `write_all` instead of per-byte `write_all`+`flush` (same wire
+  bitstream, one syscall instead of 233).
+- Expected real-car cadence: ~330–350 ms/frame (wire-bound + ECU reply),
+  i.e. MPPS parity; 32 KB in ~50 s instead of ~130 s. **On-car re-verification
+  pending** (the capture above ran the old 3 ms/byte path).
+
+Reply latencies measured on the real ECU (for timeout sizing): IDENT
+473–516 ms, UPROG_EIN 687 ms, AIF 543 ms, FS_LESEN 256 ms, FS_LOESCHEN
+272 ms, seed 448 ms, key 256 ms, erase 623 ms, write-end 80 ms,
+DIAGNOSE_ENDE 64 ms, SCHREIBEN reply ~50–100 ms after the last TX byte.

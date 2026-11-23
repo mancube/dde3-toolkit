@@ -28,7 +28,6 @@ use anyhow::{bail, Context, Result};
 use serialport::{ClearBuffer, DataBits, Parity, SerialPort, StopBits};
 
 use crate::checksum::{CAL_LEN, CAL_START};
-use crate::sim::SimEcu;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -53,6 +52,13 @@ pub const FLASH_WRITE_START: usize = 0x10000;
 /// session 32 and removed: the real ECU never acknowledged 192-byte
 /// FLASH_SCHREIBEN frames — see docs/wire-protocol.md §32.)
 pub const WRITE_BLOCK: usize = 0x40;
+
+/// Calibration-area FLASH_SCHREIBEN block size — MPPS's 224-byte (0xE0) blocks
+/// (the frame max, LEN = 0x09 + NN), with a trailing remainder block: the 32 KB
+/// calibration is 146×224 + 1×64. MPPS uses this for calibration writes with
+/// 100% on-car success (docs/FINDINGS_mpps_vs_galletto_calibration.md). The
+/// full-write path keeps the 64-byte Galletto size ([`WRITE_BLOCK`]).
+pub const CAL_WRITE_BLOCK: usize = 0xE0; // 224
 
 /// FLASH_LESEN chunk size — 128 bytes.
 pub const READ_CHUNK: u32 = 0x80;
@@ -119,10 +125,15 @@ pub fn known_status_sb(sb: u8) -> bool {
     matches!(sb, 0xA0 | 0xA1 | 0xA2 | 0xB0 | 0xB1 | 0xB2 | 0xFF | 0x00)
 }
 
-/// Maximum plausible buffer before resync. Must comfortably hold an echo
-/// (≤ ~40 B) plus a full reply (≤ ~130 B) that arrive back-to-back on the
-/// half-duplex K-line.
-const MAX_BUF: usize = 192;
+/// Maximum plausible buffer before resync. Must comfortably hold the largest
+/// frame — the MPPS-style 224-byte cal write, 233 wire bytes
+/// (`12 E9 07 02 <addr3> E0 <224 data> <XOR>`) — plus a full reply (≤ ~130 B)
+/// that arrive back-to-back on the half-duplex K-line. The monitor tap echoes
+/// our own TX, so the whole 233-byte write frame must be held without the
+/// resync drain; a smaller bound truncated it and the parser re-anchored on a
+/// 0x12 inside the data tail, swallowing the ECU's reply ("no echo of service
+/// 0x07"). Sized like the capture [`crate::capture::Framer`] (512).
+const MAX_BUF: usize = 512;
 
 /// Total wire length INCLUDING the trailing XOR of the smallest and largest
 /// real frames; a LEN outside this range marks a false anchor / corruption.
@@ -305,12 +316,6 @@ pub fn frame_ident() -> Vec<u8> {
     vec![0x12, 0x04, 0x00]
 }
 
-/// Checksum status: `12 04 0A`.
-#[allow(dead_code)]
-pub fn frame_checksum_status() -> Vec<u8> {
-    vec![0x12, 0x04, 0x0A]
-}
-
 /// Leave / end session: `12 04 9F`.
 pub fn frame_diagnose_ende() -> Vec<u8> {
     vec![0x12, 0x04, 0x9F]
@@ -433,6 +438,24 @@ pub fn frame_flash_write(addr: u32, data: &[u8]) -> Vec<u8> {
     ]);
     p.extend_from_slice(data);
     p
+}
+
+/// Flash write-end (FLASH_SCHREIBEN_ENDE, service 0x07 subfn 0x0F):
+/// `12 09 07 0F <A_hi A_mid A_lo> 00 [XOR]`. MPPS sends this once at
+/// `0x03FCE0` in its calibration-write preamble, before the erase
+/// (`captures/mpps capture/mppswrite.txt`). The full-write path (Galletto)
+/// never sends it.
+pub fn frame_flash_write_end(addr: u32) -> Vec<u8> {
+    vec![
+        0x12,
+        0x09,
+        0x07,
+        0x0F,
+        (addr >> 16) as u8,
+        (addr >> 8) as u8,
+        addr as u8,
+        0x00,
+    ]
 }
 
 /// Fault clear (K-line BAP): `12 09 07 0E 42 41 50 00`.
@@ -640,7 +663,6 @@ pub struct Kline {
     logs: Vec<String>,
     silence: Duration,
     write_delay: Duration,
-    sim: Option<SimEcu>,
     /// Wall clock of the last TX/RX log line — used to stamp every log line
     /// with an absolute time and the gap to the previous line, so a capture
     /// shows where time goes (TX pacing, ECU reply latency, silence waits).
@@ -664,17 +686,8 @@ impl Kline {
             logs: Vec::new(),
             silence: Duration::from_millis(10),
             write_delay: Duration::from_millis(3),
-            sim: None,
             last_log: None,
         })
-    }
-
-    /// Enable the in-process ECU simulator (see `src/sim.rs`). The real
-    /// frame is still transmitted on the wire and the bus echo is verified;
-    /// the ECU reply cannot come from the line because the monitor adapter
-    /// is a passive tap that cannot drive the bus.
-    pub fn set_sim(&mut self, sim: SimEcu) {
-        self.sim = Some(sim);
     }
 
     pub fn set_silence(&mut self, ms: u64) {
@@ -748,19 +761,9 @@ impl Kline {
         }
     }
 
-    /// Raw byte write (no DS2 framing / XOR) — for the break-entered service
-    /// protocol (see `src/breakmode.rs`).
-    pub fn raw_write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.port
-            .write_all(bytes)
-            .with_context(|| format!("raw write failed on {}", self.path))?;
-        self.port
-            .flush()
-            .with_context(|| format!("raw flush failed on {}", self.path))?;
-        Ok(())
-    }
-
     /// Raw byte read (no DS2 framing) — up to `n` bytes or `timeout`.
+    /// Used by [`Kline::switch_fast_baud`] to drain the 0x91 ACK that
+    /// arrives at the new rate.
     pub fn raw_read(&mut self, n: usize, timeout: Duration) -> Result<Vec<u8>> {
         let deadline = Instant::now() + timeout;
         let mut out = Vec::with_capacity(n);
@@ -776,16 +779,6 @@ impl Kline {
         Ok(out)
     }
 
-    /// Hold the K-line low for a UART break (the break-entered protocol entry
-    /// trigger, `src/breakmode.rs`).
-    pub fn raw_break(&mut self) -> Result<()> {
-        self.port.set_break()?;
-        thread::sleep(Duration::from_millis(25));
-        self.port.clear_break()?;
-        self.port.flush()?;
-        Ok(())
-    }
-
     fn log(&mut self, line: String) {
         let now = Instant::now();
         let delta = self
@@ -798,9 +791,22 @@ impl Kline {
 
     /// Transmit a full wire frame (payload + trailing XOR) with the
     /// configured per-byte pacing — the same path every request goes out on.
-    /// Used by the `respond` command to send the simulated ECU replies on
-    /// the real wire.
     pub fn write_frame(&mut self, frame: &[u8]) -> Result<()> {
+        if self.write_delay.is_zero() {
+            // No pacing: one bulk write. The wire bitstream is identical to
+            // paced TX (at 9600 a byte occupies the line for 1.04 ms, far
+            // longer than any host pacing, so the UART buffer never drains
+            // between bytes), but the host returns in one syscall instead of
+            // one write_all+flush per byte — that per-byte host time is what
+            // cost ~700 ms/frame at 3 ms/byte (MPPS sends back-to-back).
+            self.port
+                .write_all(frame)
+                .with_context(|| format!("serial write failed on {}", self.path))?;
+            self.port
+                .flush()
+                .with_context(|| format!("serial flush failed on {}", self.path))?;
+            return Ok(());
+        }
         for (i, b) in frame.iter().enumerate() {
             self.port
                 .write_all(&[*b])
@@ -913,16 +919,6 @@ impl Kline {
             ));
             self.write_frame(&frame)?;
 
-            // In-process ECU simulator: the reply cannot come from the wire
-            // (the monitor adapter is a passive tap), so inject it after a
-            // short pause that lets the bus echo land first.
-            if let Some(sim) = self.sim.as_mut() {
-                let r = sim.handle(payload);
-                thread::sleep(Duration::from_millis(10));
-                self.pending.push_back(Frame { payload: r.clone() });
-                self.log(format!("SIM {}", hex(&r)));
-            }
-
             let deadline = Instant::now() + timeout;
             // The echo of our own TX (reflected by the monitor tap) must be
             // on the line by the time the last transmitted byte lands, plus
@@ -1018,42 +1014,7 @@ impl Kline {
                 );
             }
             let reply = res.unwrap()?;
-            // With the sim active, confirm the TX actually reached the bus
-            // (echo visible on our own RX) before returning.
-            if self.sim.is_some() {
-                if self.verify_echo(&sent) {
-                    self.log("ECHO confirmed (TX verified on bus)".to_string());
-                } else {
-                    self.log("ECHO missing (TX not seen on bus)".to_string());
-                }
-            }
             return Ok(reply);
-        }
-    }
-
-    /// Wait up to 300 ms for the echo of `sent` on the bus (sim mode only).
-    fn verify_echo(&mut self, sent: &Frame) -> bool {
-        let deadline = Instant::now() + Duration::from_millis(300);
-        loop {
-            while let Some(f) = self.pending.pop_front() {
-                if f.payload == sent.payload {
-                    return true;
-                }
-            }
-            if Instant::now() > deadline {
-                return false;
-            }
-            let chunk = match self.read_chunk() {
-                Ok(c) => c,
-                Err(_) => return false,
-            };
-            if chunk.is_empty() {
-                continue;
-            }
-            self.parser.feed(&chunk);
-            while let Some(f) = self.parser.take_frame() {
-                self.pending.push_back(f);
-            }
         }
     }
 
@@ -1062,12 +1023,40 @@ impl Kline {
     /// [`parse_ident`]).
     ///
     /// The real ECU answers with the normal `12 <len> A0 <ascii…>` envelope
-    /// (e.g. the captured `12 2E A0 37 37 38 36 …`); the in-process sim used
-    /// to answer with a bare string, which is still accepted here for
-    /// backwards compatibility.
+    /// (e.g. the captured `12 2E A0 37 37 38 36 …`).
     pub fn identify(&mut self) -> Result<Vec<u8>> {
-        let r = self.request(&[0x12, 0x04, 0x00], Duration::from_millis(500))?;
+        // 1000 ms, not 500: the real ECU answers ident in 473–516 ms
+        // (captures/dde3-20261123-122003.log) — 500 ms was right at the edge.
+        let r = self.request(&[0x12, 0x04, 0x00], Duration::from_millis(1000))?;
         Ok(strip_reply_envelope(&r).to_vec())
+    }
+
+    /// Wake the ECU's K-line interface: hold the line dominant (break) for a
+    /// few ms, then drain whatever trickled in. The ECU's K-line module
+    /// sleeps after ~20 s of line silence and drops plain data frames while
+    /// asleep — the first real-car write capture shows two bootstrap IDENTs
+    /// dropped after 23 s of idle, then restored by a port close+open (whose
+    /// line pulse acts as a break). Flasher tools get that pulse for free
+    /// because they open the port fresh for every session; we keep the port
+    /// open, so we send the break explicitly (see [`Kline::begin_flash_session`]).
+    pub fn wake_kline(&mut self) -> Result<()> {
+        // Best effort: some adapters don't support break — the retry itself
+        // may still succeed if the ECU was actually awake.
+        match self.port.set_break() {
+            Ok(()) => {
+                thread::sleep(Duration::from_millis(10));
+                let _ = self.port.clear_break();
+            }
+            Err(e) => self.log(format!("K-line wake: set_break unsupported ({e})")),
+        }
+        // Give the ECU's receiver time to re-arm, then clear the line.
+        thread::sleep(Duration::from_millis(100));
+        let _ = self.port.clear(ClearBuffer::All);
+        let mut buf = [0u8; 512];
+        while self.port.read(&mut buf)? > 0 {}
+        self.parser.clear();
+        self.pending.clear();
+        Ok(())
     }
 
     /// Best-effort return to the 9600 application link. Returns true when the ECU
@@ -1096,17 +1085,6 @@ impl Kline {
         false
     }
 
-    /// Read application data using STATUS_CODIER_CHECKSUMME (`12 04 0A`) as the
-    /// closest DDE3 equivalent to DDE4's `read_app`. Returns the reply payload.
-    pub fn read_app(&mut self, _off: usize, _len: usize) -> Result<Vec<u8>> {
-        // DDE3 has no pointer-table read equivalent. Use checksum status to probe
-        // the link; return its payload as a stand-in for software version bytes.
-        match self.request(&[0x12, 0x04, 0x0A], Duration::from_millis(500)) {
-            Ok(r) => Ok(r),
-            Err(e) => Err(e),
-        }
-    }
-
     /// Full flasher session bootstrap — mirrors the flasher tools' captured
     /// full-flash / full-write procedure (`captures/galletto capture with
     /// respond tool/testread.txt` read session, `fakewritegalleto.txt` write
@@ -1129,17 +1107,35 @@ impl Kline {
     /// flash. This is what the full-flash read now does — previously the chunk
     /// loop sent `FLASH_LESEN` frames directly and never performed the session
     /// setup.
-    pub fn begin_flash_session(&mut self) -> Result<()> {
+    pub fn begin_flash_session(&mut self, dtc_prep: bool) -> Result<()> {
         // 1) One more identify — (re-)open / verify the diagnostic session.
         //    Single-shot: exactly one of each flashing-session frame, no retry.
-        self.request_once(&frame_ident(), Duration::from_millis(500))
-            .with_context(|| "FLASH_READ bootstrap: IDENT failed")?;
+        //    The ECU's K-line module sleeps after ~20 s of line silence and
+        //    drops plain data frames while asleep, so a cold IDENT can time
+        //    out (first real-car capture: two dropped IDENTs after 23 s of
+        //    idle). Wake it with a break — the same line pulse a fresh port
+        //    open produces — and retry once.
+        if let Err(e) = self.request_once(&frame_ident(), Duration::from_millis(1000)) {
+            self.log(format!("IDENT no reply ({e}) — K-line wake break, retrying"));
+            self.wake_kline()?;
+            self.request_once(&frame_ident(), Duration::from_millis(1000))
+                .with_context(|| "FLASH_READ bootstrap: IDENT failed (even after wake break)")?;
+        }
         // 2) Set to programming mode.
         self.request_once(&frame_uprog_ein(), Duration::from_secs(3))
             .with_context(|| "FLASH_READ bootstrap: UPROG_EIN failed")?;
         // 3) AIF / programming-record read (the flasher's VIN / record gate).
         self.request_once(&frame_aif_read(0x00), Duration::from_secs(3))
             .with_context(|| "FLASH_READ bootstrap: AIF read failed")?;
+        // 3b) MPPS-style pre-flash DTC prep: read + clear the fault memory
+        //     once, before the seed/key unlock. MPPS sends exactly these two
+        //     frames here (FS_LESEN `12 05 04 00` + FS_LOESCHEN `12 04 05`),
+        //     in the programming session, before unlock
+        //     (captures/mpps capture/mppsread.txt). `dtc_prep` is true only
+        //     for the first session of a full write, so it runs exactly once.
+        if dtc_prep {
+            self.read_and_clear_dtcs()?;
+        }
         // 4) Unlock: seed telegram -> key -> key check. A failing key check
         //    (NRC, e.g. B0 not-unlocked) aborts the session immediately.
         let z: u8 = 0x07; // SEED_KEY job: Z = seconds mod 0x2E (Galletto's captured read session used Z=0x07)
@@ -1151,6 +1147,23 @@ impl Kline {
         let key_send = [0x12, 0x08, 0x90, key[0], key[1], key[2], key[3]];
         self.request_once(&key_send, Duration::from_secs(3))
             .with_context(|| "FLASH_READ bootstrap: SEED_KEY key check failed")?;
+        Ok(())
+    }
+
+    /// MPPS-style pre-flash DTC prep: read the fault count (FS_LESEN entry,
+    /// `12 05 04 00`) and clear the fault memory (FS_LOESCHEN, `12 04 05`).
+    /// These are exactly the two DTC frames MPPS sends in its pre-flash
+    /// session, before the seed/key unlock
+    /// (`captures/mpps capture/mppsread.txt`). Called once per flash
+    /// read/write via [`Kline::begin_flash_session`]'s `dtc_prep` flag.
+    fn read_and_clear_dtcs(&mut self) -> Result<()> {
+        // FS_LESEN entry: read the fault count (the ECU replies with the count
+        // and the first fault header; we only need the read to succeed).
+        self.request_filtered(&frame_dtc_entry(), Duration::from_secs(5), is_not_live_broadcast)
+            .with_context(|| "pre-flash DTC prep: FS_LESEN (fault count) failed")?;
+        // FS_LOESCHEN: clear the fault memory.
+        self.request_filtered(&frame_dtc_clear(), Duration::from_secs(5), is_not_live_broadcast)
+            .with_context(|| "pre-flash DTC prep: FS_LOESCHEN (fault clear) failed")?;
         Ok(())
     }
 
@@ -1197,7 +1210,7 @@ impl Kline {
         // always run this setup first. The session runs once here; a failed
         // session (e.g. unlock refused / B0) aborts the read instantly instead of
         // being retried as a flashing-session job.
-        self.begin_flash_session()?;
+        self.begin_flash_session(true)?;
         let attempt = |k: &mut Self, progress: &mut dyn FnMut(usize, usize)| -> Result<Vec<u8>> {
             let mut out = Vec::with_capacity(length);
             let mut addr = start as u32;
@@ -1278,12 +1291,15 @@ impl Kline {
         self.set_write_delay(data_delay_ms);
         let region_len = IMAGE_SIZE - FLASH_WRITE_START;
         let mut done = 0usize;
-        // The two Galletto phases: program area, then calibration area.
+        // The two Galletto phases: program area, then calibration area. The
+        // MPPS-style DTC read/clear runs once, in the first phase's session.
+        let mut dtc_prep = true;
         for (start, end) in [(FLASH_WRITE_START, CAL_START), (CAL_START, IMAGE_SIZE)] {
             // (Re-)open the flasher session and unlock. After phase 1's
             // DIAGNOSE_ENDE the ECU is back in normal mode, so phase 2
             // repeats the whole bootstrap (re-authentication).
-            self.begin_flash_session()?;
+            self.begin_flash_session(dtc_prep)?;
+            dtc_prep = false;
             self.erase_flash(start as u32, 0x00)?;
             thread::sleep(Duration::from_millis(100));
             for off in (start..end).step_by(WRITE_BLOCK) {
@@ -1304,8 +1320,15 @@ impl Kline {
         Ok(())
     }
 
-    /// Calibration flash write: full flasher session → erase → write blocks →
-    /// `DIAGNOSE_ENDE` (Galletto's phase-2 flow; 64-byte blocks).
+    /// Calibration flash write — MPPS-style: full flasher session (with the
+    /// one-shot DTC read/clear) → `07 0F` write-end @0x03FCE0 → erase →
+    /// 224-byte blocks + trailing block → `DIAGNOSE_ENDE`.
+    ///
+    /// Mirrors MPPS's calibration write (`captures/mpps capture/mppswrite.txt`),
+    /// tested with 100% on-car success: 224-byte (0xE0) blocks with a trailing
+    /// remainder block, a single `07 0F` write-end before the erase, and the
+    /// DTC read/clear prep. The `DIAGNOSE_ENDE` end-of-write signal is kept
+    /// (harmless; MPPS omits it, Galletto sends it).
     pub fn write_calibration(
         &mut self,
         image: &[u8],
@@ -1317,20 +1340,28 @@ impl Kline {
             bail!("calibration image must be exactly 32 KB");
         }
         self.set_write_delay(data_delay_ms);
-        // Full flasher session before touching flash (Galletto procedure:
-        // IDENT -> UPROG_EIN -> AIF read -> SEED_KEY), then erase → write.
-        self.begin_flash_session()?;
+        // Full flasher session (MPPS-style: DTC read/clear before unlock).
+        self.begin_flash_session(true)?;
+        // MPPS calibration-write preamble: send the write-end (07 0F) once at
+        // 0x03FCE0, before the erase (captures/mpps capture/mppswrite.txt).
+        self.request_filtered(
+            &frame_flash_write_end(0x03FCE0),
+            Duration::from_secs(5),
+            is_not_live_broadcast,
+        )?;
         self.erase_flash(CAL_START as u32, 0x00)?;
         thread::sleep(Duration::from_millis(100));
+        // MPPS block size: 224-byte blocks + a trailing remainder block
+        // (146×224 + 1×64 for the 32 KB calibration).
         let mut done = 0usize;
-        for start in (0..CAL_LEN).step_by(WRITE_BLOCK) {
-            let len = WRITE_BLOCK.min(CAL_LEN - start);
+        for start in (0..CAL_LEN).step_by(CAL_WRITE_BLOCK) {
+            let len = CAL_WRITE_BLOCK.min(CAL_LEN - start);
             self.write_block(CAL_START as u32 + start as u32, &image[start..start + len])?;
             done += len;
             progress(done, CAL_LEN);
         }
-        // Galletto closes the session with DIAGNOSE_ENDE, not a `07 0F`
-        // write-end.
+        // Keep the end-of-write signal (harmless; matches Galletto). MPPS
+        // omits it, but it is not needed to be removed.
         self.request_filtered(
             &frame_diagnose_ende(),
             Duration::from_secs(10),
@@ -1575,401 +1606,4 @@ fn check_flash_read_reply(r: &[u8], count: u8, addr: u32) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn frame_round_trip() {
-        // Confirmed wire format: payload + trailing XOR, no B8/F1/LEN header.
-        let bytes = build_frame(&[0x12, 0x04, 0x0D]);
-        assert_eq!(bytes, vec![0x12, 0x04, 0x0D, 0x1B]);
-        let mut parser = FrameParser::default();
-        parser.feed(&bytes);
-        let f = parser.take_frame().expect("frame");
-        assert_eq!(f.payload, vec![0x12, 0x04, 0x0D]);
-    }
-
-    #[test]
-    fn mw_select_batched_length() {
-        // Tested logger (MW_SELECT_LESEN_NORM) rule: LEN = 5 + 2n (total wire
-        // bytes, prefix `12 LEN 0B 10` + 2 bytes/id + trailing XOR).
-        let f = frame_mw_select(&[0x0F65]);
-        assert_eq!(f[0], 0x12);
-        assert_eq!(f[1], 7, "single id length must be 5 + 2*1");
-        assert_eq!(f[2..4], [0x0B, 0x10]);
-        assert_eq!(f.len(), 6);
-        // A batched set of 4 ids (SET_1 in `testo customjobs.txt`).
-        let f = frame_mw_select(&[0x0F62, 0x0F00, 0x0F30, 0x0E81]);
-        assert_eq!(f[1], 13, "4 ids -> 5 + 8 = 13");
-        assert_eq!(f.len(), 12);
-        // id order preserved, big-endian.
-        assert_eq!(&f[4..6], [0x0F, 0x62]);
-        assert_eq!(&f[10..12], [0x0E, 0x81]);
-    }
-
-    #[test]
-    fn captured_winkfp_frames() {
-        // Byte-exact frames from the 2026-11-09 passive capture of WinKFP.
-        assert_eq!(build_frame(&[0x12, 0x04, 0x0D]), vec![0x12, 0x04, 0x0D, 0x1B]);
-        assert_eq!(build_frame(&[0x12, 0x04, 0x00]), vec![0x12, 0x04, 0x00, 0x16]);
-        assert_eq!(
-            build_frame(&[0x12, 0x05, 0x90, 0x56]),
-            vec![0x12, 0x05, 0x90, 0x56, 0xD1]
-        );
-    }
-
-    #[test]
-    fn parser_keeps_partial_frame_across_reads() {
-        // WinKFP sends the trailing XOR ~50 ms after the payload.
-        let mut parser = FrameParser::default();
-        parser.feed(&[0x12, 0x04, 0x00]);
-        assert!(parser.take_frame().is_none());
-        parser.feed(&[0x16]);
-        let f = parser.take_frame().expect("frame");
-        assert_eq!(f.payload, vec![0x12, 0x04, 0x00]);
-    }
-
-    #[test]
-    fn parser_skips_garbage_and_resyncs() {
-        let mut parser = FrameParser::default();
-        parser.feed(&[0x00, 0xFF]);
-        assert!(parser.take_frame().is_none());
-        parser.feed(&build_frame(&[0x12, 0x04, 0x00]));
-        let f = parser.take_frame().expect("frame");
-        assert_eq!(f.payload, vec![0x12, 0x04, 0x00]);
-    }
-
-    // ---- Real-car (2026-11-09 M47) fixtures from `dde3 toolkit log.txt` ----
-
-    #[test]
-    fn real_car_live_reply_splits_echo() {
-        // Merged wire bytes as captured on the K-line: the ECU reply (16 B incl
-        // trailing XOR) immediately followed by our TX echo (15 B incl XOR). The
-        // parser must split them back-to-back, reply first, echo second.
-        let wire: Vec<u8> = vec![
-            // reply: 12 10 A0 10 00 00 00 00 00 03 DE 0B 26 02 4A 0A
-            0x12, 0x10, 0xA0, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xDE, 0x0B, 0x26,
-            0x02, 0x4A, 0x0A,
-            // echo of our request: 12 0F 0B 10 0F 83 0F 10 0F 40 0F 00 0F 65 BF
-            0x12, 0x0F, 0x0B, 0x10, 0x0F, 0x83, 0x0F, 0x10, 0x0F, 0x40, 0x0F, 0x00, 0x0F,
-            0x65, 0xBF,
-        ];
-        let mut p = FrameParser::default();
-        p.feed(&wire);
-        let reply = p.take_frame().expect("reply frame");
-        assert_eq!(
-            reply.payload,
-            vec![0x12, 0x10, 0xA0, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xDE, 0x0B, 0x26, 0x02, 0x4A]
-        );
-        let echo = p.take_frame().expect("echo frame");
-        assert_eq!(
-            echo.payload,
-            vec![0x12, 0x0F, 0x0B, 0x10, 0x0F, 0x83, 0x0F, 0x10, 0x0F, 0x40, 0x0F, 0x00, 0x0F, 0x65]
-        );
-        assert!(p.take_frame().is_none(), "buffer drained");
-    }
-
-    #[test]
-    fn real_car_live_values_decode() {
-        // The five u16 values in the live reply, in request order
-        // [0F83 0F10 0F40 0F00 0F65], decode to the engine-off / ~12 deg C set:
-        // PWG=0, N=0, boost=990 hPa, WTF=2854 (->12.3 deg C), batt=586 (->11.9 V).
-        let payload = vec![
-            0x12, 0x10, 0xA0, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xDE, 0x0B, 0x26, 0x02, 0x4A,
-        ];
-        assert_eq!(payload[0], 0x12, "prefix must be the ECU address");
-        assert_eq!(payload[2], 0xA0, "status at [2]");
-        let vals: Vec<u16> = payload[5..].as_chunks::<2>().0.iter().map(|p| u16::from_be_bytes(*p)).collect();
-        assert_eq!(vals, vec![0, 0, 990, 2854, 586]);
-    }
-
-    #[test]
-    fn real_car_ident_reply_is_envelope_string() {
-        // Wire (2026-11-10 capture, dde3-toolkit/captures/dde3newlog.txt):
-        // the ECU wraps the ident string in the normal envelope,
-        // `12 2E A0 37 37 38 36 …` — status A0, ASCII data from [3].
-        // LEN byte 0x2E = 46 = 3 header + 42 data + trailing XOR (the
-        // RX log line shows the 45-byte payload, XOR stripped by the parser).
-        let s = b"77868875201124048010281001445G521000000000"; // 42 chars
-        assert_eq!(s.len(), 42, "len byte 0x2E = 3 header + 42 data + XOR");
-        let mut wire: Vec<u8> = vec![0x12, 0x04, 0x00, 0x16]; // echo
-        wire.extend_from_slice(&[0x12, 0x2E, 0xA0]);
-        wire.extend_from_slice(s);
-        wire.push(xor_cs(&wire));
-        let mut p = FrameParser::default();
-        p.feed(&wire);
-        let _echo = p.take_frame().expect("echo");
-        let ident = p.take_frame().expect("ident reply");
-        assert_eq!(&ident.payload[..3], &[0x12, 0x2E, 0xA0], "envelope form");
-        // identify() contract: envelope stripped, bare string remains.
-        let stripped = strip_reply_envelope(&ident.payload);
-        assert_eq!(stripped, s);
-        assert!(ident_valid(stripped));
-        let info = parse_ident(stripped).expect("parses");
-        assert_eq!(info.software, "7786887");
-        assert_eq!(info.ecu_code, "5201");
-        assert_eq!(info.date, "4801");
-        assert_eq!(info.hw_number, "0281001445");
-        assert_eq!(info.g_code, "G521");
-    }
-
-    #[test]
-    fn ident_valid_accepts_plain_string() {
-        assert!(ident_valid(b"8875201"));
-        assert!(ident_valid(b"DDE 3.0 fuer M47"));
-        assert!(!ident_valid(&[]), "empty rejected");
-        assert!(!ident_valid(&[0x12, 0x04, 0x00]), "envelope is not a string");
-        // Envelope-prefixed reply must NOT validate — this is what used to
-        // trigger the spurious "ident looks erased/corrupt" warning.
-        let enveloped: Vec<u8> = vec![0x12, 0x2E, 0xA0, b'7', b'7', b'8', b'6'];
-        assert!(!ident_valid(&enveloped));
-        assert!(ident_valid(strip_reply_envelope(&enveloped)));
-    }
-
-    #[test]
-    fn parse_ident_fields() {
-        let s = b"77868875201124048010281001445G521000000000";
-        let i = parse_ident(s).expect("parses the captured string");
-        assert_eq!(i.software, "7786887");
-        assert_eq!(i.ecu_code, "5201");
-        assert_eq!(i.date, "4801");
-        assert_eq!(i.hw_number, "0281001445");
-        assert_eq!(i.g_code, "G521");
-        assert!(parse_ident(b"8875201").is_none(), "short string not parseable");
-        assert!(parse_ident(&[0xFF; 40]).is_none(), "non-ASCII not parseable");
-        assert_eq!(format_pair("5201"), "52/01");
-        assert_eq!(format_pair("4801"), "48/01");
-    }
-
-    #[test]
-    fn is_not_live_broadcast_distinguishes() {
-        // The 16-byte periodic block is skipped; small fault/battery replies kept.
-        let broadcast = vec![
-            0x12, 0x10, 0xA0, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xDE, 0x0B, 0x26, 0x02, 0x4A,
-        ];
-        let count_reply = vec![0x12, 0x05, 0xA0, 0x03]; // 3 faults
-        let batt_reply = vec![0x12, 0x08, 0xA0, 0x10, 0x00, 0x02, 0x4A]; // 586 -> 11.9 V
-        assert!(!is_not_live_broadcast(&broadcast));
-        assert!(is_not_live_broadcast(&count_reply));
-        assert!(is_not_live_broadcast(&batt_reply));
-    }
-
-    #[test]
-    fn fixed_frames_match_vm_extraction() {
-        // UPROG_EIN: 12 04 0D (frames.md @0x308)
-        assert_eq!(frame_uprog_ein(), vec![0x12, 0x04, 0x0D]);
-        // IDENT: 12 04 00 (frames.md @0xf3d5)
-        assert_eq!(frame_ident(), vec![0x12, 0x04, 0x00]);
-        // Checksum status: 12 04 0A (frames.md @0xc0a1)
-        assert_eq!(frame_checksum_status(), vec![0x12, 0x04, 0x0A]);
-        // DIAGNOSE_ENDE: 12 04 9F (frames.md @0x106dc)
-        assert_eq!(frame_diagnose_ende(), vec![0x12, 0x04, 0x9F]);
-        // SEED_KEY: 12 08 90 42 4D 57 05 <Z> (HANDOVER §15.3)
-        assert_eq!(
-            frame_seed_key(0x05),
-            vec![0x12, 0x08, 0x90, 0x42, 0x4D, 0x57, 0x05, 0x05]
-        );
-        // Fault clear: 12 09 07 0E 42 41 50 00 (frames.md @0xe55e)
-        assert_eq!(
-            frame_fault_clear(),
-            vec![0x12, 0x09, 0x07, 0x0E, 0x42, 0x41, 0x50, 0x00]
-        );
-    }
-
-    #[test]
-    fn frame_aif_read_matches_galletto() {
-        // Galletto's AIF read from the full-flash-read session: `12 05 02 00`
-        // + trailing XOR (xor(12 05 02 00) = 0x15 — the `… 15` of `12 05 02 00
-        // 15` in the capture).
-        assert_eq!(frame_aif_read(0x00), vec![0x12, 0x05, 0x02, 0x00]);
-        assert_eq!(build_frame(&frame_aif_read(0x00)), vec![0x12, 0x05, 0x02, 0x00, 0x15]);
-    }
-
-    #[test]
-    fn key_from_seed_reply_matches_galletto_vectors() {
-        // Seed replies are the 45-byte payloads `12 2E A0 <42 data bytes>` (+ the
-        // trailing XOR the key formula runs on); the accepted key is the
-        // unbiased job sum `K[i] = FR[(0x12+i)%46] + FR[(Z+i)%46] + FR[(0x29+i)%46]`.
-        // Unbiased vectors only: Z=0x07 -> `39 3C 3F 42`, Z=0x10 -> `87 8A 8D 90`,
-        // Z=0x16 -> `BB BE C1 C4` (the captured Galletto values for Z>=0x10 sat at
-        // unbiased-5, i.e. behind the old bias; the job sum is unbiased).
-        let mut reply = vec![0x12, 0x2E, 0xA0];
-        for i in 0u8..42 {
-            reply.push(((0x07u16 * 31 + i as u16 + 0x27) & 0xFF) as u8); // seed data for Z=0x07
-        }
-        assert_eq!(key_from_seed_reply(&reply, 0x07), [0x39, 0x3C, 0x3F, 0x42]);
-
-        let mut reply10 = vec![0x12, 0x2E, 0xA0];
-        for i in 0u8..42 {
-            reply10.push(((0x10u16 * 31 + i as u16 + 0x27) & 0xFF) as u8); // seed data for Z=0x10
-        }
-        assert_eq!(key_from_seed_reply(&reply10, 0x10), [0x87, 0x8A, 0x8D, 0x90]);
-
-        let mut reply16 = vec![0x12, 0x2E, 0xA0];
-        for i in 0u8..42 {
-            reply16.push(((0x16u16 * 31 + i as u16 + 0x27) & 0xFF) as u8); // seed data for Z=0x16
-        }
-        assert_eq!(key_from_seed_reply(&reply16, 0x16), [0xBB, 0xBE, 0xC1, 0xC4]);
-    }
-
-    #[test]
-    fn parameterized_frames_match_vm_extraction() { 
-        // Verified against the WinKFP .prg VM (docs/FINDINGS_flash_and_fast_ds2.md):
-        // FLASH_LESEN addr=0x38000 count=0x80 -> 12 09 06 00 03 80 00 80 (addr BE @4..6)
-        assert_eq!(
-            frame_flash_read(0x38000, 0x80),
-            vec![0x12, 0x09, 0x06, 0x00, 0x03, 0x80, 0x00, 0x80]
-        );
-        // width probe: count is a single wire byte (high byte dropped)
-        assert_eq!(
-            frame_flash_read(0x12345, 0x34),
-            vec![0x12, 0x09, 0x06, 0x00, 0x01, 0x23, 0x45, 0x34]
-        );
-        // FLASH_LOESCHEN addr=0x38000 -> 12 09 07 06 03 80 00 00 (no count)
-        assert_eq!(
-            frame_flash_erase(0x38000, 0x00),
-            vec![0x12, 0x09, 0x07, 0x06, 0x03, 0x80, 0x00, 0x00]
-        );
-        // FLASH_SCHREIBEN 4 data bytes @0x38000 -> 12 0D 07 02 03 80 00 04 11 22 33 44
-        assert_eq!(
-            frame_flash_write(0x38000, &[0x11, 0x22, 0x33, 0x44]),
-            vec![0x12, 0x0D, 0x07, 0x02, 0x03, 0x80, 0x00, 0x04, 0x11, 0x22, 0x33, 0x44]
-        );
-    }
-
-    #[test]
-    fn reopen_divisor_maps_125000_to_124800() {
-        assert_eq!(reopen_divisor(125000), 124_800);
-        assert_eq!(reopen_divisor(38400), 38_400);
-        assert_eq!(reopen_divisor(9600), 9_600);
-    }
-
-    #[test]
-    fn dtc_frames_match_vm_extraction() {
-        // FS_QUICK_LESEN start: 12 05 14 01 (ds_frames.md @0x88b8)
-        assert_eq!(frame_dtc_count(), vec![0x12, 0x05, 0x14, 0x01]);
-        // FS_LESEN entry: 12 05 04 00 (ds_frames.md @0x9935)
-        assert_eq!(frame_dtc_entry(), vec![0x12, 0x05, 0x04, 0x00]);
-        // FS_SHADOW_LESEN: 12 05 04 01 (ds_frames.md @0x136b0)
-        assert_eq!(frame_dtc_shadow(), vec![0x12, 0x05, 0x04, 0x01]);
-        // FS_LOESCHEN: 12 04 05 (ds_frames.md @0x1354e)
-        assert_eq!(frame_dtc_clear(), vec![0x12, 0x04, 0x05]);
-    }
-
-    #[test]
-    fn dtc_describe_uses_text_tables() {
-        let d = Dtc {
-            ort: 0x05,
-            art: 0x01,
-            uw: vec![100, 200],
-            ..Default::default()
-        };
-        let s = d.describe();
-        assert!(s.contains("Nadelbewegungsfuehler"), "ORT text: {s}");
-        assert!(s.contains("Signal Kurzschluss nach B+"), "ART text: {s}");
-    }
-
-    #[test]
-    fn dtc_from_record_reference_m47() {
-        // The M47 reference fault as printed in `actual error.txt` (the
-        // reference tool's 50-byte "Errorcode" record).
-        let rec: [u8; 50] = [
-            0x08, 0xC8, 0x3C, 0x00, 0x38, 0x9C, 0xE3, 0x00, 0x37, 0x9D, 0xDE, 0xC4, 0xC1, 0x04,
-            0x00, 0x48, 0x00, 0x99, 0x03, 0x00, 0x76, 0xDC, 0x5B, 0x03, 0x4A, 0x00, 0x76, 0xD1,
-            0x7D, 0x00, 0x76, 0xDC, 0x5A, 0x00, 0x34, 0x32, 0x33, 0x32, 0x34, 0x00, 0x30, 0x21,
-            0x00, 0x00, 0x00, 0x31, 0xC5, 0x00, 0x00, 0x22,
-        ];
-        let d = Dtc::from_record(&rec);
-        assert_eq!(d.ort, 0x08, "ORT must be Gluehanlage, not Mengensteller");
-        assert_eq!(crate::dtc::ort_text(d.ort), "Gluehanlage");
-        assert_eq!(d.freq, 60);
-        assert_eq!(d.art_mask, 0xC8);
-        assert_eq!(d.arts, vec![0x32, 0x05, 0x07]);
-        assert_eq!(d.record, rec.to_vec());
-        let s = d.describe();
-        assert!(s.contains("Gluehkerzen bzw. Gluehrelais defekt"), "{s}");
-        assert!(s.contains("Fehler momentan vorhanden"), "{s}");
-        assert!(s.contains("Fehler sporadisch"), "{s}");
-        assert!(!s.contains("Mengensteller"), "{s}");
-    }
-
-    #[test]
-    fn jobstatus_lookup() {
-        assert!(JobStatus::from_sb(0xA0, 0x0D).is_okay());
-        assert_eq!(JobStatus::from_sb(0xA0, 0x0D).as_str(), "OKAY");
-        assert!(!JobStatus::from_sb(0xA1, 0x0D).is_okay());
-        assert_eq!(JobStatus::from_sb(0xFF, 0x0D).as_str(), "ERROR_SG_NACK");
-        assert!(matches!(
-            JobStatus::from_sb(0xAA, 0x0D),
-            JobStatus::ErrorSgUnknown(_)
-        ));
-    }
-
-    #[test]
-    fn seed_reply_survives_chunked_delivery() {
-        // Regression: the 46-byte SEED reply `12 2E A0 00 01 02 … 29 9D`
-        // arrived in chunks and the old shortest-XOR-prefix parser emitted
-        // the 3-byte frame `12 13 14` from inside the still-arriving reply
-        // (the linear seed table contains the in-band coincidence
-        // 0x12^0x13^0x14 == 0x15), so the toolkit computed a key from
-        // `12 13 14` and collided with the real reply on the wire.
-        let req = build_frame(&[0x12, 0x08, 0x90, 0x42, 0x4D, 0x57, 0x07]);
-        let mut reply_payload = vec![0x12, 0x2E, 0xA0];
-        for i in 0u8..=0x29 {
-            reply_payload.push(i);
-        }
-        let mut reply_wire = reply_payload.clone();
-        reply_wire.push(xor_cs(&reply_payload));
-        assert_eq!(reply_wire.len(), 46, "LEN 0x2E = total wire length");
-
-        // Byte-by-byte delivery (worst-case chunking): nothing may be
-        // emitted before the full 46-byte frame has arrived.
-        let mut p = FrameParser::default();
-        p.feed(&req);
-        let echo = p.take_frame().expect("echo");
-        assert_eq!(echo.payload, vec![0x12, 0x08, 0x90, 0x42, 0x4D, 0x57, 0x07]);
-        for (i, b) in reply_wire.iter().enumerate() {
-            p.feed(&[*b]);
-            if i + 1 < reply_wire.len() {
-                assert!(
-                    p.take_frame().is_none(),
-                    "no frame before all {} bytes (got one after {})",
-                    reply_wire.len(),
-                    i + 1
-                );
-            }
-        }
-        let f = p.take_frame().expect("full seed reply");
-        assert_eq!(f.payload, reply_payload);
-        assert!(p.take_frame().is_none());
-    }
-
-    #[test]
-    fn parser_drops_leading_garbage_before_frame() {
-        let mut p = FrameParser::default();
-        p.feed(&[0x00, 0xFF, 0x12, 0x04, 0x00, 0x16]);
-        let f = p.take_frame().expect("frame after garbage");
-        assert_eq!(f.payload, vec![0x12, 0x04, 0x00]);
-    }
-
-    #[test]
-    fn parser_resyncs_on_bad_xor() {
-        // A frame whose declared LEN is present but whose trailing XOR does
-        // not validate must never be emitted; the buffer resyncs byte by
-        // byte and a valid frame behind the debris is still recovered.
-        let mut p = FrameParser::default();
-        p.feed(&[0x12, 0x04, 0x00, 0x99]); // bad XOR (would be 0x16)
-        for _ in 0..8 {
-            assert!(p.take_frame().is_none(), "corrupt frame must not be emitted");
-        }
-        p.feed(&build_frame(&[0x12, 0x04, 0x0D]));
-        let mut got = None;
-        for _ in 0..16 {
-            if let Some(f) = p.take_frame() {
-                got = Some(f);
-                break;
-            }
-        }
-        assert_eq!(got.unwrap().payload, vec![0x12, 0x04, 0x0D]);
-    }
-}
+mod tests;

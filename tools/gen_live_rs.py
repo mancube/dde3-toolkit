@@ -15,6 +15,8 @@ Per row we take:
     unit     MEAS
     factor   FACT_A   (physical = raw * FACT_A + FACT_B)
     offset   FACT_B
+    signed   DATA_TYPE == 7 (the ECU returns these as two's-complement
+             i16; type 5 is unsigned u16)
     group    derived from the ADF NAME prefix
     default_on  a fixed small set of commonly-wanted values
 
@@ -93,6 +95,7 @@ def main():
             'id': id_,
             'factor': fmt_num(r['FACT_A']),
             'offset': fmt_num(r['FACT_B']),
+            'signed': r['DATA_TYPE'].strip() == '7',
             'group': group,
             'default_on': id_ in DEFAULT_ON,
         })
@@ -109,7 +112,10 @@ def main():
     lines.append('//!')
     lines.append('//! These are the measurement values the ECU actually exposes for live')
     lines.append('//! data and value logging. Telegram: `12 05 0B 10 <id_hi> <id_lo>`.')
-    lines.append('//! Scaling: physical = raw * factor + offset.')
+    lines.append('//! Scaling: physical = raw * factor + offset. Variables with')
+    lines.append('//! `signed: true` (ADF DATA_TYPE 7) are two\'s-complement i16 on the')
+    lines.append('//! wire — the ECU reports them signed (e.g. SB injection start);')
+    lines.append('//! the rest are unsigned u16.')
     lines.append('')
     lines.append('#[derive(Clone)]')
     lines.append('pub struct LiveVar {')
@@ -118,8 +124,18 @@ def main():
     lines.append('    pub id: u16,')
     lines.append('    pub factor: f64,')
     lines.append('    pub offset: f64,')
+    lines.append('    pub signed: bool,')
     lines.append('    pub group: &\'static str,')
     lines.append('    pub default_on: bool,')
+    lines.append('}')
+    lines.append('')
+    lines.append('impl LiveVar {')
+    lines.append('    /// Decode a raw 16-bit ECU value to the physical value')
+    lines.append('    /// (`raw * factor + offset`), sign-extending i16 variables first.')
+    lines.append('    pub fn decode(&self, raw: u16) -> f64 {')
+    lines.append('        let v = if self.signed { raw as i16 as f64 } else { raw as f64 };')
+    lines.append('        v * self.factor + self.offset')
+    lines.append('    }')
     lines.append('}')
     lines.append('')
     lines.append(f'// {len(entries)} ADF variables.')
@@ -130,17 +146,22 @@ def main():
             last_group = e['group']
             lines.append(f'    // {e["group"]}')
         on = 'true' if e['default_on'] else 'false'
+        sg = 'true' if e['signed'] else 'false'
         line = (
             f'    LiveVar {{ name: "{e["name"]}", '
             f'unit: "{e["unit"]}", '
             f'id: 0x{e["id"]:04X}, '
             f'factor: {e["factor"]}, '
             f'offset: {e["offset"]}, '
+            f'signed: {sg}, '
             f'group: "{e["group"]}", '
             f'default_on: {on} }},'
         )
         lines.append(line)
     lines.append('];')
+    lines.append('')
+    lines.append('#[cfg(test)]')
+    lines.append('mod tests;')
     lines.append('')
 
     with open(OUT, 'w', encoding='utf-8') as f:

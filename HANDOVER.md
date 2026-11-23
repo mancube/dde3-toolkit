@@ -17,9 +17,9 @@ chip, DDE 3.0 hardware name).
 | File | Contents |
 |---|---|
 | `docs/wire-protocol.md` | **Authoritative** on-the-wire facts: framing, reply convention (`0x12` prefix, not `0x92`), XOR checksum, timing, ECU identity |
+| `docs/ds2-rx-buffer.md` | Firmware-confirmed K-line RX buffer & frame limits: 128-byte app receiver (`0x1EB34`), the two-receiver split (why 233-byte MPPS frames work), the unconfirmable "256" (boot block all `0xFF`) |
 | `docs/dtc-fault-protocol.md` | 4-step fault-read protocol, 50-byte fault record layout, DTC text tables in `DDE30DS0.prg` |
 | `docs/checksum.md` | TDI V3.1 checksum algorithm, block discovery, the false-BAD fix, the cold-start program chain |
-| `docs/break-mode.md` | Break-entered service protocol (10.4 k / 38.4 k) + decoded command set |
 | `docs/baud-0x91-patch.md` | DS2 0x91 baud-change ECU patch + `baud` command |
 | `docs/patches.md` | Manifest-driven firmware patches (CLI `patches` + GUI tab), builders, prebuilt images |
 | `docs/reverse-engineering.md` | .prg format, the 33 jobs, WinkFP VM status, DDE4 parallels, job re-scope |
@@ -645,7 +645,194 @@ out of the window within 1 s).
 Tests: 91 passing (+2: `app::tests::live_rate_window_is_the_true_mean`,
 `live_rate_window_ages_out_fast_start`). Clippy clean.
 
+### Session 39 (2026-11-21) — fake ECU parity with the 2026-11-19 real-car capture
+
+Analyzed the full real-car run log (`captures/dde3-20261119-222226.log`,
+323 TX/RX pairs) with the new `tools/analyze_run_log.py` (TX/RX pairing,
+LEN/XOR validation of every frame, command classification, reply-shape
+summary, `--image` flash verification). All 323 RX frames validate. Full
+write-up: `docs/SESSION_2026-11-19.md`.
+
+Findings → fixes (`src/sim.rs`):
+- UPROG_EIN (`0x0D`) → `12 4C A0` + **72-byte region/segment table** — not
+  stored in flash (firmware assembles it; the tail 24 B are the flash
+  region table at 0x3FC9A..0x3FCB2). Sim now serves the captured bytes
+  verbatim (`UPROG_EIN_DATA`).
+- Seed telegram = the **ident string verbatim** (42 B) — so Z = 0x07 gives
+  key `9C A0 97 96`, exactly like the real car (was a Z-seeded pseudo
+  pattern). Key-check OK = **`12 05 A0 00`** (status + one 0x00 byte), sets
+  a new `unlocked` latch (cleared by DIAGNOSE_ENDE `0x9F`).
+- Flash services (0x06 read/erase, 0x07 write) gated on
+  `in_prog && unlocked` (`flash_session_open()`); outside the session they
+  answer the **`12 04 A2` NACK stub** — proven by the 3-command capture
+  `captures/actual ecu UPROG_EIN response.txt` (UPROG_EIN done, no
+  seed/key → FLASH_LESEN → `12 04 A2`).
+- 0x0A (`12 05 A0 00`) and IDENT already matched — unchanged. **DTC
+  handlers untouched on purpose** — the toolkit's DTC parse/clear
+  algorithm is known-wrong and stays as-is (separate effort).
+
+Tests: 92 passing (new `uprog_ein_and_seed_key_real_car_parity` +
+`unlock()` helper; 8 sim tests updated for the new shapes/gating).
+E2E: `respond` on a socat pty pair + `read-cal` — the full bootstrap
+(IDENT → UPROG_EIN `12 4C A0 …` → AIF → seed/key → `12 05 A0 00`) then
+256 × 128 B reads, 32768 bytes written, exit 0. The `--sim` flag is
+outdated — `respond` is the only real sim now (candidate for removal).
+
+### Session 40 (2026-11-20) — old `--sim` flag and break-mode removed
+
+User: remove the outdated `--sim` flag + its unused code, and remove
+break-mode **altogether** — DS2 is the only protocol the ECU can actually
+use. `respond` (the only real sim) must remain fully functional.
+
+- **`--sim` gone**: the flag in `main.rs` + all 11 `set_sim` injection
+  blocks (incl. the sim-only read-back verify in `write`/`write-cal`), the
+  `BenchArgs.sim` field, and the in-process sim plumbing in `protocol.rs`
+  (`sim` field, `set_sim()`, the reply injection in `do_request`,
+  `verify_echo()`). `Kline` is now purely wire-based; the GUI `--demo`
+  (fake UI state, no `SimEcu`) is untouched.
+- **Break-mode gone**: `src/breakmode.rs` (813 lines, 12 tests), the
+  `break-probe` command, the `--fast` flag (break-probe-only),
+  `Kline::raw_write`/`raw_break` (break-only; `raw_read` **kept** —
+  `switch_fast_baud` uses it to drain the 0x91 ACK at the new rate),
+  `docs/break-mode.md`.
+- **Docs**: README (feature bullet, quick start now shows the `respond`
+  pty-pair workflow, layout, doc table, known limits), AGENTS.md, HANDOVER
+  (doc index + open item #3 closed), `docs/simulator.md`,
+  `docs/respond-mode.md`, `docs/wire-protocol.md`, `docs/session-log.md`,
+  `sim.rs` module doc (now "the state machine behind `respond`").
+- `src/sim.rs` behaviour unchanged — still the full DS2 state machine.
+  Tests: 80 passing (was 92; the 12 removed were breakmode's).
+- **`respond` E2E verified untouched**: socat pty pair +
+  `read-cal --flash captures/actual_flash.bin` — full bootstrap (IDENT →
+  UPROG_EIN `12 4C A0 …` → AIF → SEED_KEY), 256 × 128 B reads, 32768
+  bytes written, **byte-exact** vs `actual_flash.bin` over the calibration
+  region, exit 0.
+
+### Session 41 (2026-11-22) — MPPS-style calibration write (224-B blocks, `07 0F`, DTC prep)
+
+User request: the calibration write should mimic **MPPS** (100% on-car
+success, per the user) instead of the Galletto flow. New branch
+`feature/mpps-style-calibration-write`.
+
+- **224-byte calibration blocks** (`CAL_WRITE_BLOCK = 0xE0`): 146×224 + 1×64
+  = 32768 (the 32 KB calibration area). Distinct from §32's rejected
+  192-byte *program-area* blocks — the MPPS capture
+  (`captures/mpps capture/mppswrite.txt`) proves 224-byte *calibration-area*
+  blocks. `write_full` keeps 64-byte blocks.
+- **`07 0F` write-end** (`frame_flash_write_end(addr)`): sent **once** before
+  the erase, at **0x03FCE0** (MPPS sends it twice; the address was the
+  session-31 open question, now resolved by the capture).
+- **DTC read+clear prep** (`read_and_clear_dtcs()`): `12 05 04 00` (FS_LESEN
+  entry) + `12 04 05` (FS_LOESCHEN), sent **once** via a new `dtc_prep` flag
+  on `begin_flash_session` — runs before reads (`read_full`/`read_range`) and
+  writes (`write_full` first phase, `write_calibration`), matching MPPS.
+- `DIAGNOSE_ENDE` kept (harmless; MPPS omits it, Galletto sends it).
+- Tests: `flash_write_end_matches_mpps`, `cal_write_block_covers_32kb`,
+  `sim::tests::mpps_style_cal_write_preamble` (83 passing).
+- **E2E** (socat pty pair, `bench --write-cal` vs `respond`): 147 FLASH_SCHREIBEN
+  + 1 FLASH_SCHREIBEN_ENDE + 1 FS_LESEN + 1 FS_LOESCHEN + 1 DIAGNOSE_ENDE;
+  the reconstructed 0x38000..0x40000 span is **byte-identical** to the source
+  image.
+- Docs: `docs/wire-protocol.md` §33, `docs/FINDINGS_mpps_vs_galletto_calibration.md`.
+
+### Session 42 (2026-11-23) — FrameParser `MAX_BUF` 192 → 512 (the 233-B MPPS write echo)
+
+On-car `write-cal` (session 41's feature) froze mid-write with
+`no echo of service 0x07 (12 E9 07 02 03 84 60 E0 …) … line dead or ECU not
+listening` after a few 224-byte blocks. Root cause: each 224-byte block is one
+**233-byte** wire frame (LEN `0xE9`), but `FrameParser::MAX_BUF` was still 192
+(sized in §21 for the ≤73-B Galletto frames). With a monitor tap, the ECU
+reflects our own TX back, so the 233-B write frame hit the parser, overflowed
+192, and the resync drained the front — destroying the `12 E9` header. The
+parser re-anchored on a `0x12` *inside the data tail* (a phantom anchor that
+never completes) and swallowed the ECU's reply → `got_echo` never set → 3
+resends → the error. Data-dependent (only when the drained tail held a `0x12`),
+so it froze at one specific block, not every block.
+
+- **Fix:** `MAX_BUF` 192 → **512** in `src/protocol.rs` (matches the
+  `Framer` in `src/capture.rs`, already 512). Drain heuristic unchanged.
+- **Regression test:** `protocol::tests::parser_holds_full_mpps_write_echo`
+  (feeds the full 233-B frame + a trailing reply; fails on 192, passes on 512).
+- **E2E proof:** faithful K-line T-topology tap (two raw ptys; bridge forwards
+  each TX to the peer *and* taps it back to the sender's reader — no pty
+  `ECHO`, so no feedback loop) + `respond` + `bench --write-cal` on an image
+  with a `12 FC` trap in block 5's tail: **old code** → the exact `no echo`
+  error; **fixed** → all 147 blocks, dump byte-identical.
+- Docs: `docs/wire-protocol.md` §34 (+ §33 caveat that the socat E2E had no
+tap echo). `cargo test` → 84 passing.
+
+### Session 43 (2026-11-23) — first real-car cal write: K-line sleep/wake found, pacing set to MPPS speed
+
+First full real-car calibration write (32 KB, MPPS-style flow). The write
+**succeeded** (car started afterwards) but only after two failed bootstrap
+IDENTs and a manual reconnect; the write also ran ~2.5× slower than MPPS.
+Analyzed with the new `tools/analyze_realcar_write.py` (run-log + MPPS
+reference parser; `--lines N` to bound the log, `--mpps <file>` for the
+cadence comparison).
+
+- **Root cause of the two dropped IDENTs:** the ECU's K-line module sleeps
+  after ~20 s of line silence and ignores plain data frames while asleep;
+  only a line-level pulse (break) wakes it. Attempts 1 & 2 (23.3 s and
+  12.8 s of idle) were dropped *with echo* (frames reached the bus, ECU
+  silent); the user's reconnect (port close+open → line pulse) woke it, and
+  attempt 3 + the whole write ran clean. "faster 9600" was a red herring
+  (live-loop only). → `Kline::wake_kline()` (break + settle + drain) and a
+  one-shot IDENT retry after wake in `begin_flash_session`; `identify()`
+  timeout 500 → 1000 ms (real ECU answers ident in 473–516 ms).
+- **Pacing:** the write ran at the old 3 ms/byte → 830 ms/frame vs MPPS's
+  327 ms (130 s vs ~48 s for 32 KB). At 9600 a byte is 1.04 ms on the wire,
+  so host pacing below that is wire-invisible — `start_write` /
+  `start_write_cal` now pass `data_delay_ms = 0`, `write_frame` has a
+  bulk-write fast path, and the now-redundant `fast write` checkbox /
+  `--fast-write` flag are removed.
+- Docs: `docs/wire-protocol.md` §35 (timeline, mechanism, measured latencies
+  for timeout sizing). `cargo test` → 84 passing.
+- **On-car re-verification pending:** one more `write-cal` with the new
+  code — expect ~330–350 ms/frame (32 KB in ~50 s) and, if the ECU is
+  asleep, a logged `IDENT no reply (…) — K-line wake break, retrying` line
+  followed by a successful bootstrap.
+
+### Session 44 (2026-11-23) — signed 16-bit live/logger values decoded correctly
+
+User finding: the value logger showed negative parameters as huge positives —
+SB injection start setpoint/actual read **655.34** instead of e.g. **-0.02**
+(Grad KW). Root cause: every ADF value was decoded as unsigned
+(`raw as f64 * factor + offset`), but the ECU reports some ADFs as
+two's-complement i16.
+
+- **Signedness source:** the tool32 ADF export's `DATA_TYPE` column —
+  **7 = signed i16, 5 = unsigned u16** (22 of the 81 variables are type 7;
+  exactly the negative-capable set: SB injection start setpoint/actual,
+  SBR PI output, acceleration, MSR intervention, M_E correction/quantity
+  deltas, friction quantity). Cross-checked against the user's on-car
+  observation (0x0F52/0x0F53 are type 7).
+- `LiveVar` gains `signed: bool` + `LiveVar::decode(raw)` (sign-extend,
+  then `raw * factor + offset`); `tools/gen_live_rs.py` emits both from the
+  CSV and `src/live.rs` was regenerated (also emits the `mod tests` hook so
+  regeneration can't drop it).
+- Both decode sites use it: the live display update (`Msg::Live`) and the
+  CSV logger (`LogWriter::write_row`) — the logger tab, live tab, charts
+  and CSV all flow from those two points.
+- Tests: `live::tests` — the 655.34 → -0.02 regression case, unsigned
+  full-range kept (WTF 3000 → 26.86 °C, 0xFFFF stays positive),
+  monotonicity over each variable's domain, and the 22-id signed set pinned
+  against the ADF export (88 passing, clippy clean).
+
 ## ← CURRENT TASK (take over from here)
+
+**MPPS-style calibration write (sessions 41–43) — on-car re-verification of
+the session-43 fixes pending.** The calibration write mimics MPPS:
+224-byte blocks (146×224 + 1×64), a single `07 0F` write-end @0x03FCE0
+before the erase, and a one-shot DTC read+clear prep (also before reads).
+It ran to completion on the real car (session 43, car started afterwards),
+but at the old 3 ms/byte pacing and only after a manual reconnect fixed the
+slept K-line. Session 43 added: unpaced (0 ms/byte) data frames — MPPS
+parity, expect ~330–350 ms/frame — and the self-healing bootstrap
+(`wake_kline()` break + IDENT retry). Next on-car: `dde3-toolkit write-cal
+<cal.bin> --port /dev/ttyUSB1`; confirm the cadence in the log
+(`tools/analyze_realcar_write.py`) and that a cold ECU bootstraps on the
+retry. The 224-B size is proven by the MPPS capture (wire-protocol §33);
+§32's 192-B rejection was the *program* area, a different case.
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU
 OKAYed two 192-byte write blocks, then hung on the third (no reply, no
@@ -853,9 +1040,10 @@ UI/UX polish requested, no behaviour changes.
    captured 2026-11-10 (`captures/dde3newlog.txt`).
 2. **MW live-data ADF ids** — the ADF table comes from the EDC15M export;
    ids to be confirmed on the real ECU (battery 0x0F65 already confirmed).
-3. **Break-mode T2.1 capture** — `break-probe` + `tools/monitor.py` on
-   `/dev/ttyUSB0` to confirm the on-wire 4-byte layout, then wire the
-   byte-addressed reads into CLI/GUI (`docs/break-mode.md`).
+3. ~~**Break-mode T2.1 capture**~~ — **removed** (session 40): the
+   break-entered service is not a protocol the ECU can actually use; DS2 is
+   the only protocol. `breakmode.rs`, the `break-probe` command and
+   `docs/break-mode.md` are gone.
 4. ~~**0x91 patch bench test**~~ — the fake-ECU half is done (session 35:
    `respond --patched-baud` mirrors the patch, `baud` / `bench --fast-baud`
    verified end-to-end over a pty loopback). On-car half remains: flash

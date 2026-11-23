@@ -193,7 +193,7 @@ impl LogWriter {
                 .unwrap_or(0);
             let i = LIVE_VARS.iter().position(|v| v.id == *id);
             let phys = match i {
-                Some(i) => raw as f64 * LIVE_VARS[i].factor + LIVE_VARS[i].offset,
+                Some(i) => LIVE_VARS[i].decode(raw),
                 None => raw as f64,
             };
             let _ = write!(self.file, ",{phys:.4}");
@@ -290,7 +290,6 @@ pub struct App {
     graph_var: usize,
     backup_ok: bool,
     write_confirm: String,
-    fast_write: bool,
     auto_live: bool,
     auto_read: bool,
     auto_cal: bool,
@@ -331,7 +330,6 @@ impl App {
         image: Option<PathBuf>,
         auto_write_cal: bool,
         auto_write: bool,
-        fast_write: bool,
         fast_baud: Option<u32>,
         log_dir: Option<PathBuf>,
     ) -> Self {
@@ -384,7 +382,6 @@ impl App {
             graph_var: 0,
             backup_ok: false,
             write_confirm: String::new(),
-            fast_write,
             auto_live,
             auto_read,
             auto_cal,
@@ -625,7 +622,7 @@ impl App {
                     }
                     for (id, raw) in vals {
                         if let Some(i) = LIVE_VARS.iter().position(|v| v.id == id) {
-                            let v = raw as f64 * LIVE_VARS[i].factor + LIVE_VARS[i].offset;
+                            let v = LIVE_VARS[i].decode(raw);
                             self.live_values[i] = v;
                             let h = &mut self.live_history[i];
                             h.push(v as f32);
@@ -743,10 +740,6 @@ impl App {
                                     "WARNING: ident looks erased/corrupt; the application may be incomplete".into(),
                                 ));
                             }
-                            // Checksum-status link probe; its payload is no
-                            // longer used for the SW label — the ident string
-                            // is the source of truth.
-                            let _ = k.read_app(0x7BFB0, 10);
                             snapshot_battery(&mut k, &tx);
                             let logs = k.take_logs();
                             *guard = Some(k);
@@ -884,7 +877,6 @@ impl App {
                 return;
             };
             let _ = tx.send(Msg::Status("Reading full flash".into()));
-            snapshot_battery(k, &tx);
             k.set_silence(10);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(
@@ -939,7 +931,6 @@ impl App {
                 return;
             };
             let _ = tx.send(Msg::Status("Reading calibration".into()));
-            snapshot_battery(k, &tx);
             k.set_silence(10);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(
@@ -996,11 +987,12 @@ impl App {
         let Some(image) = self.prepare_write_image() else {
             return;
         };
-        // Pacing 0 when the "fast write" checkbox is set OR the 0x91 link is
-        // already at the fast baud — at 124800 the 3 ms/byte WinKFP pacing
-        // (a 9600 habit) would dominate: a 73-byte frame takes 219 ms of
-        // pacing vs 5.9 ms of wire (same rule as bench and the live loop).
-        let fast = self.fast_write || self.fast_baud_active.is_some();
+        // Data frames go out unpaced (0 ms/byte): at 9600 a byte occupies the
+        // line for 1.04 ms, so host pacing below that is invisible to the ECU
+        // — the wire bitstream is identical, and MPPS (the reference) sends
+        // back-to-back. Per-byte pacing only added host time: the real-car
+        // capture measured 830 ms/frame at 3 ms/byte vs MPPS's ~330 ms/frame
+        // (captures/dde3-20261123-122003.log vs captures/mpps capture/mppswrite.txt).
         self.stop_live();
         self.active_job = Some(Job::Write);
         self.job_started = Some(Instant::now());
@@ -1011,7 +1003,6 @@ impl App {
                 return;
             };
             let _ = tx.send(Msg::Status("Erasing and writing".into()));
-            snapshot_battery(k, &tx);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(
                     done as f32 / total as f32,
@@ -1019,10 +1010,8 @@ impl App {
                 ));
             };
             k.set_silence(10);
-            k.set_write_delay(3);
-            // `fast` (checkbox or fast-baud link) drops the inter-byte pause;
-            // the checkbox-only-at-9600 case is unverified on real hardware.
-            let result = k.write_full(&image, 9600, if fast { 0 } else { 3 }, &mut progress);
+            k.set_write_delay(0);
+            let result = k.write_full(&image, 9600, 0, &mut progress);
             k.set_write_delay(3);
             let logs = k.take_logs();
             for l in logs {
@@ -1055,8 +1044,7 @@ impl App {
         let Some(image) = self.prepare_write_image() else {
             return;
         };
-        // Same fast-baud pacing rule as the full write (see start_write).
-        let fast = self.fast_write || self.fast_baud_active.is_some();
+        // Unpaced data frames, same rule as the full write (see start_write).
         self.stop_live();
         self.active_job = Some(Job::WriteCal);
         self.job_started = Some(Instant::now());
@@ -1067,7 +1055,6 @@ impl App {
                 return;
             };
             let _ = tx.send(Msg::Status("Erasing and writing calibration".into()));
-            snapshot_battery(k, &tx);
             let mut progress = |done: usize, total: usize| {
                 let _ = tx.send(Msg::Progress(
                     done as f32 / total as f32,
@@ -1075,10 +1062,8 @@ impl App {
                 ));
             };
             k.set_silence(10);
-            k.set_write_delay(3);
-            // `fast` (checkbox or fast-baud link) drops the inter-byte pause;
-            // the checkbox-only-at-9600 case is unverified on real hardware.
-            let result = k.write_calibration(&image, 9600, if fast { 0 } else { 3 }, &mut progress);
+            k.set_write_delay(0);
+            let result = k.write_calibration(&image, 9600, 0, &mut progress);
             k.set_write_delay(3);
             let logs = k.take_logs();
             for l in logs {
@@ -1989,8 +1974,8 @@ impl App {
     /// bottom of the rail.
     fn pinned_sections(&mut self, ui: &mut Ui) {
                 // LINK — program-wide link/timing toggles. They used to live
-                // on the Live tab (faster 9600, fast baud) and the Write tab
-                // (fast write); they affect the whole app, so they are global.
+                // on the Live tab (faster 9600, fast baud) and the Write tab;
+                // they affect the whole app, so they are global.
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(6.0);
@@ -2009,16 +1994,6 @@ impl App {
                     } else {
                         "FAST9600 off — 55 ms poll gap, 3 ms/byte".into()
                     });
-                }
-                let mut fast_write = self.fast_write;
-                if ui
-                    .checkbox(&mut fast_write, RichText::new("fast write").size(11.0))
-                    .on_hover_text(
-                        "Drops the 3 ms per-byte pacing on flash writes (the DDE3 stays at 9600 baud).",
-                    )
-                    .changed()
-                {
-                    self.fast_write = fast_write;
                 }
                 match self.fast_baud_active {
                     Some(rate) => {
@@ -4395,43 +4370,4 @@ fn live_rate_update(stamps: &mut VecDeque<Instant>, now: Instant) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn live_rate_window_is_the_true_mean() {
-        let mut stamps = VecDeque::new();
-        let t0 = Instant::now();
-        assert_eq!(live_rate_update(&mut stamps, t0), 0.0, "first sample: no rate yet");
-        // ~50 ms per cycle → the 1 s window average must settle near 20 Hz
-        // and never overshoot it (it is the plain mean of what happened).
-        let mut hz = 0.0;
-        for _ in 0..8 {
-            thread::sleep(Duration::from_millis(50));
-            hz = live_rate_update(&mut stamps, Instant::now());
-        }
-        assert!((14.0..28.0).contains(&hz), "expected ~20 Hz, got {hz}");
-    }
-
-    #[test]
-    fn live_rate_window_ages_out_fast_start() {
-        // Overshoot scenario: a few fast cycles at the start must age out of
-        // the 1 s window instead of pinning the counter high (the old EMA
-        // decayed a spike over ~15 samples).
-        let mut stamps = VecDeque::new();
-        let t0 = Instant::now();
-        let mut hz = live_rate_update(&mut stamps, t0);
-        for _ in 0..3 {
-            thread::sleep(Duration::from_millis(10));
-            hz = live_rate_update(&mut stamps, Instant::now());
-        }
-        assert!(hz > 50.0, "fast start should read fast: {hz} Hz");
-        // Then slow to ~100 ms cycles; within the next second the window
-        // must reflect the slow reality, not the fast start.
-        for _ in 0..10 {
-            thread::sleep(Duration::from_millis(100));
-            hz = live_rate_update(&mut stamps, Instant::now());
-        }
-        assert!((5.0..20.0).contains(&hz), "expected ~10 Hz after aging, got {hz}");
-    }
-}
+mod tests;

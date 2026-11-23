@@ -2,8 +2,8 @@
 
 Status snapshots and implementation notes from earlier sessions, kept for
 history. Superseded by `docs/wire-protocol.md` (framing),
-`docs/dtc-fault-protocol.md` (faults), `docs/checksum.md`, and
-`docs/break-mode.md` where they overlap.
+`docs/dtc-fault-protocol.md` (faults), and `docs/checksum.md` where they
+overlap.
 
 ## 0. STATUS — updated 2026-11-09 (session 3)
 

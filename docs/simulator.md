@@ -1,7 +1,7 @@
 # Full DS2 ECU simulator (`SimEcu`) + job-replay test suite
 
-The `--sim` mode of the toolkit runs an in-process ECU model
-(`src/sim.rs`, `SimEcu`). Since the full-DS2 upgrade it implements the
+The `respond` fake ECU runs the `SimEcu` state machine (`src/sim.rs`).
+Since the full-DS2 upgrade it implements the
 **complete DS2 service set** of the Bosch EDC15M / DDE 3.0 (M47) ECU, as
 decompiled in `~/Desktop/edc15m_out/research/` (diag_jobs.md,
 routines_part3.md). The DDE 3.0 M47 job file (177 jobs, `DDE30.prg`) is the
@@ -196,9 +196,6 @@ interesting set is the 21 telegram families.
 
 ## What is NOT in the sim
 
-* The break-entered 10.4 k / 38.4 k second service protocol (0x1F6D2
-  jump table) — low confidence in the decomp, and it lives on a different
-  baud/channel (see `docs/break-mode.md`).
 * CAN-side behaviour (PSG over CAN, MFL, IHKA): the sim answers the DS2
   shadow of it from RAM only.
 * The `0x91` baud-change patch: the sim always answers the current baud;

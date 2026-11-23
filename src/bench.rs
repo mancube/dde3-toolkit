@@ -42,7 +42,6 @@ pub struct BenchArgs {
     pub mode: Mode,
     pub baud: u32,
     pub data_delay: u64,
-    pub sim: bool,
     /// Switch the DS2 link up via service 0x91 right after IDENT (needs the baud
     /// patch flashed). 38400 or 125000; the port reopens at the actual divisor.
     pub fast_baud: Option<u32>,
@@ -59,9 +58,6 @@ pub fn run(args: BenchArgs) -> Result<()> {
     let mut k = Kline::open(&args.port, args.baud)
         .with_context(|| format!("cannot open {}", args.port))?;
     k.set_data_delay(args.data_delay);
-    if args.sim {
-        k.set_sim(crate::sim::SimEcu::new());
-    }
     let ident = k.identify().context("ECU did not answer A2")?;
     eprintln!(
         "IDENT {} ({})",
@@ -264,46 +260,4 @@ fn prepare_image(raw: &[u8], mode: Mode) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn synthetic_image(seed: u8) -> Vec<u8> {
-        let mut img = vec![0u8; IMAGE_SIZE];
-        for (i, b) in img.iter_mut().enumerate() {
-            *b = seed.wrapping_add((i % 251) as u8);
-        }
-        img
-    }
-
-    #[test]
-    fn write_image_is_full_and_checked() {
-        let img = synthetic_image(0x11);
-        let fixed = prepare_image(&img, Mode::Write).expect("correction succeeds");
-        assert_eq!(fixed.len(), IMAGE_SIZE);
-        let bad: Vec<_> = checksum::verify(&fixed)
-            .iter()
-            .filter(|r| !r.ok)
-            .map(|r| r.name)
-            .collect();
-        assert!(bad.is_empty(), "corrected image must verify: {bad:?}");
-    }
-
-    #[test]
-    fn write_image_rejects_wrong_size() {
-        let err = prepare_image(&[0u8; 1024], Mode::Write).unwrap_err();
-        assert!(err.to_string().contains("256 KB"));
-    }
-
-    #[test]
-    fn cal_image_from_full_is_32kb() {
-        let img = synthetic_image(0x22);
-        let cal = prepare_image(&img, Mode::WriteCal).expect("full image cal slice");
-        assert_eq!(cal.len(), CAL_LEN);
-    }
-
-    #[test]
-    fn cal_image_rejects_wrong_size() {
-        let err = prepare_image(&[0u8; 4096], Mode::WriteCal).unwrap_err();
-        assert!(err.to_string().contains("256 KB or 32 KB"));
-    }
-}
+mod tests;

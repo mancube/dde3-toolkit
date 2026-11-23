@@ -76,6 +76,11 @@ Releases are **git-tagged binary bundles in `dist/`**, not CI artifacts:
 
 ## Branches / pushing
 
-- `main` is the only branch; push with `git push origin main`.
+- **Always push after committing** — a commit that only exists locally is
+  not done. Push the current branch right after each commit
+  (`git push origin <branch>`); if several related commits were made in a
+  row, one push after the last of them is enough.
+- Feature work happens on `feature/*` branches; `main` is the integration
+  branch (push with `git push origin main`).
 - Remote: `origin` → `https://git.nas.lan/ikac/dde3-toolkit.git`.
 - If you need to reset the remote with force-push, ask the user first.
