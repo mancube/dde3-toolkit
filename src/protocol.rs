@@ -792,6 +792,21 @@ impl Kline {
     /// Transmit a full wire frame (payload + trailing XOR) with the
     /// configured per-byte pacing — the same path every request goes out on.
     pub fn write_frame(&mut self, frame: &[u8]) -> Result<()> {
+        if self.write_delay.is_zero() {
+            // No pacing: one bulk write. The wire bitstream is identical to
+            // paced TX (at 9600 a byte occupies the line for 1.04 ms, far
+            // longer than any host pacing, so the UART buffer never drains
+            // between bytes), but the host returns in one syscall instead of
+            // one write_all+flush per byte — that per-byte host time is what
+            // cost ~700 ms/frame at 3 ms/byte (MPPS sends back-to-back).
+            self.port
+                .write_all(frame)
+                .with_context(|| format!("serial write failed on {}", self.path))?;
+            self.port
+                .flush()
+                .with_context(|| format!("serial flush failed on {}", self.path))?;
+            return Ok(());
+        }
         for (i, b) in frame.iter().enumerate() {
             self.port
                 .write_all(&[*b])
@@ -1010,8 +1025,38 @@ impl Kline {
     /// The real ECU answers with the normal `12 <len> A0 <ascii…>` envelope
     /// (e.g. the captured `12 2E A0 37 37 38 36 …`).
     pub fn identify(&mut self) -> Result<Vec<u8>> {
-        let r = self.request(&[0x12, 0x04, 0x00], Duration::from_millis(500))?;
+        // 1000 ms, not 500: the real ECU answers ident in 473–516 ms
+        // (captures/dde3-20261123-122003.log) — 500 ms was right at the edge.
+        let r = self.request(&[0x12, 0x04, 0x00], Duration::from_millis(1000))?;
         Ok(strip_reply_envelope(&r).to_vec())
+    }
+
+    /// Wake the ECU's K-line interface: hold the line dominant (break) for a
+    /// few ms, then drain whatever trickled in. The ECU's K-line module
+    /// sleeps after ~20 s of line silence and drops plain data frames while
+    /// asleep — the first real-car write capture shows two bootstrap IDENTs
+    /// dropped after 23 s of idle, then restored by a port close+open (whose
+    /// line pulse acts as a break). Flasher tools get that pulse for free
+    /// because they open the port fresh for every session; we keep the port
+    /// open, so we send the break explicitly (see [`Kline::begin_flash_session`]).
+    pub fn wake_kline(&mut self) -> Result<()> {
+        // Best effort: some adapters don't support break — the retry itself
+        // may still succeed if the ECU was actually awake.
+        match self.port.set_break() {
+            Ok(()) => {
+                thread::sleep(Duration::from_millis(10));
+                let _ = self.port.clear_break();
+            }
+            Err(e) => self.log(format!("K-line wake: set_break unsupported ({e})")),
+        }
+        // Give the ECU's receiver time to re-arm, then clear the line.
+        thread::sleep(Duration::from_millis(100));
+        let _ = self.port.clear(ClearBuffer::All);
+        let mut buf = [0u8; 512];
+        while self.port.read(&mut buf)? > 0 {}
+        self.parser.clear();
+        self.pending.clear();
+        Ok(())
     }
 
     /// Best-effort return to the 9600 application link. Returns true when the ECU
@@ -1065,8 +1110,17 @@ impl Kline {
     pub fn begin_flash_session(&mut self, dtc_prep: bool) -> Result<()> {
         // 1) One more identify — (re-)open / verify the diagnostic session.
         //    Single-shot: exactly one of each flashing-session frame, no retry.
-        self.request_once(&frame_ident(), Duration::from_millis(500))
-            .with_context(|| "FLASH_READ bootstrap: IDENT failed")?;
+        //    The ECU's K-line module sleeps after ~20 s of line silence and
+        //    drops plain data frames while asleep, so a cold IDENT can time
+        //    out (first real-car capture: two dropped IDENTs after 23 s of
+        //    idle). Wake it with a break — the same line pulse a fresh port
+        //    open produces — and retry once.
+        if let Err(e) = self.request_once(&frame_ident(), Duration::from_millis(1000)) {
+            self.log(format!("IDENT no reply ({e}) — K-line wake break, retrying"));
+            self.wake_kline()?;
+            self.request_once(&frame_ident(), Duration::from_millis(1000))
+                .with_context(|| "FLASH_READ bootstrap: IDENT failed (even after wake break)")?;
+        }
         // 2) Set to programming mode.
         self.request_once(&frame_uprog_ein(), Duration::from_secs(3))
             .with_context(|| "FLASH_READ bootstrap: UPROG_EIN failed")?;

@@ -761,20 +761,52 @@ so it froze at one specific block, not every block.
 - Docs: `docs/wire-protocol.md` §34 (+ §33 caveat that the socat E2E had no
 tap echo). `cargo test` → 84 passing.
 
+### Session 43 (2026-11-23) — first real-car cal write: K-line sleep/wake found, pacing set to MPPS speed
+
+First full real-car calibration write (32 KB, MPPS-style flow). The write
+**succeeded** (car started afterwards) but only after two failed bootstrap
+IDENTs and a manual reconnect; the write also ran ~2.5× slower than MPPS.
+Analyzed with the new `tools/analyze_realcar_write.py` (run-log + MPPS
+reference parser; `--lines N` to bound the log, `--mpps <file>` for the
+cadence comparison).
+
+- **Root cause of the two dropped IDENTs:** the ECU's K-line module sleeps
+  after ~20 s of line silence and ignores plain data frames while asleep;
+  only a line-level pulse (break) wakes it. Attempts 1 & 2 (23.3 s and
+  12.8 s of idle) were dropped *with echo* (frames reached the bus, ECU
+  silent); the user's reconnect (port close+open → line pulse) woke it, and
+  attempt 3 + the whole write ran clean. "faster 9600" was a red herring
+  (live-loop only). → `Kline::wake_kline()` (break + settle + drain) and a
+  one-shot IDENT retry after wake in `begin_flash_session`; `identify()`
+  timeout 500 → 1000 ms (real ECU answers ident in 473–516 ms).
+- **Pacing:** the write ran at the old 3 ms/byte → 830 ms/frame vs MPPS's
+  327 ms (130 s vs ~48 s for 32 KB). At 9600 a byte is 1.04 ms on the wire,
+  so host pacing below that is wire-invisible — `start_write` /
+  `start_write_cal` now pass `data_delay_ms = 0`, `write_frame` has a
+  bulk-write fast path, and the now-redundant `fast write` checkbox /
+  `--fast-write` flag are removed.
+- Docs: `docs/wire-protocol.md` §35 (timeline, mechanism, measured latencies
+  for timeout sizing). `cargo test` → 84 passing.
+- **On-car re-verification pending:** one more `write-cal` with the new
+  code — expect ~330–350 ms/frame (32 KB in ~50 s) and, if the ECU is
+  asleep, a logged `IDENT no reply (…) — K-line wake break, retrying` line
+  followed by a successful bootstrap.
+
 ## ← CURRENT TASK (take over from here)
 
-**MPPS-style calibration write (sessions 41–42, branch
-`feature/mpps-style-calibration-write`) — on-car re-verification pending.** The
-calibration write mimics MPPS: 224-byte blocks (146×224 + 1×64), a single
-`07 0F` write-end @0x03FCE0 before the erase, and a one-shot DTC read+clear
-prep (also before reads). The on-car `no echo of service 0x07` freeze is
-**fixed** (session 42): `FrameParser::MAX_BUF` 192 → 512 so the 233-byte
-write echo is held intact; regression test `parser_holds_full_mpps_write_echo`
-+ tap E2E both pass. Next on-car: `dde3-toolkit write-cal <cal.bin> --port
-/dev/ttyUSB1` and confirm the 147×224-B writes + `07 0F` + DTC prep run clean
-and the calibration area matches. The 224-B size is proven by the MPPS capture
-(wire-protocol §33); §32's 192-B rejection was the *program* area, a different
-case.
+**MPPS-style calibration write (sessions 41–43) — on-car re-verification of
+the session-43 fixes pending.** The calibration write mimics MPPS:
+224-byte blocks (146×224 + 1×64), a single `07 0F` write-end @0x03FCE0
+before the erase, and a one-shot DTC read+clear prep (also before reads).
+It ran to completion on the real car (session 43, car started afterwards),
+but at the old 3 ms/byte pacing and only after a manual reconnect fixed the
+slept K-line. Session 43 added: unpaced (0 ms/byte) data frames — MPPS
+parity, expect ~330–350 ms/frame — and the self-healing bootstrap
+(`wake_kline()` break + IDENT retry). Next on-car: `dde3-toolkit write-cal
+<cal.bin> --port /dev/ttyUSB1`; confirm the cadence in the log
+(`tools/analyze_realcar_write.py`) and that a cold ECU bootstraps on the
+retry. The 224-B size is proven by the MPPS capture (wire-protocol §33);
+§32's 192-B rejection was the *program* area, a different case.
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU
 OKAYed two 192-byte write blocks, then hung on the third (no reply, no

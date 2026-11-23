@@ -156,9 +156,9 @@ The loaded image is shown in a status strip on the Write, Checksums and
 Patches tabs (name, size/kind, checksum state) with a **Close image** control,
 and in the side nav while it is loaded. Keyboard: **Ctrl+O** opens an image,
 **Ctrl+S** saves the loaded image. Disabled controls explain why on hover.
-The side nav also has a program-wide **LINK · GLOBAL** section: faster 9600,
-fast write, and fast baud 125k. The battery voltage pill sits in the top bar
-next to the CONNECTED status.
+The side nav also has a program-wide **LINK · GLOBAL** section: faster 9600
+and fast baud 125k. The battery voltage pill sits in the top bar next to the
+CONNECTED status.
 
 ## Testing
 

@@ -301,3 +301,84 @@ no pty `ECHO`, so no feedback loop) + `respond` + `bench --write-cal` on an
 image with a `12 FC` trap in block 5's tail: **old code** fails with the exact
 `no echo of service 0x07` error; **fixed code** writes all 147 blocks and the
 dump matches byte-for-byte.
+
+## 35. Real-car capture (2026-11-23): K-line sleep/wake + write pacing parity with MPPS
+
+First full real-car calibration write with the MPPS-style flow
+(`captures/dde3-20261123-122003.log`, analyzed by
+`tools/analyze_realcar_write.py`). Two findings, both now fixed in code.
+
+### 35.1 The ECU's K-line module sleeps after ~20 s of line silence — and data frames don't wake it
+
+Timeline of the capture (relative seconds):
+
+| t | event |
+|---|---|
+| 16.2 | connect (fresh port open) → IDENT OK (reply **516 ms**), battery live OK |
+| 40.3 | write attempt 1: bootstrap IDENT → **no reply** (23.3 s after last traffic) |
+| 53.1 | write attempt 2: bootstrap IDENT → **no reply** (12.8 s after attempt 1) |
+| 63.3 | **reconnect** (port close+open) → IDENT OK (473 ms) |
+| 77.8 | write attempt 3: bootstrap IDENT OK → full 147-frame write OK |
+
+Facts that pin down the mechanism:
+
+- The dropped IDENTs had a **TX echo** (no `no-echo retry` annotation in the
+  log) — the frames reached the bus; the ECU simply did not answer within the
+  (effective ~750 ms) window.
+- Attempt 2 came 12.8 s after attempt 1 and was dropped too — attempt 1's
+  data frame did **not** wake the module (a data-wake with first-frame loss
+  would have made attempt 2 succeed).
+- The port close+open (reconnect) restored the link, and the ECU then stayed
+  responsive for 187 s, including 24.6 s and 24.3 s gaps after the write.
+
+Conclusion: the ECU's K-line interface sleeps after ~20 s of silence; plain
+data frames are ignored while it is asleep; a **line-level pulse (break)**
+wakes it. Flasher tools (MPPS, Galletto, WinKFP) get that pulse for free
+because they open the port fresh for every session — `connect` in this tool
+does too, which is why connect/ident at startup always worked while the
+write-attempt bootstrap (same port, 20+ s idle) failed. The "faster 9600"
+GUI toggle was a red herring: it only paces the live loop, and the
+successful write ran at the default 3 ms/byte.
+
+**Fix** (`src/protocol.rs`):
+- `Kline::wake_kline()` — `set_break()` / `clear_break()` (10 ms) + 100 ms
+  settle + drain + parser/pending reset. Best-effort: adapters without break
+  support log a note and the retry may still succeed.
+- `begin_flash_session()`: the bootstrap IDENT (now 1000 ms, see 35.2) is
+  retried **once** after `wake_kline()` on failure, with a log line
+  (`IDENT no reply (…) — K-line wake break, retrying`). This makes the flash
+  bootstrap self-healing the way the user's manual reconnect did.
+- `identify()` timeout 500 → **1000 ms** (real ECU answers ident in
+  473–516 ms — 500 ms was at the edge even for a healthy link).
+
+### 35.2 Write pacing: 0 ms/byte is wire-identical and matches MPPS
+
+At 9600 baud (10 bits/byte) a byte occupies the line for **1.0417 ms**.
+Host-side per-byte pacing below that is invisible to the ECU — the UART TX
+buffer keeps the wire stream continuous either way. The old 3 ms/byte
+WinKFP habit therefore only added **host** time: a 233-byte write frame
+cost ~700 ms of `write_all`+`flush`+`sleep` per byte.
+
+Measured cadence for the 233-byte `FLASH_SCHREIBEN` frames:
+
+| | per frame | 147 frames (32 KB cal) |
+|---|---|---|
+| our run, 3 ms/byte (this capture) | 830 ms | 130 s |
+| MPPS reference (`captures/mpps capture/mppswrite.txt`) | 327 ms | ~48 s |
+
+MPPS sends back-to-back; its 327 ms ≈ 242 ms of wire (233 × 1.04 ms) + the
+ECU's reply. **Fix** (`src/app.rs`, `src/protocol.rs`):
+- `start_write` / `start_write_cal` now pass `data_delay_ms = 0` (the
+  `fast write` checkbox, which only selected this, is removed — it is now
+  always on).
+- `Kline::write_frame` fast path: with zero delay the frame goes out as one
+  bulk `write_all` instead of per-byte `write_all`+`flush` (same wire
+  bitstream, one syscall instead of 233).
+- Expected real-car cadence: ~330–350 ms/frame (wire-bound + ECU reply),
+  i.e. MPPS parity; 32 KB in ~50 s instead of ~130 s. **On-car re-verification
+  pending** (the capture above ran the old 3 ms/byte path).
+
+Reply latencies measured on the real ECU (for timeout sizing): IDENT
+473–516 ms, UPROG_EIN 687 ms, AIF 543 ms, FS_LESEN 256 ms, FS_LOESCHEN
+272 ms, seed 448 ms, key 256 ms, erase 623 ms, write-end 80 ms,
+DIAGNOSE_ENDE 64 ms, SCHREIBEN reply ~50–100 ms after the last TX byte.

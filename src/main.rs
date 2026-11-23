@@ -594,7 +594,6 @@ fn main() {
             .map(std::path::PathBuf::from);
         let auto_write_cal = args.iter().any(|a| a == "--auto-write-cal");
         let auto_write = args.iter().any(|a| a == "--auto-write");
-        let fast_write = args.iter().any(|a| a == "--fast-write");
         // GUI fast-baud target (takes effect when the GUI is launched via another
         // flag, e.g. --autoconnect --auto-live); the Live tab also has a button.
         let gui_fast_baud = args
@@ -658,7 +657,6 @@ fn main() {
                     image,
                     auto_write_cal,
                     auto_write,
-                    fast_write,
                     gui_fast_baud,
                     log_dir,
                 )))
