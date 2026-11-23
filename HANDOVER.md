@@ -819,6 +819,10 @@ two's-complement i16.
   monotonicity over each variable's domain, and the 22-id signed set pinned
   against the ADF export (88 passing, clippy clean).
 
+The branch was merged to `main` via PR #2 and shipped as **v0.5**
+(`scripts/release.sh 0.5`, tag `v0.5`, Gitea release with the linux binary
++ .sha256).
+
 ## ← CURRENT TASK (take over from here)
 
 **MPPS-style calibration write (sessions 41–43) — on-car re-verification of
