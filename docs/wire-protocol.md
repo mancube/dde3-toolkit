@@ -513,3 +513,51 @@ frame v0.4.1 sent successfully. If a paced IDENT ever times out on the car,
 the line-state question comes back — but the v0.4.1→v0.5 delta isolates
 pacing as the only thing that changed for the IDENT, so that is the fix to
 verify first.
+
+### 35.7 Firmware DS2 UART timing (state machine `0x1E904`, M7789659)
+
+The C166 S0 UART is driven by a byte-wise state machine at `0x1E904` (state in
+`C749`, 7 states). The UART RX **ISR** is a 3-byte stub at `0x1E900`
+(`BSET S0CON.15; RET`) that only sets a byte-available flag; the state machine
+is ticked by the main loop, which lives in the `0x0000` region (absent from
+the app disasm, which starts at `0x10000`). This is the firmware-side basis
+for the pacing decisions in §35.5–35.6.
+
+**Timing constants** (`DS2_UART_TIMING`, `SCALARS@2EF4`; units = state-machine
+ticks, `C6C0` += 2 per invocation — the wall-clock tick period is in the
+`0x0000` region and is **not** recoverable from the app disasm):
+
+| Offset | Value | Meaning |
+|---|---|---|
+| `+0` | 512 | min inter-byte gap while receiving (a longer gap *inside* a frame aborts it) |
+| `+2` | 5120 | frame-end timeout (no byte this long → finalize the frame) |
+| `+4` | 1024 | gap between the ECU's own response bytes (state 2, transmit) |
+| `+6` | 6400 | delay before the ECU starts its response |
+| `+8` | 62465 | dispatcher prepare timeout (state 0, idle) |
+| `+A` | 10240 | 10.4 kbaud state-4 gap |
+
+**Practical implications (all consistent with the dde3-toolkit's design):**
+
+- **Frame completion is counter-based, not timeout-based.** The ECU finalizes a
+  frame the instant the byte counter reaches the `LEN` byte; the `+2` (5120)
+  timeout is only a fallback for *incomplete* frames. A well-formed 233-byte
+  MPPS frame completes as soon as its last byte lands — no line silence needed.
+- **The ECU paces its own responses.** State 2 inserts a `+4` (1024-tick) delay
+  between each response byte and a `+6` (6400-tick) delay before the first
+  byte. The ~327 ms/frame round-trip in the MPPS capture is dominated by the
+  flash write plus this paced response, **not** by the host. The host cannot go
+  faster than the ECU — the dde3-toolkit's unpaced data frames are already at
+  the ceiling (see §33 / `ds2-rx-buffer.md`).
+- **The `+0` (512-tick) min inter-byte gap is why the 3 ms/byte bootstrap
+  pacing is safe.** At 9600 8E1 (104 µs/byte) a 3 ms/byte pace is ~29 ticks
+  per byte, far under the 512-tick abort threshold. The exact tick period is
+  unconfirmed, but v0.4.1 paced the IDENT at 3 ms/byte with 100% on-car
+  success, so the margin is proven.
+- **Break → baud switch (state 3).** A break condition waits for
+  `C6C0==0x4C` then switches `S0BG` to ~10.4 kbaud. This is the
+  *programming-entry* sequence; the dde3-toolkit (and MPPS in the capture)
+  stay at 9600 and never trigger it.
+
+**Not a speed constraint:** the 512/5120/1024/6400 values are *ECU-internal*
+timeouts and paces. They do not cap how fast the host may send — the host's
+only real ceiling is the ECU's flash-write time (the ~327 ms/frame).

@@ -949,6 +949,48 @@ should now succeed (paced, as in v0.4.1), and the data frames should run at
 ~327 ms/frame (MPPS parity). The log should show `TX 12 04 00 16` →
 `RX 12 2E A0 …` with **no** "IDENT no reply" line.
 
+### Session 47 (2026-11-23) — firmware DS2 UART timing + MPPS cadence research (design confirmed at max speed)
+
+Extracted the ECU's serial-timing parameters from `~/Desktop/edc15m/research`
+and measured the MPPS reference capture, to confirm the dde3-toolkit's pacing
+design and bound the achievable write speed. **No code changed** — the design
+is confirmed correct and already at the ceiling.
+
+- **MPPS cadence (ground truth, `captures/mpps capture/mppswrite.txt`):** the
+calibration data frames (`12 E9 07 02 …`, **233 wire bytes** = 224 data + 9
+overhead) run at a rock-steady **~327 ms/frame** (0.326–0.332 s). The bootstrap
+commands (IDENT, UPROG_EIN, AIF, seed/key, `07 0F`, erase) are small frames at
+~83–308 ms. The 327 ms is the ECU's flash-write + its paced response, **not**
+host overhead — the host cannot go faster.
+- **Firmware DS2 UART state machine (`0x1E904`, M7789659):** the RX **ISR** is
+a 3-byte stub at `0x1E900` (`BSET S0CON.15; RET`); the state machine is ticked
+by the main loop (in the `0x0000` region, absent from the app disasm which
+starts at `0x10000`). `DS2_UART_TIMING` (`SCALARS@2EF4`): min inter-byte gap
+512, frame-end timeout 5120, **response inter-byte gap 1024**, delay-before-
+response 6400, dispatcher timeout 62465, 10.4-kbaud gap 10240 (units =
+state-machine ticks; the tick period is in the `0x0000` region, not
+recoverable from the app disasm).
+- **New findings (all consistent with the dde3-toolkit):** (1) frame
+completion is **counter-based** (byte count == LEN) — the 5120-tick timeout is
+only a fallback for incomplete frames, so a well-formed 233-B frame completes
+as soon as its last byte lands; (2) the ECU **paces its own responses** (state
+2, 1024-tick gap between bytes) — part of the 327 ms round-trip; (3) a **break
+→ baud switch** to ~10.4 kbaud (state 3) is the programming-entry sequence, but
+the dde3-toolkit and MPPS stay at 9600 and never trigger it.
+- **The 128-vs-233 buffer question (reconciled, no change):** the M7789659 app
+receiver is 128 bytes (`C6C9..C748`, gate `0x1EB34`), but the 233-byte MPPS
+cal frames work because after `UPROG_EIN` the **boot-block programmer** (bigger
+buffer, ≥ 233) takes over the K-line — already documented in
+`docs/ds2-rx-buffer.md` (the "two-receiver split"). The car's buffer is the
+bigger one; do **not** shrink the 233-B frames to 128 on the strength of the
+M7789659 app gate.
+- **Max-speed verdict:** the dde3-toolkit's 224-byte blocks (233 wire) at
+~327 ms/frame **are** MPPS parity and the ECU-bound ceiling. Larger blocks
+(224 → ~247 data) would save only ~10% of frames and risk overflowing the
+boot-block buffer — not worth it. Keep 224.
+- Docs: `docs/wire-protocol.md` §35.7 (new — the timing constants + the four
+findings). No code, no test-count change (93 passing).
+
 ## ← CURRENT TASK (take over from here)
 
 **MPPS-style calibration write (sessions 41–43, 46) — on-car re-verification
