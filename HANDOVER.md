@@ -823,21 +823,203 @@ The branch was merged to `main` via PR #2 and shipped as **v0.5**
 (`scripts/release.sh 0.5`, tag `v0.5`, Gitea release with the linux binary
 + .sha256).
 
+### Session 45 (2026-11-23) — live/logger presets + Live view modes (branch `feature/live-presets-views`)
+
+User request (on a dedicated branch, main untouched): presets for the
+variable selections — remember the last session, plus named presets
+(create / rename / delete) — and more Live-data display options beyond the
+single graph.
+
+Design (user decisions, asked via questionnaire):
+- **Presets are variable sets only**, shared by both tabs. The **Value
+  logger** keeps its own selection (labels with changing values, unchanged
+  behaviour); the **Live** tab has its own selection **and** a view-mode
+  setting, and can adopt the same presets for parameter selection. The two
+  selections are **separate** (previously one shared `live_enabled` vec —
+  now `live_enabled` + `logger_enabled`).
+- **Four Live view modes** (toolbar buttons, persisted): **Line** (the old
+  graph card), **Labels** (plain name/value/unit rows, two columns on wide
+  windows), **Gauges** (in-car style 240° arc gauges, auto-scaled over the
+  recent history window, needle + value), **Cards** (the original
+  sparkline cards — the old default look).
+- Storage: `~/.config/dde3-toolkit/presets.json` (`$DDE3_CONFIG` >
+  `$XDG_CONFIG_HOME/dde3-toolkit` > `~/.config/...`), one file with the
+  named presets + both selections + view mode, stored as **ADF ids**
+  (stable across `live.rs` regeneration), saved on every change
+  (selection, view mode, preset ops). Load is tolerant: unknown ids
+  dropped, corrupt file → defaults.
+
+Implementation:
+- New `src/presets.rs` (`Preset`, `Settings`, `LiveView`,
+  `load`/`save`, `ids_to_enabled`/`enabled_to_ids` + 5 tests).
+- `src/app.rs`: `PickerTarget {Logger, Live}` replaces the single
+  `show_var_picker` bool — the picker window is now per-tab ("Logger
+  variables" / "Live variables") with a preset row (combo + Apply /
+  Save as… / Rename… / Delete, inline name dialog, duplicate names
+  refused); `show_graph` → `live_view: LiveView`; new `labels_card` /
+  `gauges_grid` / `gauge_card` / `arc_points` renderers (egui 0.31 has no
+  arc primitive — arcs are polylines, ~5°/segment); `start_live` polls the
+  **union** of both selections while logging (the CSV writer filters to
+  its own ids); `save_session()` persists on change; `apply_selection_change`
+  keeps the old "changes apply after logging stops" rule.
+- GUI smoke-tested via `--demo` (live tab, picker up, logger tab — no
+  panics). Tests: 93 passing (was 88), clippy clean.
+
+Open: on-desk visual pass of the four view modes + preset CRUD with the
+user; merge to main when satisfied.
+
+### Session 46 (2026-11-23) — the v0.5 K-line wake fix was itself broken (drain-read timeout)
+
+On-car `write-cal` (v0.5, the session-43 self-healing bootstrap) still failed
+— the calibration write "didn't even want to do" anything. The car logs
+(`captures/dde3-20261123-200017.log`, `…-200207.log`) showed the tell-tale:
+
+```
+TX 12 04 00 16
+IDENT no reply (no response to service 0x00 (12 04 00), link /dev/ttyUSB0) — K-line wake break, retrying
+ERROR calibration write failed: Operation timed out
+```
+
+Two defects in the session-43 fix (`176774e`):
+
+1. **The retry IDENT never ran.** `wake_kline()` drained the RX buffer with
+   `while self.port.read(&mut buf)? > 0 {}`. The port has a **10 ms read
+   timeout**; after `clear(ClearBuffer::All)` the line is empty, so that read
+   blocks 10 ms and returns `Err(TimedOut)` = "Operation timed out", and the
+   `?` propagated it as a **hard error** — `begin_flash_session`'s
+   `self.wake_kline()?` aborted *before* the retry IDENT was sent. The log's
+   "Operation timed out" is the port's `TimedOut`, **not** the custom
+   "FLASH_READ bootstrap: IDENT failed (even after wake break)" context —
+   proof the retry never ran (no second `TX 12 04 00 16` in the capture).
+2. **`set_break` is not the proven wake.** The manual reconnect that worked in
+   v0.4.1 is a full port **close+open** (line-down → line-up pulse).
+   `set_break()`/`clear_break()` is adapter-dependent; the adapter accepted it
+   (no "set_break unsupported" log) but that doesn't guarantee the ECU saw a
+   break.
+
+Fix (`src/protocol.rs`):
+- The `wake_kline` drain read now matches `ErrorKind::TimedOut` and treats it
+  as "no more data" (break out of the drain) instead of propagating it — the
+  retry IDENT now actually runs.
+- `Kline::port` is now `Option<Box<dyn SerialPort>>`; a new
+  `Kline::reopen_port()` closes the port (all fds → line-down) and reopens it
+  fresh at the current baud (line-up) — the proven reconnect wake. `wake_kline`
+  calls it after the best-effort `set_break`. A `baud` field is kept so the
+  reopen uses the current rate (`set_baud` / `recover_link_for` update it).
+- Regression test `protocol::tests::wake_kline_succeeds_and_port_stays_usable`
+  opens a `Kline` on a libc pty and asserts `wake_kline()` returns `Ok` on an
+  empty line (the old code failed it with exactly `Operation timed out`).
+
+Tests: 94 passing (was 93), clippy clean. Docs: `docs/wire-protocol.md` §35.3.
+
+**Follow-up (same session, §35.4):** re-reading the car logs showed the wake
+was running **too late** — `begin_flash_session` sent the IDENT first and only
+called `wake_kline()` *after* it timed out, so the IDENT always went out on a
+stale line. The logs prove it: the bootstrap IDENT fails even **~2 s after a
+fresh connect** (20:01:30 connect, 20:01:33 write IDENT no reply) — far too
+soon for a 20 s sleep, so the module re-sleeps *between* transactions and only
+a fresh line pulse wakes it. Now fixed: `begin_flash_session` calls
+`wake_kline()` **before** the bootstrap IDENT (the IDENT goes out on a
+freshly-woken line, the same fresh-open wake the connect gets from
+`Kline::open`), and `wake_kline` no longer calls `set_break`/`clear_break`
+(adapter-dependent, never the proven wake, and can leave the line dominant if
+`clear_break` is unsupported) — the port **reopen** (close → line-down,
+open → line-up) *is* the wake. Docs: `docs/wire-protocol.md` §35.4.
+
+**Root cause (same session, §35.5) — it was not a sleep.** The 35.1 sleep
+theory is not supported by the firmware decompilation, and the log idle gaps
+(16 s, 2 s, 13 s) don't fit a single sleep timeout. The real regression is a
+**serial-timing change** from the MPPS-speed pacing commit (`176774e`):
+`start_write_cal` / `start_write` now call `set_write_delay(0)` for the
+**entire** write, so the **bootstrap IDENT** (and UPROG_EIN, AIF, seed/key,
+DTC prep, write-end, erase, DIAGNOSE_ENDE) all went out **unpaced (bulk)** for
+the first time. In the working v0.4.1 build the IDENT went out at **3 ms/byte**
+and answered in 473–516 ms. The MPPS reference capture confirms the intended
+split: the **data frames** run ~327 ms/frame back-to-back (unpaced — a 3 ms/byte
+pace would be ~710 ms/frame), while the **bootstrap commands** are small frames
+at the normal cadence. MPPS finishes a 32 KB cal in ~50 s precisely because
+only the data frames are unpaced. Now fixed: `write_calibration` / `write_full`
+set `write_delay` per phase — **3 ms/byte** for the bootstrap and session-
+control commands, **0** only around the `write_block` data-frame loop. The
+§35.4 pre-IDENT wake was subsequently **dropped entirely** (wire-protocol
+§35.6) — pacing is the only fix. Docs: `docs/wire-protocol.md` §35.5–35.6.
+
+**On-car re-verification pending:** one more `write-cal` — the bootstrap IDENT
+should now succeed (paced, as in v0.4.1), and the data frames should run at
+~327 ms/frame (MPPS parity). The log should show `TX 12 04 00 16` →
+`RX 12 2E A0 …` with **no** "IDENT no reply" line.
+
+### Session 47 (2026-11-23) — firmware DS2 UART timing + MPPS cadence research (design confirmed at max speed)
+
+Extracted the ECU's serial-timing parameters from `~/Desktop/edc15m/research`
+and measured the MPPS reference capture, to confirm the dde3-toolkit's pacing
+design and bound the achievable write speed. **No code changed** — the design
+is confirmed correct and already at the ceiling.
+
+- **MPPS cadence (ground truth, `captures/mpps capture/mppswrite.txt`):** the
+calibration data frames (`12 E9 07 02 …`, **233 wire bytes** = 224 data + 9
+overhead) run at a rock-steady **~327 ms/frame** (0.326–0.332 s). The bootstrap
+commands (IDENT, UPROG_EIN, AIF, seed/key, `07 0F`, erase) are small frames at
+~83–308 ms. The 327 ms is the ECU's flash-write + its paced response, **not**
+host overhead — the host cannot go faster.
+- **Firmware DS2 UART state machine (`0x1E904`, M7789659):** the RX **ISR** is
+a 3-byte stub at `0x1E900` (`BSET S0CON.15; RET`); the state machine is ticked
+by the main loop (in the `0x0000` region, absent from the app disasm which
+starts at `0x10000`). `DS2_UART_TIMING` (`SCALARS@2EF4`): min inter-byte gap
+512, frame-end timeout 5120, **response inter-byte gap 1024**, delay-before-
+response 6400, dispatcher timeout 62465, 10.4-kbaud gap 10240 (units =
+state-machine ticks; the tick period is in the `0x0000` region, not
+recoverable from the app disasm).
+- **New findings (all consistent with the dde3-toolkit):** (1) frame
+completion is **counter-based** (byte count == LEN) — the 5120-tick timeout is
+only a fallback for incomplete frames, so a well-formed 233-B frame completes
+as soon as its last byte lands; (2) the ECU **paces its own responses** (state
+2, 1024-tick gap between bytes) — part of the 327 ms round-trip; (3) a **break
+→ baud switch** to ~10.4 kbaud (state 3) is the programming-entry sequence, but
+the dde3-toolkit and MPPS stay at 9600 and never trigger it.
+- **The 128-vs-233 buffer question (reconciled, no change):** the M7789659 app
+receiver is 128 bytes (`C6C9..C748`, gate `0x1EB34`), but the 233-byte MPPS
+cal frames work because after `UPROG_EIN` the **boot-block programmer** (bigger
+buffer, ≥ 233) takes over the K-line — already documented in
+`docs/ds2-rx-buffer.md` (the "two-receiver split"). The car's buffer is the
+bigger one; do **not** shrink the 233-B frames to 128 on the strength of the
+M7789659 app gate.
+- **Max-speed verdict:** the dde3-toolkit's 224-byte blocks (233 wire) at
+~327 ms/frame **are** MPPS parity and the ECU-bound ceiling. Larger blocks
+(224 → ~247 data) would save only ~10% of frames and risk overflowing the
+boot-block buffer — not worth it. Keep 224.
+- Docs: `docs/wire-protocol.md` §35.7 (new — the timing constants + the four
+findings). No code, no test-count change (93 passing).
+
 ## ← CURRENT TASK (take over from here)
 
-**MPPS-style calibration write (sessions 41–43) — on-car re-verification of
-the session-43 fixes pending.** The calibration write mimics MPPS:
-224-byte blocks (146×224 + 1×64), a single `07 0F` write-end @0x03FCE0
-before the erase, and a one-shot DTC read+clear prep (also before reads).
-It ran to completion on the real car (session 43, car started afterwards),
-but at the old 3 ms/byte pacing and only after a manual reconnect fixed the
-slept K-line. Session 43 added: unpaced (0 ms/byte) data frames — MPPS
-parity, expect ~330–350 ms/frame — and the self-healing bootstrap
-(`wake_kline()` break + IDENT retry). Next on-car: `dde3-toolkit write-cal
-<cal.bin> --port /dev/ttyUSB1`; confirm the cadence in the log
-(`tools/analyze_realcar_write.py`) and that a cold ECU bootstraps on the
-retry. The 224-B size is proven by the MPPS capture (wire-protocol §33);
-§32's 192-B rejection was the *program* area, a different case.
+**MPPS-style calibration write (sessions 41–43, 46) — on-car re-verification
+pending.** The calibration write mimics MPPS: 224-byte blocks (146×224 +
+1×64), a single `07 0F` write-end @0x03FCE0 before the erase, and a one-shot
+DTC read+clear prep (also before reads). It ran to completion on the real car
+(session 43, car started afterwards), but at the old 3 ms/byte pacing and only
+after a manual reconnect fixed the slept K-line. Session 43 added: unpaced
+(0 ms/byte) data frames — MPPS parity, expect ~330–350 ms/frame — and the
+self-healing bootstrap. **Session 46 found the real root cause was not a
+sleep but a serial-timing regression** (wire-protocol §35.3–35.5): the
+MPPS-speed pacing commit (`176774e`) made `start_write_cal` / `start_write`
+call `set_write_delay(0)` for the **entire** write, so the **bootstrap IDENT**
+(and UPROG_EIN, AIF, seed/key, DTC prep, write-end, erase, DIAGNOSE_ENDE) all
+went out **unpaced (bulk)** for the first time — in the working v0.4.1 build
+the IDENT went out at 3 ms/byte and answered in 473–516 ms. The MPPS reference
+confirms the intended split: only the **data frames** are unpaced (~327 ms/frame
+back-to-back; a 3 ms/byte pace would be ~710 ms/frame), the bootstrap commands
+are paced. Now fixed: `write_calibration` / `write_full` set `write_delay` per
+phase — 3 ms/byte for the bootstrap and session-control commands, 0 only around
+the `write_block` data-frame loop. (The §35.3 drain-timeout fix and §35.4
+pre-IDENT wake were subsequently **dropped entirely** — wire-protocol §35.6 —
+since pacing is the only real fix.)
+Next on-car: `dde3-toolkit write-cal <cal.bin> --port /dev/ttyUSB1`; confirm in
+the log (`tools/analyze_realcar_write.py`) that the bootstrap IDENT **succeeds
+on the first try** (`TX 12 04 00 16` → `RX 12 2E A0 …`, no "IDENT no reply"
+line) and the data frames run at ~327 ms/frame (MPPS parity). The 224-B size is
+proven by the MPPS capture (wire-protocol §33); §32's 192-B rejection was the
+*program* area, a different case.
 
 **Closed (session 33): 192-byte block mode.** Tried on the car; the ECU
 OKAYed two 192-byte write blocks, then hung on the third (no reply, no

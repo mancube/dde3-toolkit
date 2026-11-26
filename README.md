@@ -40,11 +40,17 @@ captures. All of that work is written up in [`docs/`](docs) — start with
 - **Live data** — DDE3 MW service (`0B 10`), batched into as few telegrams
   as the DS2 frame cap allows; 81 variables generated from the ECU's ADF
   table (`tools/gen_live_rs.py`); signed (i16) and unsigned (u16) ADFs
-  decoded correctly per the ADF data type; per-variable history charts and
-  a producer-measured Hz counter
+  decoded correctly per the ADF data type; four display modes (line graph,
+  plain labels, in-car arc gauges, value cards with sparklines) and a
+  producer-measured Hz counter
+- **Variable presets** — named variable selections shared by the Live and
+  Logger tabs (create / rename / delete in the variable picker); the last
+  session's selections and Live view mode are restored on launch
+  (`~/.config/dde3-toolkit/presets.json`, `$DDE3_CONFIG` override)
 - **Value logger** — logs any selected set of live variables to CSV with
   physical values (unit-scaled, sign-correct), started/stopped from the
-  GUI Logger tab
+  GUI Logger tab; keeps its own variable selection, separate from the
+  Live tab's
 - **Checksum** — Bosch TDI V3.1 verify/correct (code + calibration slots)
   plus the cold-start **program chain** at `0x38B7C`, which any edit in
   the program area invalidates; byte-for-byte parity with the verified
@@ -204,9 +210,20 @@ picker up).
   "faster 9600" live-polling switch and the fast-baud (0x91) button. The
   battery voltage pill sits in the top bar next to the CONNECTED status.
 - The Live tab shows the selected variables with current value, unit and
-  a rolling history chart, plus the measured poll rate (Hz).
-- The Logger tab selects variables and logs them to CSV (physical values)
-  while the live loop runs.
+  the measured poll rate (Hz), in one of four view modes (toolbar buttons):
+  **Line** (one variable as a line graph), **Labels** (plain values),
+  **Gauges** (in-car style arc gauges, auto-scaled over the recent history)
+  or **Cards** (value cards with sparklines). The view mode is remembered
+  between sessions.
+- The variable picker windows (Live and Logger tabs) have a preset row:
+  pick a saved preset and **Apply** it to that tab's selection, or
+  **Save as…** / **Rename…** / **Delete** presets. Presets are named
+  variable sets shared by both tabs; each tab keeps its own current
+  selection. Everything (presets, both selections, view mode) persists to
+  `~/.config/dde3-toolkit/presets.json` (`$DDE3_CONFIG` override).
+- The Logger tab selects variables (its own selection, separate from the
+  Live tab's) and logs them to CSV (physical values) while the live loop
+  runs.
 
 ## Testing
 

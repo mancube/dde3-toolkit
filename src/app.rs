@@ -26,6 +26,7 @@ use eframe::egui::{
 use crate::checksum::{self, CAL_LEN, CAL_START, IMAGE_SIZE};
 use crate::live::{LiveVar, LIVE_VARS};
 use crate::patches::{self, Patch, PatchState};
+use crate::presets::{self, LiveView, Preset};
 use crate::protocol::{self, Kline};
 
 const BG: Color32 = Color32::from_rgb(10, 14, 18);
@@ -238,6 +239,31 @@ enum Msg {
     FastBaudFailed(String),
 }
 
+/// Which tab's variable selection the picker window is editing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PickerTarget {
+    Logger,
+    Live,
+}
+
+impl PickerTarget {
+    fn title(self) -> &'static str {
+        match self {
+            PickerTarget::Logger => "Logger variables",
+            PickerTarget::Live => "Live variables",
+        }
+    }
+}
+
+/// Inline preset-name dialog inside the picker window.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PresetDialog {
+    /// "Save as…" — create a new preset from the current selection.
+    New,
+    /// Rename the selected preset.
+    Rename,
+}
+
 pub struct App {
     link: Arc<Mutex<Option<Kline>>>,
     tx: Sender<Msg>,
@@ -279,14 +305,28 @@ pub struct App {
     live_stop: Arc<AtomicBool>,
     live_values: Vec<f64>,
     live_history: Vec<Vec<f32>>,
+    /// Live-tab variable selection (last session restored from presets.json).
     live_enabled: Vec<bool>,
+    /// Value-logger tab selection — separate from the Live tab's, so each
+    /// tab keeps its own set while sharing the same named presets.
+    logger_enabled: Vec<bool>,
     live_rate: f32,
     live_log: Arc<Mutex<Option<LogWriter>>>,
     logging: bool,
     log_path: String,
     log_rows: usize,
-    show_graph: bool,
-    show_var_picker: bool,
+    /// Live-tab display mode (Line/Labels/Gauges/Cards), persisted.
+    live_view: LiveView,
+    /// The open variable-picker window and which tab's selection it edits.
+    var_picker: Option<PickerTarget>,
+    /// Named variable presets (shared by Live + Logger), persisted.
+    presets: Vec<Preset>,
+    /// Index of the preset selected in the picker's preset row.
+    preset_sel: usize,
+    /// Inline preset-name dialog (None = closed).
+    preset_dialog: Option<PresetDialog>,
+    /// Name being typed in the preset dialog.
+    preset_name: String,
     graph_var: usize,
     backup_ok: bool,
     write_confirm: String,
@@ -336,6 +376,8 @@ impl App {
         style(&cc.egui_ctx);
         let (tx, rx) = unbounded();
         let (patches, patch_warnings) = patches::load_all();
+        // Last-session state: per-tab selections, Live view mode, presets.
+        let session = presets::load();
         let mut app = Self {
             link: Arc::new(Mutex::new(None)),
             tx,
@@ -371,14 +413,19 @@ impl App {
             live_stop: Arc::new(AtomicBool::new(false)),
             live_values: vec![0.0; LIVE_VARS.len()],
             live_history: vec![Vec::new(); LIVE_VARS.len()],
-            live_enabled: LIVE_VARS.iter().map(|v| v.default_on).collect(),
+            live_enabled: presets::ids_to_enabled(&session.live_ids),
+            logger_enabled: presets::ids_to_enabled(&session.logger_ids),
             live_rate: 0.0,
             live_log: Arc::new(Mutex::new(None)),
             logging: false,
             log_path: String::new(),
             log_rows: 0,
-            show_graph: true,
-            show_var_picker: show_vars,
+            live_view: session.live_view,
+            var_picker: show_vars.then_some(PickerTarget::Live),
+            presets: session.presets,
+            preset_sel: 0,
+            preset_dialog: None,
+            preset_name: String::new(),
             graph_var: 0,
             backup_ok: false,
             write_confirm: String::new(),
@@ -1242,7 +1289,7 @@ impl App {
         }
         let ids: Vec<u16> = LIVE_VARS
             .iter()
-            .zip(self.live_enabled.iter())
+            .zip(self.logger_enabled.iter())
             .filter(|(_, on)| **on)
             .map(|(v, _)| v.id)
             .collect();
@@ -1263,7 +1310,7 @@ impl App {
     fn start_logging_to(&mut self, path: PathBuf) {
         let ids: Vec<u16> = LIVE_VARS
             .iter()
-            .zip(self.live_enabled.iter())
+            .zip(self.logger_enabled.iter())
             .filter(|(_, on)| **on)
             .map(|(v, _)| v.id)
             .collect();
@@ -1318,12 +1365,22 @@ impl App {
         if !self.connected || self.busy || self.live_running {
             return;
         }
-        let ids: Vec<u16> = LIVE_VARS
+        // The live thread polls the Live tab's selection; while the value
+        // logger is running it also polls the logger's set (the CSV writer
+        // filters to its own ids), so both tabs always show fresh values.
+        let mut ids: Vec<u16> = LIVE_VARS
             .iter()
             .zip(self.live_enabled.iter())
             .filter(|(_, on)| **on)
             .map(|(v, _)| v.id)
             .collect();
+        if self.logging {
+            for (v, on) in LIVE_VARS.iter().zip(self.logger_enabled.iter()) {
+                if *on && !ids.contains(&v.id) {
+                    ids.push(v.id);
+                }
+            }
+        }
         if ids.is_empty() {
             self.error = Some("Select at least one live variable".into());
             return;
@@ -3448,25 +3505,31 @@ impl App {
     }
 
     fn var_picker_window(&mut self, ctx: &egui::Context) {
-        if !self.show_var_picker {
+        let Some(target) = self.var_picker else {
             return;
-        }
-        let mut open = self.show_var_picker;
+        };
+        let mut open = true;
         let mut changed = false;
-        egui::Window::new("Live variables")
+        egui::Window::new(target.title())
             .open(&mut open)
             .resizable(true)
-            .default_width(460.0)
+            .default_width(540.0)
             .show(ctx, |ui| {
+                self.preset_row(ui, target, &mut changed);
+                ui.add_space(6.0);
+                let enabled: &mut Vec<bool> = match target {
+                    PickerTarget::Logger => &mut self.logger_enabled,
+                    PickerTarget::Live => &mut self.live_enabled,
+                };
                 ui.horizontal(|ui| {
                     if ui.small_button("All").clicked() {
-                        for v in self.live_enabled.iter_mut() {
+                        for v in enabled.iter_mut() {
                             *v = true;
                         }
                         changed = true;
                     }
                     if ui.small_button("None").clicked() {
-                        for v in self.live_enabled.iter_mut() {
+                        for v in enabled.iter_mut() {
                             *v = false;
                         }
                         changed = true;
@@ -3491,7 +3554,7 @@ impl App {
                             .show(ui, |ui| {
                                 for (i, v) in LIVE_VARS.iter().enumerate() {
                                     if v.group == g
-                                        && ui.checkbox(&mut self.live_enabled[i], v.name).changed()
+                                        && ui.checkbox(&mut enabled[i], v.name).changed()
                                     {
                                         changed = true;
                                     }
@@ -3500,18 +3563,169 @@ impl App {
                     }
                 });
             });
-        self.show_var_picker = open;
+        self.var_picker = open.then_some(target);
         if changed {
-            if self.logging {
-                self.status = "Variable changes apply after logging stops".into();
-            } else if self.live_running {
-                if self.live_enabled.iter().any(|v| *v) {
-                    self.stop_live();
-                    self.start_live();
-                } else {
-                    self.stop_live();
+            self.apply_selection_change();
+        }
+    }
+
+    /// The preset row at the top of the picker window: pick a saved preset
+    /// and apply it to this tab's selection, or create / rename / delete
+    /// presets. Presets are shared between the Live and Logger tabs —
+    /// applying one only changes the tab whose window is open.
+    fn preset_row(&mut self, ui: &mut Ui, target: PickerTarget, changed: &mut bool) {
+        if self.preset_sel >= self.presets.len() {
+            self.preset_sel = 0;
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Preset").size(11.0).color(MUTED));
+            if !self.presets.is_empty() {
+                egui::ComboBox::from_id_salt("preset-combo")
+                    .selected_text(self.presets[self.preset_sel].name.clone())
+                    .width(170.0)
+                    .show_ui(ui, |ui| {
+                        for (i, p) in self.presets.iter().enumerate() {
+                            ui.selectable_value(&mut self.preset_sel, i, p.name.clone());
+                        }
+                    });
+                if ui.small_button("Apply").clicked() {
+                    let ids = self.presets[self.preset_sel].ids.clone();
+                    self.apply_preset_to(target, ids);
+                    *changed = true;
                 }
+                if ui.small_button("Rename…").clicked() {
+                    self.preset_name = self.presets[self.preset_sel].name.clone();
+                    self.preset_dialog = Some(PresetDialog::Rename);
+                }
+                if ui.small_button("Delete").clicked() {
+                    let name = self.presets[self.preset_sel].name.clone();
+                    self.presets.remove(self.preset_sel);
+                    if self.preset_sel >= self.presets.len() {
+                        self.preset_sel = 0;
+                    }
+                    self.save_session();
+                    self.status = format!("Preset “{name}” deleted");
+                }
+            } else {
+                ui.label(RichText::new("(none saved)").size(11.0).color(MUTED));
             }
+            // Always available — this is how the first preset is created
+            // (from the selection currently shown in this window).
+            if ui.small_button("Save as…").clicked() {
+                self.preset_name = String::new();
+                self.preset_dialog = Some(PresetDialog::New);
+            }
+        });
+        if let Some(dialog) = self.preset_dialog {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(match dialog {
+                        PresetDialog::New => "New preset name",
+                        PresetDialog::Rename => "New name",
+                    })
+                    .size(11.0)
+                    .color(MUTED),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.preset_name).desired_width(180.0),
+                );
+                if ui.small_button("Save").clicked() {
+                    self.commit_preset_name(dialog, target);
+                }
+                if ui.small_button("Cancel").clicked() {
+                    self.preset_dialog = None;
+                }
+            });
+        }
+        ui.label(
+            RichText::new("presets are shared between Live and Logger")
+                .size(10.0)
+                .color(MUTED),
+        );
+    }
+
+    /// Copy a preset's id list onto the target tab's selection.
+    fn apply_preset_to(&mut self, target: PickerTarget, ids: Vec<u16>) {
+        let enabled: &mut Vec<bool> = match target {
+            PickerTarget::Logger => &mut self.logger_enabled,
+            PickerTarget::Live => &mut self.live_enabled,
+        };
+        for (v, slot) in LIVE_VARS.iter().zip(enabled.iter_mut()) {
+            *slot = ids.contains(&v.id);
+        }
+        self.save_session();
+    }
+
+    /// Commit the name typed in the preset dialog (create or rename).
+    fn commit_preset_name(&mut self, dialog: PresetDialog, target: PickerTarget) {
+        let name = self.preset_name.trim().to_string();
+        if name.is_empty() {
+            self.status = "Preset name is empty".into();
+            return;
+        }
+        match dialog {
+            PresetDialog::New => {
+                if self.presets.iter().any(|p| p.name == name) {
+                    self.status = format!("Preset “{name}” already exists");
+                    return;
+                }
+                let enabled: &[bool] = match target {
+                    PickerTarget::Logger => &self.logger_enabled,
+                    PickerTarget::Live => &self.live_enabled,
+                };
+                self.presets.push(Preset {
+                    name: name.clone(),
+                    ids: presets::enabled_to_ids(enabled),
+                });
+                self.preset_sel = self.presets.len() - 1;
+                self.status = format!("Preset “{name}” saved");
+            }
+            PresetDialog::Rename => {
+                let old = self.presets[self.preset_sel].name.clone();
+                if self.presets.iter().any(|p| p.name == name && p.name != old) {
+                    self.status = format!("Preset “{name}” already exists");
+                    return;
+                }
+                self.presets[self.preset_sel].name = name.clone();
+                self.status = format!("Preset renamed to “{name}”");
+            }
+        }
+        self.preset_dialog = None;
+        self.save_session();
+    }
+
+    /// After the picker window's selection changed: persist the new
+    /// last-session state, and restart the live loop if it is running so
+    /// the polled set picks up the change.
+    fn apply_selection_change(&mut self) {
+        self.save_session();
+        if self.logging {
+            self.status = "Variable changes apply after logging stops".into();
+        } else if self.live_running {
+            if self.live_enabled.iter().any(|v| *v)
+                || self.logger_enabled.iter().any(|v| *v)
+            {
+                self.stop_live();
+                self.start_live();
+            } else {
+                self.stop_live();
+            }
+        }
+    }
+
+    /// Persist presets + last-session selections + Live view mode to
+    /// `presets.json` (see `crate::presets`). Failures are non-fatal —
+    /// presets are a convenience, not a dependency.
+    fn save_session(&self) {
+        let s = presets::Settings {
+            presets: self.presets.clone(),
+            logger_ids: presets::enabled_to_ids(&self.logger_enabled),
+            live_ids: presets::enabled_to_ids(&self.live_enabled),
+            live_view: self.live_view,
+        };
+        if let Err(e) = presets::save(&s) {
+            eprintln!("presets: could not save session: {e}");
         }
     }
 
@@ -3551,16 +3765,23 @@ impl App {
             )
             .clicked()
             {
-                self.show_var_picker = !self.show_var_picker;
+                self.var_picker = Some(PickerTarget::Live);
             }
-            if centered_button(
-                ui,
-                Vec2::new(130.0, 30.0),
-                egui::Button::new("Graph").selected(self.show_graph),
-            )
-            .clicked()
-            {
-                self.show_graph = !self.show_graph;
+            // View mode (replaces the old Graph toggle): Line — one variable
+            // as a line graph; Labels — plain values; Gauges — in-car style
+            // arc gauges; Cards — value cards with sparklines.
+            for v in LiveView::ALL {
+                if centered_button(
+                    ui,
+                    Vec2::new(74.0, 30.0),
+                    egui::Button::new(v.name()).selected(self.live_view == v),
+                )
+                .clicked()
+                    && self.live_view != v
+                {
+                    self.live_view = v;
+                    self.save_session();
+                }
             }
             // The link-speed group (faster 9600, fast baud 125k) moved to
             // the side-nav LINK section — it is program-wide, not a Live
@@ -3583,15 +3804,26 @@ impl App {
             }
         });
         ui.add_space(12.0);
-        if self.show_graph {
-            graph_card(
-                ui,
-                &self.live_enabled,
-                &self.live_values,
-                &self.live_history,
-                &mut self.graph_var,
-            );
-            ui.add_space(12.0);
+        match self.live_view {
+            LiveView::Line => {
+                graph_card(
+                    ui,
+                    &self.live_enabled,
+                    &self.live_values,
+                    &self.live_history,
+                    &mut self.graph_var,
+                );
+                ui.add_space(12.0);
+            }
+            LiveView::Labels => {
+                labels_card(ui, &self.live_enabled, &self.live_values, ui.available_width());
+                ui.add_space(12.0);
+            }
+            LiveView::Gauges => {
+                gauges_grid(ui, &self.live_enabled, &self.live_values, &self.live_history);
+                ui.add_space(12.0);
+            }
+            LiveView::Cards => {}
         }
         let active: Vec<usize> = (0..LIVE_VARS.len())
             .filter(|i| self.live_enabled[*i])
@@ -3600,32 +3832,34 @@ impl App {
             ui.label(RichText::new("No variables selected.").color(MUTED));
             return;
         }
-        let avail = ui.available_width();
-        let cols = if avail > 1250.0 {
-            3
-        } else if avail > 820.0 {
-            2
-        } else {
-            1
-        };
-        let width = (avail - 12.0 * (cols - 1) as f32) / cols as f32;
-        egui::Grid::new("live-grid")
-            .num_columns(cols)
-            .spacing([12.0, 12.0])
-            .show(ui, |ui| {
-                for (n, i) in active.iter().enumerate() {
-                    live_card(
-                        ui,
-                        &LIVE_VARS[*i],
-                        self.live_values[*i],
-                        &self.live_history[*i],
-                        width,
-                    );
-                    if (n + 1) % cols == 0 {
-                        ui.end_row();
+        if self.live_view == LiveView::Cards {
+            let avail = ui.available_width();
+            let cols = if avail > 1250.0 {
+                3
+            } else if avail > 820.0 {
+                2
+            } else {
+                1
+            };
+            let width = (avail - 12.0 * (cols - 1) as f32) / cols as f32;
+            egui::Grid::new("live-grid")
+                .num_columns(cols)
+                .spacing([12.0, 12.0])
+                .show(ui, |ui| {
+                    for (n, i) in active.iter().enumerate() {
+                        live_card(
+                            ui,
+                            &LIVE_VARS[*i],
+                            self.live_values[*i],
+                            &self.live_history[*i],
+                            width,
+                        );
+                        if (n + 1) % cols == 0 {
+                            ui.end_row();
+                        }
                     }
-                }
-            });
+                });
+        }
     }
 
     fn logger_tab(&mut self, ui: &mut Ui) {
@@ -3636,7 +3870,7 @@ impl App {
         );
         ui.add_space(8.0);
         let enabled: Vec<usize> = (0..LIVE_VARS.len())
-            .filter(|i| self.live_enabled[*i])
+            .filter(|i| self.logger_enabled[*i])
             .collect();
         ui.horizontal_wrapped(|ui| {
             if self.logging {
@@ -3666,7 +3900,7 @@ impl App {
             )
             .clicked()
             {
-                self.show_var_picker = !self.show_var_picker;
+                self.var_picker = Some(PickerTarget::Logger);
             }
             ui.label(
                 RichText::new(format!("{:.1} Hz · {} rows", self.live_rate, self.log_rows))
@@ -4259,6 +4493,177 @@ fn live_card(ui: &mut Ui, var: &LiveVar, value: f64, history: &[f32], width: f32
                     })
                     .collect();
                 painter.add(egui::Shape::line(pts, Stroke::new(1.5_f32, ACCENT)));
+            }
+        });
+}
+
+/// Labels view: plain name/value/unit rows, no charts — stays readable
+/// with many variables selected.
+fn labels_card(ui: &mut Ui, enabled: &[bool], values: &[f64], width: f32) {
+    card(ui, width, |ui| {
+        section_title(ui, "Values");
+        let active: Vec<usize> = (0..LIVE_VARS.len()).filter(|i| enabled[*i]).collect();
+        if active.is_empty() {
+            ui.label(RichText::new("No variables selected.").color(MUTED));
+            return;
+        }
+        // Two side-by-side columns of rows on wide windows.
+        let two = width > 700.0;
+        let per_col = active.len().div_ceil(2);
+        let left: Vec<usize> = active.iter().take(per_col).copied().collect();
+        let right: Vec<usize> = if two {
+            active.iter().skip(per_col).copied().collect()
+        } else {
+            Vec::new()
+        };
+        egui::Grid::new("live-labels").spacing([18.0, 5.0]).show(ui, |ui| {
+            for (k, &l) in left.iter().enumerate() {
+                ui.label(RichText::new(LIVE_VARS[l].name).size(12.0).color(TEXT));
+                ui.label(
+                    RichText::new(format!("{:.2}", values[l]))
+                        .font(FontId::monospace(12.0))
+                        .color(ACCENT),
+                );
+                ui.label(RichText::new(LIVE_VARS[l].unit).size(11.0).color(MUTED));
+                if let Some(&r) = right.get(k) {
+                    ui.label(RichText::new(LIVE_VARS[r].name).size(12.0).color(TEXT));
+                    ui.label(
+                        RichText::new(format!("{:.2}", values[r]))
+                            .font(FontId::monospace(12.0))
+                            .color(ACCENT),
+                    );
+                    ui.label(RichText::new(LIVE_VARS[r].unit).size(11.0).color(MUTED));
+                } else {
+                    ui.label("");
+                    ui.label("");
+                    ui.label("");
+                }
+                ui.end_row();
+            }
+        });
+    });
+}
+
+/// Gauges view: in-car style arc gauges, auto-scaled over the recent
+/// history window (the same windowing the line graph uses).
+fn gauges_grid(ui: &mut Ui, enabled: &[bool], values: &[f64], histories: &[Vec<f32>]) {
+    let active: Vec<usize> = (0..LIVE_VARS.len()).filter(|i| enabled[*i]).collect();
+    if active.is_empty() {
+        ui.label(RichText::new("No variables selected.").color(MUTED));
+        return;
+    }
+    let avail = ui.available_width();
+    let cols = if avail > 1250.0 {
+        3
+    } else if avail > 820.0 {
+        2
+    } else {
+        1
+    };
+    let width = (avail - 12.0 * (cols - 1) as f32) / cols as f32;
+    egui::Grid::new("live-gauges")
+        .num_columns(cols)
+        .spacing([12.0, 12.0])
+        .show(ui, |ui| {
+            for (n, i) in active.iter().enumerate() {
+                gauge_card(ui, &LIVE_VARS[*i], values[*i], &histories[*i], width);
+                if (n + 1) % cols == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+}
+
+/// Sample an arc as a polyline (egui 0.31's Painter has no arc primitive),
+/// ~5° per segment, angles in radians clockwise from the +x axis.
+fn arc_points(center: egui::Pos2, r: f32, a0: f32, a1: f32) -> Vec<egui::Pos2> {
+    let n = (((a1 - a0).abs() / (std::f32::consts::PI / 36.0)).ceil()).max(1.0) as usize;
+    (0..=n)
+        .map(|k| {
+            let a = a0 + (a1 - a0) * k as f32 / n as f32;
+            pos2(center.x + r * a.cos(), center.y + r * a.sin())
+        })
+        .collect()
+}
+
+/// One arc gauge: 240° sweep (150° → 30°), auto-scaled over the recent
+/// history window, needle + value in the middle.
+fn gauge_card(ui: &mut Ui, var: &LiveVar, value: f64, history: &[f32], width: f32) {
+    Frame::new()
+        .fill(CARD)
+        .stroke(Stroke::new(1.0_f32, BORDER))
+        .corner_radius(12)
+        .inner_margin(14)
+        .show(ui, |ui| {
+            ui.set_width(width - 28.0);
+            ui.label(RichText::new(var.name).size(12.0).color(MUTED));
+            let w = ui.available_width().max(140.0);
+            let rect = ui
+                .allocate_exact_size(Vec2::new(w, 100.0), egui::Sense::hover())
+                .0;
+            let painter = ui.painter_at(rect);
+            let center = pos2(rect.left() + w / 2.0, rect.top() + 60.0);
+            let r = (w / 2.0 - 12.0).clamp(20.0, 46.0);
+            const START: f32 = std::f32::consts::PI * 5.0 / 6.0; // 150° (lower left)
+            const SWEEP: f32 = std::f32::consts::PI * 4.0 / 3.0; // 240°
+            painter.add(egui::Shape::line(
+                arc_points(center, r, START, START + SWEEP),
+                Stroke::new(7.0_f32, Color32::from_rgb(27, 37, 45)),
+            ));
+            if history.len() >= 2 {
+                let min = history.iter().cloned().fold(f32::INFINITY, f32::min);
+                let max = history.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let span = (max - min).max(max.abs() * 0.02).max(1e-3);
+                let mid = (max + min) * 0.5;
+                let (lo, hi) = (mid - span, mid + span);
+                let f = ((value - lo as f64) / (hi - lo) as f64).clamp(0.0, 1.0);
+                let f = f as f32;
+                painter.add(egui::Shape::line(
+                    arc_points(center, r, START, START + SWEEP * f),
+                    Stroke::new(7.0_f32, ACCENT),
+                ));
+                let ang = START + SWEEP * f;
+                let tip = pos2(
+                    center.x + 0.78 * r * ang.cos(),
+                    center.y + 0.78 * r * ang.sin(),
+                );
+                painter.line_segment([center, tip], Stroke::new(1.5_f32, TEXT));
+                painter.text(
+                    pos2(center.x - r * 0.87, rect.bottom() - 2.0),
+                    Align2::LEFT_BOTTOM,
+                    format!("{lo:.1}"),
+                    FontId::proportional(9.0),
+                    MUTED,
+                );
+                painter.text(
+                    pos2(center.x + r * 0.87, rect.bottom() - 2.0),
+                    Align2::RIGHT_BOTTOM,
+                    format!("{hi:.1}"),
+                    FontId::proportional(9.0),
+                    MUTED,
+                );
+                painter.text(
+                    pos2(center.x, center.y - 6.0),
+                    Align2::CENTER_CENTER,
+                    format!("{value:.1}"),
+                    FontId::proportional(18.0),
+                    ACCENT,
+                );
+                painter.text(
+                    pos2(center.x, center.y + 14.0),
+                    Align2::CENTER_CENTER,
+                    var.unit,
+                    FontId::proportional(10.0),
+                    MUTED,
+                );
+            } else {
+                painter.text(
+                    pos2(center.x, center.y - 6.0),
+                    Align2::CENTER_CENTER,
+                    "waiting for samples",
+                    FontId::proportional(11.0),
+                    MUTED,
+                );
             }
         });
 }

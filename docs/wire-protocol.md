@@ -341,9 +341,14 @@ GUI toggle was a red herring: it only paces the live loop, and the
 successful write ran at the default 3 ms/byte.
 
 **Fix** (`src/protocol.rs`):
-- `Kline::wake_kline()` — `set_break()` / `clear_break()` (10 ms) + 100 ms
-  settle + drain + parser/pending reset. Best-effort: adapters without break
-  support log a note and the retry may still succeed.
+- `Kline::wake_kline()` — a best-effort `set_break()` / `clear_break()` (10 ms)
+  nudge, then a **real port close+open** (`reopen_port()`: drop the port →
+  line-down pulse → fresh open → line-up pulse — the exact wake the user's
+  manual reconnect produced), then 100 ms settle + drain + parser/pending
+  reset. The drain read treats the port's 10 ms soft timeout as "no more
+  data" (a plain `?` turns the empty line into a hard "Operation timed out"
+  error — see 35.3). `set_break` alone is adapter-dependent and was not
+  reliably waking the module, so the port reopen is the actual wake.
 - `begin_flash_session()`: the bootstrap IDENT (now 1000 ms, see 35.2) is
   retried **once** after `wake_kline()` on failure, with a log line
   (`IDENT no reply (…) — K-line wake break, retrying`). This makes the flash
@@ -382,3 +387,177 @@ Reply latencies measured on the real ECU (for timeout sizing): IDENT
 473–516 ms, UPROG_EIN 687 ms, AIF 543 ms, FS_LESEN 256 ms, FS_LOESCHEN
 272 ms, seed 448 ms, key 256 ms, erase 623 ms, write-end 80 ms,
 DIAGNOSE_ENDE 64 ms, SCHREIBEN reply ~50–100 ms after the last TX byte.
+
+### 35.3 The v0.5 wake fix was itself broken — the retry never ran
+
+> **Superseded** — the `wake_kline` / `reopen_port` / `baud`-field /
+> `Option`-port machinery described here (and in §35.4) was later **removed
+> entirely** once §35.5 showed pacing was the real fix. See §35.6. Kept for
+> the record.
+
+The 35.1 fix shipped in v0.5 (commit `176774e`) but the calibration write
+still failed on the car (`captures/dde3-20261123-200017.log`,
+`…-200207.log`). The logs show the tell-tale sequence:
+
+```
+TX 12 04 00 16
+IDENT no reply (no response to service 0x00 (12 04 00), link /dev/ttyUSB0) — K-line wake break, retrying
+ERROR calibration write failed: Operation timed out
+```
+
+Two things were wrong:
+
+1. **The retry IDENT never ran.** `wake_kline()` drained the RX buffer with
+   `while self.port.read(&mut buf)? > 0 {}`. The port has a **10 ms read
+   timeout** (`Kline::open`); after `clear(ClearBuffer::All)` the line is
+   empty, so that `read` blocks 10 ms and returns `Err(TimedOut)` =
+   "Operation timed out", and the `?` propagated it as a **hard error**.
+   `begin_flash_session`'s `self.wake_kline()?` therefore aborted *before*
+   the retry IDENT was sent. The "Operation timed out" in the log is the
+   port's `TimedOut` — **not** the custom "FLASH_READ bootstrap: IDENT failed
+   (even after wake break)" context — which is the proof the retry never ran
+   (there is no second `TX 12 04 00 16` in the capture).
+2. **`set_break` is not the proven wake.** The manual reconnect that worked in
+   v0.4.1 is a full port **close+open** (line-down → line-up pulse).
+   `set_break()`/`clear_break()` is adapter-dependent; the adapter accepted
+   the command (no "set_break unsupported" log) but that does not guarantee the
+   ECU detected a break. Relying on it alone was the wrong bet for a real-car
+   flash.
+
+**Fix** (`src/protocol.rs`, this session):
+- The `wake_kline` drain read now matches `ErrorKind::TimedOut` and treats it
+  as "no more data" (break out of the drain) instead of propagating it. The
+  retry IDENT in `begin_flash_session` now actually runs.
+- `Kline::port` is now `Option<Box<dyn SerialPort>>` and a new
+  `Kline::reopen_port()` closes the port (all fds → line-down) and reopens it
+  fresh at the current baud (line-up) — the proven reconnect wake. `wake_kline`
+  calls it after the best-effort `set_break`. A `baud` field is kept so the
+  reopen uses the current rate; `set_baud` / `recover_link_for` update it.
+- Regression test `protocol::tests::wake_kline_succeeds_and_port_stays_usable`
+  opens a `Kline` on a libc pty and asserts `wake_kline()` returns `Ok` on an
+  empty line (the old code failed it with exactly `Operation timed out`).
+
+### 35.4 The wake ran too late — and `set_break` is gone
+
+> **Superseded** — `wake_kline` no longer exists; see §35.6.
+
+Even with the 35.3 fix (the retry IDENT now runs), the car logs
+(`captures/dde3-20261123-200017.log`) show the bootstrap IDENT failing
+*before* the wake could help: `begin_flash_session` sent the IDENT first and
+only called `wake_kline()` **after** it timed out. The tell is that the IDENT
+fails even **~2 s after a fresh connect** (20:01:30 connect, 20:01:33 write
+IDENT no reply) — far too soon for a 20 s sleep, so the module re-sleeps
+*between* transactions and only a fresh line pulse wakes it. Sending the
+IDENT on a stale line and waking after the fact can never succeed on the first
+try.
+
+**Fix** (`src/protocol.rs`, this session):
+- `begin_flash_session()` now calls `wake_kline()` **before** the bootstrap
+  IDENT (not after a failure), so the IDENT goes out on a freshly-woken line
+  — the same fresh-open wake the connect gets for free from `Kline::open`.
+- `wake_kline()` no longer calls `set_break()`/`clear_break()`: it is
+  adapter-dependent, was never the proven wake, and can leave the line
+  dominant if `clear_break` is unsupported (which would itself block the
+  reply). The port **reopen** (close → line-down, open → line-up) *is* the
+  wake; the `set_break` nudge is dropped. The 35.3 drain-read timeout handling
+  is unchanged and still required (the drain runs after every reopen).
+
+### 35.5 The real root cause: the bootstrap IDENT went out unpaced (no sleep)
+
+The 35.1 "sleep" theory is **not supported by the firmware decompilation** and
+the idle gaps in the logs (16 s, 2 s, 13 s) are not consistent with a single
+sleep timeout. The actual regression is a **serial-timing change** introduced
+by the MPPS-speed pacing commit (`176774e`):
+
+- `start_write_cal` / `start_write` now call `set_write_delay(0)` for the
+  **entire** write, and `write_calibration` / `write_full` set it again at the
+  top. So the **bootstrap IDENT** (and UPROG_EIN, AIF, seed/key, DTC prep,
+  write-end, erase, DIAGNOSE_ENDE) all went out **unpaced (bulk `write_all`)**
+  for the first time. In the working v0.4.1 build the IDENT went out at
+  **3 ms/byte** and answered in 473–516 ms.
+- The MPPS reference capture
+  (`captures/mpps capture/mppswrite.txt`) confirms the intended split: the
+  **data frames** (`FLASH_SCHREIBEN`, 236 B) run **~327 ms/frame back-to-back**
+  (245 ms wire + ~80 ms reply — a 3 ms/byte pace would be ~710 ms/frame, so
+  they are definitively unpaced), while the **bootstrap commands** are small
+  frames sent at the normal cadence. MPPS finishes a 32 KB cal in ~50 s
+  precisely because only the data frames are unpaced.
+
+**Fix** (`src/protocol.rs`, this session): `write_calibration` / `write_full`
+now set `write_delay` per phase — **3 ms/byte** for the bootstrap and
+session-control commands (IDENT, UPROG_EIN, AIF, seed/key, DTC prep,
+write-end, erase, DIAGNOSE_ENDE), and **`data_delay_ms` (0)** only around the
+`write_block` data-frame loop. This matches MPPS exactly and is the actual fix.
+
+**On-car re-verification pending:** one more `write-cal` — the bootstrap IDENT
+should now succeed (paced, as in v0.4.1), and the data frames should run at
+~327 ms/frame (MPPS parity).
+
+### 35.6 The wake mechanism was dropped entirely
+
+With §35.5 identifying pacing as the real fix, the port-reopen wake was
+removed in full — it was a heavy close+open on every write, for a problem (the
+"sleep") that the firmware decompilation does not support. Removed:
+
+- `Kline::wake_kline()` and `Kline::reopen_port()` — gone.
+- `Kline::port` reverted to `Box<dyn SerialPort>` (no longer `Option`); the
+  `baud` field and the `serial()` accessor are gone.
+- `begin_flash_session()` sends the bootstrap IDENT directly (no pre-IDENT
+  wake call).
+- The `protocol::tests::wake_kline_succeeds_and_port_stays_usable` pty
+  regression test is gone.
+
+The connect still gets a fresh-open wake for free from `Kline::open` (the
+port is opened once at connect), and the paced bootstrap IDENT is the same
+frame v0.4.1 sent successfully. If a paced IDENT ever times out on the car,
+the line-state question comes back — but the v0.4.1→v0.5 delta isolates
+pacing as the only thing that changed for the IDENT, so that is the fix to
+verify first.
+
+### 35.7 Firmware DS2 UART timing (state machine `0x1E904`, M7789659)
+
+The C166 S0 UART is driven by a byte-wise state machine at `0x1E904` (state in
+`C749`, 7 states). The UART RX **ISR** is a 3-byte stub at `0x1E900`
+(`BSET S0CON.15; RET`) that only sets a byte-available flag; the state machine
+is ticked by the main loop, which lives in the `0x0000` region (absent from
+the app disasm, which starts at `0x10000`). This is the firmware-side basis
+for the pacing decisions in §35.5–35.6.
+
+**Timing constants** (`DS2_UART_TIMING`, `SCALARS@2EF4`; units = state-machine
+ticks, `C6C0` += 2 per invocation — the wall-clock tick period is in the
+`0x0000` region and is **not** recoverable from the app disasm):
+
+| Offset | Value | Meaning |
+|---|---|---|
+| `+0` | 512 | min inter-byte gap while receiving (a longer gap *inside* a frame aborts it) |
+| `+2` | 5120 | frame-end timeout (no byte this long → finalize the frame) |
+| `+4` | 1024 | gap between the ECU's own response bytes (state 2, transmit) |
+| `+6` | 6400 | delay before the ECU starts its response |
+| `+8` | 62465 | dispatcher prepare timeout (state 0, idle) |
+| `+A` | 10240 | 10.4 kbaud state-4 gap |
+
+**Practical implications (all consistent with the dde3-toolkit's design):**
+
+- **Frame completion is counter-based, not timeout-based.** The ECU finalizes a
+  frame the instant the byte counter reaches the `LEN` byte; the `+2` (5120)
+  timeout is only a fallback for *incomplete* frames. A well-formed 233-byte
+  MPPS frame completes as soon as its last byte lands — no line silence needed.
+- **The ECU paces its own responses.** State 2 inserts a `+4` (1024-tick) delay
+  between each response byte and a `+6` (6400-tick) delay before the first
+  byte. The ~327 ms/frame round-trip in the MPPS capture is dominated by the
+  flash write plus this paced response, **not** by the host. The host cannot go
+  faster than the ECU — the dde3-toolkit's unpaced data frames are already at
+  the ceiling (see §33 / `ds2-rx-buffer.md`).
+- **The `+0` (512-tick) min inter-byte gap is why the 3 ms/byte bootstrap
+  pacing is safe.** At 9600 8E1 (104 µs/byte) a 3 ms/byte pace is ~29 ticks
+  per byte, far under the 512-tick abort threshold. The exact tick period is
+  unconfirmed, but v0.4.1 paced the IDENT at 3 ms/byte with 100% on-car
+  success, so the margin is proven.
+- **Break → baud switch (state 3).** A break condition waits for
+  `C6C0==0x4C` then switches `S0BG` to ~10.4 kbaud. This is the
+  *programming-entry* sequence; the dde3-toolkit (and MPPS in the capture)
+  stay at 9600 and never trigger it.
+
+**Not a speed constraint:** the 512/5120/1024/6400 values are *ECU-internal*
+timeouts and paces. They do not cap how fast the host may send — the host's
+only real ceiling is the ECU's flash-write time (the ~327 ms/frame).
