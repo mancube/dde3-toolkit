@@ -50,14 +50,17 @@ Shipped and verified (detail in git history + `docs/`):
 
 ## Open / unverified items
 
-### 1. Full read from 0x8000 — on-car test in progress
-Branch `feature/full-read-from-0x8000` (user is testing on the car, will
-report back). The ECU does not expose its IROM: `[0, 0x8000)` always reads
-FF, so `read_full` reads `[0x8000, 0x40000)` (1792 × 128 B chunks instead of
-2048, ~12.5 % less read time) and FF-pads the prefix — output layout
-unchanged (wire-protocol §36). On-car: bootstrap must pass on the first
-try, the chunk loop must run clean, and the dump must match the old layout
-(first 0x8000 FF).
+### 1. Full read from 0x8000 — fake-ECU E2E verified, on-car run optional
+The ECU does not expose its IROM: `[0, 0x8000)` always reads FF, so
+`read_full` reads `[0x8000, 0x40000)` (1792 × 128 B chunks instead of 2048,
+~12.5 % less read time) and FF-pads the prefix — output layout unchanged
+(wire-protocol §36). **Fake-ECU E2E verified 2026-11-27**
+(`captures/26-11-2026 test full read speedup/`): 1792 chunks from 0x008000,
+all steps 0x80, 208 ms/chunk (same as before), chunk-loop span **371.9 s vs
+425.0 s** for the old 2048-chunk read (53 s / 12.5 % saved); output
+byte-identical to the served flash. An on-car run is optional — the FF-
+prefix premise is already proven by the real-car dump
+(`captures/actual_flash.bin`).
 
 ### 2. MPPS-style cal write with the session-46 pacing fix — on-car re-verification
 `write-cal` must show the bootstrap IDENT **succeeding on the first try**
