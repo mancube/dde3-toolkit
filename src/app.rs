@@ -4700,7 +4700,16 @@ fn now_local() -> (String, String) {
     let t: libc::time_t = secs as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe {
-        libc::localtime_r(&t, &mut tm);
+        // Same platform split as `default_log_file_name`: `localtime_r` on
+        // Unix, `localtime_s` on Windows (reversed argument order, 0 = ok).
+        #[cfg(unix)]
+        {
+            libc::localtime_r(&t, &mut tm);
+        }
+        #[cfg(windows)]
+        {
+            libc::localtime_s(&mut tm, &t);
+        }
     }
     let (y, mo, d, h, mi, s) = (
         tm.tm_year + 1900,
