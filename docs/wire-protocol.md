@@ -561,3 +561,26 @@ ticks, `C6C0` += 2 per invocation — the wall-clock tick period is in the
 **Not a speed constraint:** the 512/5120/1024/6400 values are *ECU-internal*
 timeouts and paces. They do not cap how fast the host may send — the host's
 only real ceiling is the ECU's flash-write time (the ~327 ms/frame).
+
+## 36. Full read starts at 0x8000 — the ECU does not expose its IROM (session 48, 2026-11-26)
+
+The first 0x8000 bytes of a DDE3 full read are **always 0xFF**: the ECU does
+not expose its IROM over `FLASH_LESEN`. Real-car dumps confirm it
+(`captures/actual_flash.bin`: `[0, 0x8000)` is all FF; the program area at
+0x10000 is the first real content, and 0x8000..0x10000 is the boot/gap area
+the ECU does expose).
+
+So `Kline::read_full` no longer reads from 0x0:
+
+- the wire read runs `[FLASH_READ_START = 0x8000, 0x40000)` — **1792 × 128 B
+  chunks instead of 2048** (256 chunks / 12.5 % of the read time saved);
+- the returned image is still the full 256 KB with `[0, 0x8000)` FF-padded,
+  so the image layout, file output and all downstream consumers (checksum,
+  write read-back compare over `[0x10000, 0x40000)`, GUI/CLI) are unchanged;
+- the flasher session bootstrap (IDENT → UPROG_EIN → AIF read → SEED_KEY) is
+  unchanged and still runs first — the AIF read (`0x02` slot 0x7CB2) is a
+  separate service, not a `FLASH_LESEN`, and still works.
+
+`read_range` (calibration read 0x38000..0x40000) is untouched. Constant:
+`FLASH_READ_START` in `src/protocol.rs`; test:
+`protocol::tests::full_read_skips_unexposed_irom_prefix`.
