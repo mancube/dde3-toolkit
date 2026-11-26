@@ -19,8 +19,9 @@ captures. All of that work is written up in [`docs/`](docs) — start with
 
 ## Features
 
-- **Flash read** — full 256 KB (2048 × 128 B) or the 32 KB calibration
-  region (0x38000–0x3FFFF). Runs the full flasher session first
+- **Flash read** — full 256 KB (read from 0x8000: 1792 × 128 B, the IROM
+  prefix `[0, 0x8000)` always reads FF and is FF-padded) or the 32 KB
+  calibration region (0x38000–0x3FFFF). Runs the full flasher session first
   (IDENT → UPROG_EIN → AIF read → SEED_KEY) before the `FLASH_LESEN`
   chunks, matching the Galletto read flow. A slept K-line is woken
   automatically (line break + IDENT retry) after ~20 s of bus silence.

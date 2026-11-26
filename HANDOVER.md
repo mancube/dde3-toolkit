@@ -991,6 +991,27 @@ boot-block buffer — not worth it. Keep 224.
 - Docs: `docs/wire-protocol.md` §35.7 (new — the timing constants + the four
 findings). No code, no test-count change (93 passing).
 
+### Session 48 (2026-11-26) — full read starts at 0x8000: the ECU does not expose its IROM (branch `feature/full-read-from-0x8000`)
+
+User finding: on any DDE3 full read the first 0x8000 bytes are **always FF**
+— the ECU does not expose its IROM over `FLASH_LESEN`. Confirmed in the local
+dump (`captures/actual_flash.bin`: `[0, 0x8000)` all FF; 0x8000..0x10000 is
+the exposed boot/gap area, program content starts at 0x10000).
+
+- `Kline::read_full` now reads `[FLASH_READ_START = 0x8000, 0x40000)` —
+  **1792 × 128 B chunks instead of 2048** (256 chunks / 12.5 % of the read
+  time saved) — and returns the full 256 KB image with `[0, 0x8000)`
+  FF-padded, so the image layout, CLI/GUI output files and all downstream
+  consumers (checksum, the `[0x10000, 0x40000)` write read-back compare) are
+  byte-identical to the old behaviour.
+- Progress is reported in image coordinates (0x00000..0x40000) as before.
+- The flasher session bootstrap (IDENT → UPROG_EIN → AIF read → SEED_KEY) is
+  unchanged and still runs first; the AIF read is a separate service, not a
+  `FLASH_LESEN`. `read_range` (calibration read) untouched.
+- New constant `FLASH_READ_START` in `src/protocol.rs`; test
+  `protocol::tests::full_read_skips_unexposed_irom_prefix` (94 passing,
+  clippy clean). Docs: `docs/wire-protocol.md` §36, README feature line.
+
 ## ← CURRENT TASK (take over from here)
 
 **MPPS-style calibration write (sessions 41–43, 46) — on-car re-verification

@@ -47,6 +47,13 @@ pub const IMAGE_SIZE: usize = 0x40000;
 /// writable image.
 pub const FLASH_WRITE_START: usize = 0x10000;
 
+/// First flash offset a full read starts at: the ECU does not expose its
+/// IROM — the first 0x8000 bytes always read back 0xFF (real-car dumps
+/// confirm, e.g. `captures/actual_flash.bin`). [`Kline::read_full`] skips
+/// them on the wire and FF-pads `[0, FLASH_READ_START)` back into the
+/// returned 256 KB image, so the image layout is unchanged.
+pub const FLASH_READ_START: usize = 0x8000;
+
 /// Default FLASH_SCHREIBEN block size — Galletto's 64-byte blocks, the
 /// known-safe wire size. (A 192-byte experimental size was tried in
 /// session 32 and removed: the real ECU never acknowledged 192-byte
@@ -1131,11 +1138,25 @@ impl Kline {
     }
 
     /// Read the full 256 KB flash image using `12 09 06 <addr> <count>` frames.
+    ///
+    /// The ECU does not expose its IROM: `[0, FLASH_READ_START)` always reads
+    /// back 0xFF, so the wire read starts at [`FLASH_READ_START`] and the
+    /// returned image is FF-padded there — the image layout (256 KB, same byte
+    /// positions) is identical to a read from 0x0, but 256 chunks (12.5 %) are
+    /// skipped on the wire.
     pub fn read_full(
         &mut self,
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<Vec<u8>> {
-        self.read_flash(0, IMAGE_SIZE, progress)
+        let len = IMAGE_SIZE - FLASH_READ_START;
+        let mut out = vec![0xFFu8; FLASH_READ_START];
+        // Report progress in image coordinates so callers (CLI print, GUI bar)
+        // see the same 0x00000..0x40000 span as before.
+        let mut offset_progress = |done: usize, total: usize| {
+            progress(done + FLASH_READ_START, total + FLASH_READ_START)
+        };
+        out.extend(self.read_flash(FLASH_READ_START, len, &mut offset_progress)?);
+        Ok(out)
     }
 
     /// Read a range of flash using `12 09 06 <addr> <count>` frames.

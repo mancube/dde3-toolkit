@@ -451,3 +451,19 @@ fn parser_resyncs_on_bad_xor() {
     }
     assert_eq!(got.unwrap().payload, vec![0x12, 0x04, 0x0D]);
 }
+
+#[test]
+fn full_read_skips_unexposed_irom_prefix() {
+    // The ECU does not expose its IROM: [0, FLASH_READ_START) always reads
+    // back 0xFF, so read_full starts the wire read at FLASH_READ_START and
+    // FF-pads the prefix — the returned image is still the full 256 KB in
+    // the same byte layout.
+    assert_eq!(FLASH_READ_START, 0x8000);
+    assert!(FLASH_READ_START < FLASH_WRITE_START, "read start must precede the write span");
+    assert_eq!(IMAGE_SIZE - FLASH_READ_START, 0x38000);
+    // 1792 wire chunks instead of the old 2048 (256 chunks / 12.5 % saved).
+    assert_eq!(
+        (IMAGE_SIZE - FLASH_READ_START) / READ_CHUNK as usize,
+        1792
+    );
+}
