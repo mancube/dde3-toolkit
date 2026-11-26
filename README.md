@@ -96,10 +96,11 @@ cargo build --release
 
 ## Releases
 
-Prebuilt binaries for Linux live in [`dist/`](dist) (committed to git,
-tagged `vX.Y`), each with a `.sha256` file:
+Prebuilt binaries for Linux and Windows 10/11 live in [`dist/`](dist)
+(committed to git, tagged `vX.Y`), each with a `.sha256` file:
 
 - `dist/dde3-toolkit-linux-x86_64`
+- `dist/dde3-toolkit-windows-x86_64.exe`
 
 To install a release, check out the tag and verify the binary:
 
