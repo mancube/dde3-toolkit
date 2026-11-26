@@ -1012,6 +1012,33 @@ the exposed boot/gap area, program content starts at 0x10000).
   `protocol::tests::full_read_skips_unexposed_irom_prefix` (94 passing,
   clippy clean). Docs: `docs/wire-protocol.md` §36, README feature line.
 
+### Session 49 (2026-11-27) — Windows 10/11 build (branch `feature/windows-10-11-build`)
+
+User request: a Windows build of the session-48 source, to run on Win10/11
+machines and to test under Wine on this host — on a separate git branch.
+
+- **Build recipe (Win10/11, no Win7 hacks):** `cargo xwin build --release
+  --target x86_64-pc-windows-msvc` (cargo-xwin 0.24.2 + wine on the build
+  host; `rustup target add x86_64-pc-windows-msvc` first). The Win7
+  delay-load RUSTFLAGS from session 20/21 are **not** needed — Win10/11
+  export `GetSystemTimePreciseAsFileTime` and the whole native GUI layer.
+- **One source fix was required:** `now_local()` in `src/app.rs` called
+  `libc::localtime_r`, which the MSVC target does not provide (E0425) —
+  now the same platform split `default_log_file_name()` already used:
+  `localtime_r` under `#[cfg(unix)]`, `localtime_s` (reversed arg order,
+  0 = ok) under `#[cfg(windows)]`. libc 0.2.189 provides `localtime_s` for
+  **all** windows targets (msvc + gnu), so the mingw path stays covered.
+- **Artifacts:** `dist/dde3-toolkit-windows-x86_64.exe` (5.3 MB, self-
+  contained MSVC — no delay-load, no extra DLLs) + `.sha256`, committed on
+  this branch (built from the session-48 source, i.e. includes the 0x8000
+  full-read start).
+- **Wine verification (user):** the exe launches under
+  `WINEPREFIX=/home/ilija/Bottles/Programs/ wine` and **the GUI window
+  comes up** — unlike the session-22 Win7-era build, which died in a
+  wine-internal stack overflow. 94 tests passing on Linux, clippy clean.
+- Note: the `localtime_s` fix is target-neutral and should ride along when
+  this branch (or just that hunk) reaches main.
+
 ## ← CURRENT TASK (take over from here)
 
 **MPPS-style calibration write (sessions 41–43, 46) — on-car re-verification
