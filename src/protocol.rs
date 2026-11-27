@@ -54,17 +54,22 @@ pub const FLASH_WRITE_START: usize = 0x10000;
 /// returned 256 KB image, so the image layout is unchanged.
 pub const FLASH_READ_START: usize = 0x8000;
 
-/// Default FLASH_SCHREIBEN block size — Galletto's 64-byte blocks, the
-/// known-safe wire size. (A 192-byte experimental size was tried in
-/// session 32 and removed: the real ECU never acknowledged 192-byte
-/// FLASH_SCHREIBEN frames — see docs/wire-protocol.md §32.)
+/// Galletto's 64-byte FLASH_SCHREIBEN block — the known-safe wire size for
+/// the program area. (A 192-byte experimental size was tried in session 32
+/// and removed: the real ECU never acknowledged 192-byte FLASH_SCHREIBEN
+/// frames — see docs/wire-protocol.md §32.) Kept as the reference size; the
+/// write paths now use [`CAL_WRITE_BLOCK`].
+#[allow(dead_code)] // reference constant — see docs/wire-protocol.md §32
 pub const WRITE_BLOCK: usize = 0x40;
 
-/// Calibration-area FLASH_SCHREIBEN block size — MPPS's 224-byte (0xE0) blocks
-/// (the frame max, LEN = 0x09 + NN), with a trailing remainder block: the 32 KB
-/// calibration is 146×224 + 1×64. MPPS uses this for calibration writes with
-/// 100% on-car success (docs/FINDINGS_mpps_vs_galletto_calibration.md). The
-/// full-write path keeps the 64-byte Galletto size ([`WRITE_BLOCK`]).
+/// FLASH_SCHREIBEN block size for **both** write paths — MPPS's 224-byte
+/// (0xE0) blocks (the frame max, LEN = 0x09 + NN), with a trailing remainder
+/// block per region: the 32 KB calibration is 146×224 + 1×64, the 160 KB
+/// program area is 731×224 + 1×96. MPPS uses this for calibration writes
+/// with 100% on-car success (docs/FINDINGS_mpps_vs_galletto_calibration.md).
+/// The full write now uses the same size in the program area too —
+/// experimental there: 224 B is only on-car-proven for the calibration area
+/// (HANDOVER, open items).
 pub const CAL_WRITE_BLOCK: usize = 0xE0; // 224
 
 /// FLASH_LESEN chunk size — 128 bytes.
@@ -429,7 +434,7 @@ pub fn frame_flash_erase(addr: u32, _count: u8) -> Vec<u8> {
 /// NN = data length (1-byte count), address big-endian.
 pub fn frame_flash_write(addr: u32, data: &[u8]) -> Vec<u8> {
     // LEN = 0x09 + N must fit one byte, so N <= 0xF6. Callers chunk at
-    // WRITE_BLOCK (64).
+    // CAL_WRITE_BLOCK (224).
     assert!(data.len() <= 0xF6, "flash write block must be <= 246 bytes (LEN=9+N)");
     let n = data.len() as u8;
     let mut p = Vec::with_capacity(8 + data.len());
@@ -1250,12 +1255,13 @@ impl Kline {
     ///
     /// 1. **Program area** `[0x10000, 0x38000)`: flasher session
     ///    (IDENT → UPROG_EIN → AIF read → SEED_KEY) → erase @0x10000 →
-    ///    `FLASH_SCHREIBEN` blocks (64 B) → `DIAGNOSE_ENDE`
-    ///    (`12 04 9F`) closes the session.
+    ///    `FLASH_SCHREIBEN` blocks (224 B, the calibration-write size —
+    ///    731×224 + 1×96, experimental in the program area) →
+    ///    `DIAGNOSE_ENDE` (`12 04 9F`) closes the session.
     /// 2. **Calibration area** `[0x38000, 0x40000)`: the session is
     ///    re-opened and **re-authenticated from scratch** (IDENT → UPROG_EIN
-    ///    → AIF read → SEED_KEY) → erase @0x38000 → the same block size →
-    ///    `DIAGNOSE_ENDE`.
+    ///    → AIF read → SEED_KEY) → erase @0x38000 → the same block size
+    ///    (146×224 + 1×64) → `DIAGNOSE_ENDE`.
     ///
     /// Galletto never sends `FLASH_SCHREIBEN_ENDE` (`07 0F`); each phase
     /// ends with `DIAGNOSE_ENDE`. Only the writable span
@@ -1293,10 +1299,13 @@ impl Kline {
             dtc_prep = false;
             self.erase_flash(start as u32, 0x00)?;
             thread::sleep(Duration::from_millis(100));
-            // Data frames: unpaced (bulk write), MPPS parity.
+            // Data frames: unpaced (bulk write), MPPS parity. Same block
+            // size and timing as the calibration write: 224-byte blocks + a
+            // trailing remainder block, so every region is written in full,
+            // byte for byte.
             self.set_write_delay(data_delay_ms);
-            for off in (start..end).step_by(WRITE_BLOCK) {
-                let len = WRITE_BLOCK.min(end - off);
+            for off in (start..end).step_by(CAL_WRITE_BLOCK) {
+                let len = CAL_WRITE_BLOCK.min(end - off);
                 self.write_block(off as u32, &image[off..off + len])?;
                 done += len;
                 progress(done, region_len);

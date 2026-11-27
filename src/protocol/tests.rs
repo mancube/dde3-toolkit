@@ -317,6 +317,26 @@ fn cal_write_block_covers_32kb() {
 }
 
 #[test]
+fn full_write_block_covers_both_regions() {
+    // The full write uses the calibration-write block size in both regions:
+    // 224-byte blocks + one trailing remainder block each, so every region
+    // is written in full, byte for byte.
+    let prog_len = CAL_START - FLASH_WRITE_START; // 0x28000 = 163840
+    assert_eq!(prog_len / CAL_WRITE_BLOCK, 731, "program: 731 full blocks");
+    assert_eq!(prog_len % CAL_WRITE_BLOCK, 96, "program: 96-byte trailer");
+    let cal_len = IMAGE_SIZE - CAL_START; // 0x8000 = 32768
+    assert_eq!(cal_len / CAL_WRITE_BLOCK, 146, "cal: 146 full blocks");
+    assert_eq!(cal_len % CAL_WRITE_BLOCK, 64, "cal: 64-byte trailer");
+    // 879 frames total, down from 3072 at the 64-byte Galletto size; the
+    // blocks (full + trailer per region) cover the writable span exactly.
+    let frames = prog_len / CAL_WRITE_BLOCK + 1 + cal_len / CAL_WRITE_BLOCK + 1;
+    assert_eq!(frames, 879);
+    let written = (prog_len / CAL_WRITE_BLOCK * CAL_WRITE_BLOCK + prog_len % CAL_WRITE_BLOCK)
+        + (cal_len / CAL_WRITE_BLOCK * CAL_WRITE_BLOCK + cal_len % CAL_WRITE_BLOCK);
+    assert_eq!(written, IMAGE_SIZE - FLASH_WRITE_START, "full span covered");
+}
+
+#[test]
 fn reopen_divisor_maps_125000_to_124800() {
     assert_eq!(reopen_divisor(125000), 124_800);
     assert_eq!(reopen_divisor(38400), 38_400);
@@ -459,7 +479,9 @@ fn full_read_skips_unexposed_irom_prefix() {
     // FF-pads the prefix — the returned image is still the full 256 KB in
     // the same byte layout.
     assert_eq!(FLASH_READ_START, 0x8000);
-    assert!(FLASH_READ_START < FLASH_WRITE_START, "read start must precede the write span");
+    const {
+        assert!(FLASH_READ_START < FLASH_WRITE_START, "read start must precede the write span");
+    }
     assert_eq!(IMAGE_SIZE - FLASH_READ_START, 0x38000);
     // 1792 wire chunks instead of the old 2048 (256 chunks / 12.5 % saved).
     assert_eq!(

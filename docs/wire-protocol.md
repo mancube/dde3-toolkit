@@ -224,8 +224,8 @@ mirrors **MPPS's** calibration write, tested with 100% on-car success
 `docs/FINDINGS_mpps_vs_galletto_calibration.md`). This is **distinct from
 §32**: §32 rejected **192-byte program-area** blocks (the ECU hung at
 0x10000); MPPS's **224-byte calibration-area** blocks (0x38000–0x40000) are
-proven by the capture. The full write (`write_full`, program area) keeps the
-64-byte Galletto size (`WRITE_BLOCK`).
+proven by the capture. The full write (`write_full`) now uses the same size
+in the program area too — **experimental there**, see §37.
 
 > **Why a 233-byte frame is accepted at all:** each 224-byte block is one
 > 233-byte wire frame (`LEN 0xE9`), which is larger than the **128-byte**
@@ -584,3 +584,27 @@ So `Kline::read_full` no longer reads from 0x0:
 `read_range` (calibration read 0x38000..0x40000) is untouched. Constant:
 `FLASH_READ_START` in `src/protocol.rs`; test:
 `protocol::tests::full_read_skips_unexposed_irom_prefix`.
+
+## 37. Full write at 224-byte blocks (session 49, 2026-11-27) — **experimental, on-car unverified**
+
+`write_full` now writes **both** regions with the calibration-write block
+size (`CAL_WRITE_BLOCK = 0xE0`, 224 B) instead of the 64-byte Galletto size:
+
+- program area `[0x10000, 0x38000)`: **731×224 + 1×96** frames
+- calibration area `[0x38000, 0x40000)`: **146×224 + 1×64** frames
+- 879 frames total, down from 3072 at 64 B — the same block size, timing
+  and pacing as the proven MPPS calibration write (§33), and every region is
+  still written in full, byte for byte (full blocks + one trailing remainder
+  block per region).
+
+**Why this is not the §32 failure:** §32 rejected **192-byte** blocks in
+the program area (the ECU hung at 0x10000). 224 B is MPPS's size, proven
+on-car for the calibration area; using it in the program area is a new
+experiment, not a re-test of 192 B. The 233-byte frames fit the same
+boot-block receiver window as §33 (sent post-`UPROG_EIN`).
+
+**Status:** fake-ECU E2E verified (`tests/e2e_fake_ecu.rs` — full-write
+round-trip, 879 frames, reconstructed image byte-identical). **On-car
+verification pending** (HANDOVER, open items). If the ECU hangs at 0x10000
+like the 192 B attempt, revert `Kline::write_full` to `WRITE_BLOCK` (64 B) —
+the constant is kept for exactly that reason.
