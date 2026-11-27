@@ -315,7 +315,7 @@ impl JobStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Fixed frame builders (from tools/analysis/frames.md)
+// Fixed frame builders (from analysis/frames.md)
 // ---------------------------------------------------------------------------
 
 /// Enter programming mode: `12 04 0D`.
@@ -513,7 +513,7 @@ pub fn frame_mw_select(ids: &[u16]) -> Vec<u8> {
 
 // ---------------------------------------------------------------------------
 // Fault memory (DTC) — DS2 frames extracted from the FS_* jobs in
-// DDE30DS0.prg (see `tools/ds_frames.md`, `tools/disasm.py`). The German
+// DDE30DS0.prg (see `analysis/ds_frames.md`, `tools/disasm.py`). The German
 // texts and freeze scaling live in `crate::dtc` (generated from the same
 // .prg). Wire layouts are derived from the disassembly and are pending
 // confirmation against real hardware.

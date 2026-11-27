@@ -125,7 +125,7 @@ that the *tester* scales via `BetriebswTab` (the job continues into `tabset
 
 ### 2.4 Open finding — flash read/write length bytes (needs HW check)
 
-`tools/analysis/frames.md` (VM-extracted ground truth) shows the flash service
+`analysis/frames.md` (VM-extracted ground truth) shows the flash service
 frames as:
 
 ```text

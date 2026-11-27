@@ -87,7 +87,7 @@ seed/key first.
 
 ### T3 — Resolve the flash read/write framing question (do NOT change blind)
 `FINDINGS` §2.4 flags a real contradiction:
-- The VM ground truth (`tools/analysis/frames.md`) shows flash frames as
+- The VM ground truth (`analysis/frames.md`) shows flash frames as
   `12 09 06 <A:3> <n:2>` (2-byte count, `LEN=0x09` for the minimal form).
 - The toolkit's `frame_flash_read`/`frame_flash_write` use a **1-byte** count and
   a **hard-coded `LEN=0x09`**, which violates the §2.1 length rule for a
