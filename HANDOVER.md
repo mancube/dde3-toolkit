@@ -90,6 +90,13 @@ erase @0x38000 → calibration 0x38000..0x40000 → DIAGNOSE_ENDE; 879 ×
 attempt, revert `write_full` to `WRITE_BLOCK` (64 B)** and re-verify with
 the old size.
 
+Fake-ECU side is verified: the `respond` capture of this exact write
+(`captures/27-11-2026 test full write 224 block/full_write.txt`) is clean
+under `dde3-toolkit log sum` — 879 frames (224×877 + 96×1 + 64×1),
+`0x010000..0x040000` contiguous, 0 gaps/overlaps, 879/879 ACKed. `log sum`
+gained a write-verification section (sizes/contiguity/acks/timing, optional
+`--image` data check) for this.
+
 ### 4. Rewritten `read_dtcs()` — on-car confirmation
 `dde3-toolkit dtc --port …` → expect **"Gluehanlage"** (ORT 0x08) + ART
 texts "Gluehkerzen bzw. Gluehrelais defekt" / "Fehler momentan vorhanden" /

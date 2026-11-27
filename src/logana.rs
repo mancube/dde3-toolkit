@@ -31,8 +31,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
 pub fn usage() -> &'static str {
     "log — analyze dde3-toolkit logs (Rust ports of the Python log tools)\n\n\
      Usage:\n\
-       dde3-toolkit log sum <capture.txt> [more.txt …]\n\
-           Summarize the request sequences of respond/capture logs.\n\
+       dde3-toolkit log sum <capture.txt> [more.txt …] [--image <bin>]\n\
+           Summarize the request sequences of respond/capture logs, and\n\
+           verify FLASH_SCHREIBEN runs: size histogram, address contiguity/\n\
+           coverage, per-frame ACK, timing. --image <bin> additionally checks\n\
+           the written data against a reference image (pass the image the\n\
+           client intended to write, not the respond-reconstructed dump).\n\
        dde3-toolkit log run <log> [--image <bin>] [--pairs] [--class <NAME>]\n\
            Analyze a toolkit run log (dde3-*.log): pairing, envelope, per-class\n\
            summary, FLASH_LESEN sequence (+ image verify), live-loop timing.\n\
@@ -229,61 +233,218 @@ fn classify_sum(b: &[u8]) -> (String, String) {
     }
 }
 
+/// One FLASH_SCHREIBEN frame, indexed into the full event list.
+struct Wf {
+    ts: f64,
+    ev: usize,
+    addr: u32,
+    n: u32,
+}
+
+/// Walk write frames in order; return (gaps, overlaps). A gap is a frame that
+/// starts past the previous frame's end; an overlap one that starts before it.
+fn contiguity(writes: &[Wf]) -> (usize, usize) {
+    let mut gaps = 0usize;
+    let mut overlaps = 0usize;
+    let mut prev_end: Option<u32> = None;
+    for w in writes {
+        if let Some(pe) = prev_end {
+            if w.addr > pe {
+                gaps += 1;
+            } else if w.addr < pe {
+                overlaps += 1;
+            }
+        }
+        prev_end = Some(w.addr + w.n);
+    }
+    (gaps, overlaps)
+}
+
+/// Structural verification of a run of FLASH_SCHREIBEN frames: size histogram,
+/// address contiguity/coverage, per-frame ACK, timing, and (with an independent
+/// reference image) data integrity. The reference image must NOT be the
+/// respond-reconstructed dump (that is derived from the writes and would be
+/// circular) — pass the image the client intended to write.
+fn verify_writes(events: &[(f64, &str, Vec<u8>)], writes: &[Wf], image: Option<&[u8]>) {
+    println!();
+    println!(
+        "  ── write verification: {} FLASH_SCHREIBEN frames ─────────────────────",
+        writes.len()
+    );
+    // size histogram (count desc, then size desc)
+    let hist = {
+        let mut m: HashMap<u32, usize> = HashMap::new();
+        for w in writes {
+            *m.entry(w.n).or_insert(0) += 1;
+        }
+        let mut v: Vec<(u32, usize)> = m.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
+        v.iter()
+            .map(|(n, c)| format!("{n}×{c}"))
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    println!("  sizes      {hist}");
+    // coverage + contiguity
+    let lo = writes.iter().map(|w| w.addr).min().unwrap_or(0);
+    let hi = writes.iter().map(|w| w.addr + w.n).max().unwrap_or(0);
+    let total: u32 = writes.iter().map(|w| w.n).sum();
+    let (gaps, overlaps) = contiguity(writes);
+    let contig = if gaps == 0 && overlaps == 0 {
+        "contiguous ✓"
+    } else {
+        "NOT contiguous ✗"
+    };
+    println!(
+        "  coverage   0x{lo:06X}..0x{hi:06X}  {total} B ({:.1} KB)  {}  {} gap(s)  {} overlap(s)",
+        total as f64 / 1024.0,
+        contig,
+        gaps,
+        overlaps
+    );
+    // per-frame ACK: the event right after each write must be the TX write-OKAY
+    // (12 04 A0 …)
+    let acked = writes
+        .iter()
+        .filter(|w| {
+            events
+                .get(w.ev + 1)
+                .map(|(_, d, b)| {
+                    *d == "TX" && b.len() >= 3 && b[0] == 0x12 && b[1] == 0x04 && b[2] == 0xA0
+                })
+                .unwrap_or(false)
+        })
+        .count();
+    println!(
+        "  acks       {}/{} {}",
+        acked,
+        writes.len(),
+        if acked == writes.len() { "✓" } else { "✗" }
+    );
+    // timing
+    if writes.len() > 1 {
+        let wall = writes[writes.len() - 1].ts - writes[0].ts;
+        let durs: Vec<f64> = writes.windows(2).map(|w| w[1].ts - w[0].ts).collect();
+        let med = median(&durs);
+        let max = durs.iter().cloned().fold(0f64, f64::max);
+        println!(
+            "  timing     {:.1} s  median {:.0} ms/frame  max {:.0} ms",
+            wall,
+            med * 1000.0,
+            max * 1000.0
+        );
+    }
+    // data integrity vs an independent reference image
+    if let Some(img) = image {
+        let (verified, bad, first_bad) = check_write_data(events, writes, img);
+        match first_bad {
+            None => println!("  data       matches image ✓  {verified} B verified"),
+            Some(a) => println!("  data       MISMATCH ✗  {bad} frame(s) differ, first @0x{a:06X}"),
+        }
+    }
+}
+
+/// Compare each write frame's data bytes (frame offset 8, length n) against a
+/// reference image at the frame's flash address. Returns
+/// (verified_bytes, mismatched_frames, first_mismatch_addr).
+fn check_write_data(
+    events: &[(f64, &str, Vec<u8>)],
+    writes: &[Wf],
+    img: &[u8],
+) -> (usize, usize, Option<u32>) {
+    let mut verified = 0usize;
+    let mut bad = 0usize;
+    let mut first_bad: Option<u32> = None;
+    for w in writes {
+        let fb = &events[w.ev].2;
+        let end = 8 + w.n as usize;
+        let a = w.addr as usize;
+        if end <= fb.len() && a + w.n as usize <= img.len() {
+            if img[a..a + w.n as usize] == fb[8..end] {
+                verified += w.n as usize;
+            } else {
+                bad += 1;
+                if first_bad.is_none() {
+                    first_bad = Some(w.addr);
+                }
+            }
+        }
+    }
+    (verified, bad, first_bad)
+}
+
 fn sum(args: &[String]) -> Result<(), String> {
-    if args.is_empty() {
+    // split args into file paths and an optional `--image <bin>`
+    let mut files: Vec<String> = Vec::new();
+    let mut image: Option<Vec<u8>> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--image" {
+            let p = args.get(i + 1).ok_or_else(|| usage().to_string())?;
+            image = Some(fs::read(p).map_err(|e| format!("cannot read image {p}: {e}"))?);
+            i += 2;
+        } else {
+            files.push(args[i].clone());
+            i += 1;
+        }
+    }
+    if files.is_empty() {
         return Err(usage().to_string());
     }
-    for path in args {
+    for path in &files {
         let content = fs::read_to_string(path)
             .map_err(|e| format!("cannot read {path}: {e}"))?;
-        let reqs: Vec<Vec<u8>> = content
-            .lines()
-            .filter_map(|line| {
-                let (ts, dir, b) = parse_loga_line(line)?;
-                let _ = ts;
-                (dir == "RX").then_some(b)
-            })
+        let events: Vec<(f64, &str, Vec<u8>)> =
+            content.lines().filter_map(|l| parse_loga_line(l)).collect();
+        let reqs: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, d, _))| *d == "RX")
+            .map(|(k, _)| k)
             .collect();
         println!();
         println!("{}", "=".repeat(78));
         println!("{}  —  {} requests", path, reqs.len());
         println!("{}", "=".repeat(78));
+        let mut writes: Vec<Wf> = Vec::new();
         let mut i = 0;
         while i < reqs.len() {
-            let (kind, detail) = classify_sum(&reqs[i]);
+            let (kind, detail) = classify_sum(&events[reqs[i]].2);
             if kind == "FLASH_LESEN" || kind == "FLASH_SCHREIBEN" {
                 let mut j = i;
                 let mut addrs: Vec<(u32, u32)> = Vec::new();
-                while j < reqs.len() && classify_sum(&reqs[j]).0 == kind {
-                    let fb = &reqs[j];
+                while j < reqs.len() && classify_sum(&events[reqs[j]].2).0 == kind {
+                    let fb = &events[reqs[j]].2;
                     let a = ((fb[4] as u32) << 16) | ((fb[5] as u32) << 8) | fb[6] as u32;
                     let n = fb.get(7).copied().unwrap_or(0) as u32;
                     addrs.push((a, n));
+                    if kind == "FLASH_SCHREIBEN" {
+                        writes.push(Wf {
+                            ts: events[reqs[j]].0,
+                            ev: reqs[j],
+                            addr: a,
+                            n,
+                        });
+                    }
                     j += 1;
                 }
                 let lo = addrs.iter().map(|(a, _)| *a).min().unwrap_or(0);
                 let hi = addrs.iter().map(|(a, n)| a + n).max().unwrap_or(0);
-                let mut sizes: Vec<u32> = addrs.iter().map(|(_, n)| *n).collect();
-                sizes.sort_unstable();
-                sizes.dedup();
-                let sizes_s = format!(
-                    "[{}]",
-                    sizes
-                        .iter()
-                        .map(|n| n.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+                let total: u32 = addrs.iter().map(|(_, n)| *n).sum();
                 println!(
-                    "  {:<22} x{:<5} span 0x{lo:06X}..0x{hi:06X}  block={sizes_s}",
+                    "  {:<22} x{:<5} span 0x{lo:06X}..0x{hi:06X}  {:.1} KB",
                     kind,
-                    addrs.len()
+                    addrs.len(),
+                    total as f64 / 1024.0
                 );
                 i = j;
             } else {
                 println!("  {:<22} {}", kind, detail);
                 i += 1;
             }
+        }
+        if !writes.is_empty() {
+            verify_writes(&events, &writes, image.as_deref());
         }
     }
     Ok(())
@@ -1291,5 +1452,51 @@ mod tests {
         let (ok, _, hx) = frame_check(&b);
         assert!(!ok);
         assert_eq!(hx, None);
+    }
+
+    #[test]
+    fn contiguity_clean() {
+        // two back-to-back 224-byte frames: 0x010000..0x0100E0 then 0x0100E0..0x0101C0
+        let w = vec![
+            Wf { ts: 0.0, ev: 0, addr: 0x010000, n: 224 },
+            Wf { ts: 1.0, ev: 2, addr: 0x0100E0, n: 224 },
+        ];
+        assert_eq!(contiguity(&w), (0, 0));
+        // a single frame is trivially contiguous
+        let one = vec![Wf { ts: 0.0, ev: 0, addr: 0x010000, n: 224 }];
+        assert_eq!(contiguity(&one), (0, 0));
+    }
+
+    #[test]
+    fn contiguity_gap_and_overlap() {
+        // gap: frame2 starts past frame1's end (0x0100E0) at 0x010100
+        let gap = vec![
+            Wf { ts: 0.0, ev: 0, addr: 0x010000, n: 224 },
+            Wf { ts: 1.0, ev: 2, addr: 0x010100, n: 224 },
+        ];
+        assert_eq!(contiguity(&gap), (1, 0));
+        // overlap: frame2 starts before frame1's end (0x0100E0) at 0x0100C0
+        let ov = vec![
+            Wf { ts: 0.0, ev: 0, addr: 0x010000, n: 224 },
+            Wf { ts: 1.0, ev: 2, addr: 0x0100C0, n: 224 },
+        ];
+        assert_eq!(contiguity(&ov), (0, 1));
+    }
+
+    #[test]
+    fn check_write_data_match_and_mismatch() {
+        // write frame: 12 E9 07 02 <addr=0x00010000> <n=4> <data 01 02 03 04> <xor>
+        let frame: Vec<u8> =
+            vec![0x12, 0xE9, 0x07, 0x02, 0x00, 0x01, 0x00, 0x04, 0x01, 0x02, 0x03, 0x04, 0x00];
+        let events: Vec<(f64, &str, Vec<u8>)> = vec![(0.0, "RX", frame.clone())];
+        let writes = vec![Wf { ts: 0.0, ev: 0, addr: 0x10000, n: 4 }];
+        // matching image
+        let mut img = vec![0u8; 0x10004];
+        img[0x10000..0x10004].copy_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(check_write_data(&events, &writes, &img), (4, 0, None));
+        // one byte flipped -> one mismatched frame, first at 0x10000
+        let mut img2 = img.clone();
+        img2[0x10002] = 0x99;
+        assert_eq!(check_write_data(&events, &writes, &img2), (0, 1, Some(0x10000)));
     }
 }

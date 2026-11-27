@@ -77,8 +77,11 @@ captures. All of that work is written up in [`docs/`](docs) — start with
   move it
 - **Log analysis** — `log` analyzes the toolkit's own logs headlessly
   (Rust ports of the former Python tools, byte-identical output):
-  `log sum <capture.txt>…` summarizes the request sequences of
-  respond/capture logs; `log run <log>` pairs TX/RX, validates the
+  `log sum <capture.txt>… [--image <bin>]` summarizes the request
+  sequences of respond/capture logs and verifies FLASH_SCHREIBEN runs
+  (size histogram, address contiguity/coverage, per-frame ACK, timing;
+  `--image` also checks the written data against a reference image);
+  `log run <log>` pairs TX/RX, validates the
   envelope, summarizes per-command reply shapes/gaps and the
   FLASH_LESEN sequence (optionally verified against `--image <bin>`);
   `log write <log>` breaks a real-car write run into its note/error
