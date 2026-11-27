@@ -1,6 +1,7 @@
-//! Log analysis — Rust ports of the Python log-analysis tools
-//! (`tools/compare_captures.py`, `tools/analyze_run_log.py`,
-//! `tools/analyze_realcar_write.py`), exposed as `dde3-toolkit log …`:
+//! Log analysis — Rust ports of the former Python log-analysis tools
+//! (`compare_captures.py`, `analyze_run_log.py`, `analyze_realcar_write.py`;
+//! the Python originals were removed after byte-identical parity was
+//! confirmed), exposed as `dde3-toolkit log …`:
 //!
 //! - `log sum <capture.txt> [more.txt …]` — summarize the request sequences
 //!   of respond/capture (fake-ECU) logs.
@@ -143,7 +144,7 @@ impl CounterMap {
 }
 
 // ---------------------------------------------------------------------------
-// log sum — port of tools/compare_captures.py
+// log sum — port of compare_captures.py
 // ---------------------------------------------------------------------------
 
 fn classify_sum(b: &[u8]) -> (String, String) {
@@ -289,7 +290,7 @@ fn sum(args: &[String]) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// log run — port of tools/analyze_run_log.py
+// log run — port of analyze_run_log.py
 // ---------------------------------------------------------------------------
 
 const JOB_NAMES: &[(u8, &str)] = &[
@@ -791,7 +792,7 @@ struct ClassStat {
 }
 
 // ---------------------------------------------------------------------------
-// log write — port of tools/analyze_realcar_write.py
+// log write — port of analyze_realcar_write.py
 // ---------------------------------------------------------------------------
 
 fn classify_w(payload: &[u8]) -> String {
