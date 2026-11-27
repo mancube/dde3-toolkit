@@ -1,7 +1,7 @@
 # Faster logging on the DDE3.0 / EDC15M — findings and plan
 
 Companion to `FINDINGS_baud_service_protocol.md` (baud ladder, DS2 framing,
-break-protocol decode) and `handoff-fast-baud.md` (task list T1–T4).
+break-protocol decode) and `archive/handoff-fast-baud.md` (task list T1–T4, archived).
 This file answers one question: **what gets the logger faster, in what order,
 and without firmware modification?**
 
@@ -44,7 +44,7 @@ Precondition notes (traced this session):
   **only** by the boot block (`0x0000–0x7FFF`), which is missing from the
   flash read. Whether `C3A9 == 0xA5` at boot therefore **cannot be confirmed
   statically** — the boot block is the one blind spot. The intended flow (per
-  the guardrail in `handoff-fast-baud.md`) is that a prior DS2 unlock
+  the guardrail in `archive/handoff-fast-baud.md`) is that a prior DS2 unlock
   (UPROG_EIN + seed/key) establishes the session state the state-4 gate
   expects. **This is what the T2 hardware capture must confirm first.**
 - `FDD0.6` (the factory-monitor / test-frequency gate) is set at
@@ -196,7 +196,7 @@ turn, not saved) — the 16-byte block is simply the 5-id reply.
 | Thing | Where |
 |---|---|
 | Baud ladder, DS2 framing, break-protocol decode | `FINDINGS_baud_service_protocol.md` |
-| Task list T1–T4, guardrails | `handoff-fast-baud.md` |
+| Task list T1–T4, guardrails | `archive/handoff-fast-baud.md` (archived) |
 | Wire captures, HW topology, session history | `HANDOVER.md` |
 | Live loop to patch | `src/app.rs:1234` (55 ms sleep), `src/protocol.rs` (`write_delay`, `set_silence`) |
 | Break-mode implementation | `src/breakmode.rs` (`enter`, opcode map, `BreakSim`) |

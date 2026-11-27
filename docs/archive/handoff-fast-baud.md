@@ -1,3 +1,8 @@
+> **ARCHIVED (2026-11-27).** This was a point-in-time handoff for the
+> fast-baud work; that work is done and its current state lives in
+> `docs/baud-0x91-patch.md` (the 0x91 patch + `baud` command) and HANDOVER
+> item 5 (on-car half). Kept for history only — do not treat as current.
+
 # Handoff — DDE3.0 / EDC15M fast-baud work
 
 > **Purpose:** hand this file to the next agent so it can continue without

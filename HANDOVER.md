@@ -27,7 +27,8 @@ chip, DDE 3.0 hardware name).
 | `docs/reverse-engineering.md` | .prg format, the 33 jobs, WinkFP VM status, DDE4 parallels, job re-scope |
 | `docs/uprog-ein.md` | UPROG_EIN (`0x0D`): the handler decompilation, the 72-byte region/segment table, what it's used for (PRUEFCODE, programming-mode gate, tester region map) |
 | `docs/session-log.md` | Historical status snapshots (superseded content) |
-| `docs/FINDINGS_*.md`, `docs/SESSION_2026-11-09.md`, `docs/handoff-fast-baud.md` | Earlier finding write-ups |
+| `docs/FINDINGS_*.md`, `docs/SESSION_2026-11-09.md` | Earlier finding write-ups |
+| `docs/archive/` | Archived superseded working docs (the fast-baud handoff) — history only |
 
 ## Current status (v0.5.2, 2026-11-27)
 
