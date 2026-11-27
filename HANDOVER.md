@@ -29,7 +29,7 @@ chip, DDE 3.0 hardware name).
 | `docs/session-log.md` | Historical status snapshots (superseded content) |
 | `docs/FINDINGS_*.md`, `docs/SESSION_2026-11-09.md`, `docs/handoff-fast-baud.md` | Earlier finding write-ups |
 
-## Current status (v0.5.1, 2026-11-27)
+## Current status (v0.5.2, 2026-11-27)
 
 Shipped and verified (detail in git history + `docs/`):
 
@@ -37,16 +37,23 @@ Shipped and verified (detail in git history + `docs/`):
   confirmed by hardware capture; LEN-validated `FrameParser` + echo-wait
   retransmit (fake-ECU E2E).
 - ✅ Full flash read with flasher-session bootstrap (IDENT → UPROG_EIN → AIF
-  → SEED_KEY); two-session Galletto-style full write; MPPS-style
-  calibration write (224-B blocks, `07 0F` @0x03FCE0, DTC prep) — the cal
-  write ran to completion on the real car once (car started afterwards).
+  → SEED_KEY), starting at 0x8000 (IROM is never exposed — §36);
+  two-session full write; MPPS-style calibration write (224-B blocks,
+  `07 0F` @0x03FCE0, DTC prep) — the cal write ran to completion on the real
+  car once (car started afterwards).
 - ✅ Fault read/clear, DTC tables, TDI V3.1 checksum + program chain,
   manifest-driven patches, 8-tab GUI, `respond` fake ECU (Galletto-parity,
   `--flash`/`--dump`/`--patched-baud`), headless `bench`, live/logger with
   presets + four Live view modes, signed (i16) ADF decode.
-- ✅ `cargo test` → 94 passing, clippy clean. Last release **v0.5.1**
-  (linux, `dist/`).
+- ✅ `cargo test` → 99 passing (95 unit + 4 fake-ECU E2E), clippy clean.
+  Last release **v0.5.2** (linux + windows x86_64, `dist/`).
 - ⬜ Open: the on-car verifications below.
+
+**E2E fake-ECU tests** (`tests/e2e_fake_ecu.rs`): full read, cal read,
+full write, cal write — the real CLI against `respond` over a socat pty
+bridge, image round-trips byte-compared. **Not definitive** (fake ECU) and
+they need a real 256 KB dump at `captures/actual_flash.bin` (private —
+never committed; supply your own) plus `socat`.
 
 ## Open / unverified items
 
@@ -69,11 +76,18 @@ frames at ~327 ms/frame (MPPS parity; 3 ms/byte only around the bootstrap,
 0 around the data-frame loop — wire-protocol §35.5–35.6). Check with
 `tools/analyze_realcar_write.py`.
 
-### 3. Two-session full write — on-car verification
-`dde3-toolkit write <backup>.bin` (destructive — do it last, with a verified
-backup in hand) must show: program area 0x10000..0x38000 → DIAGNOSE_ENDE →
-re-auth (second UPROG_EIN + SEED_KEY) → erase @0x38000 → calibration
-0x38000..0x40000 → DIAGNOSE_ENDE; 3072 × 64-byte writes, no `07 0F`.
+### 3. Two-session full write at 224-byte blocks — on-car verification (NEW EXPERIMENT)
+`write_full` now uses the calibration-write block size in **both** regions
+(731×224 + 1×96 program, 146×224 + 1×64 cal = 879 frames, down from 3072 ×
+64 B — wire-protocol §37). 224 B is on-car-proven only for the calibration
+area; the program-area use is a deliberate new experiment (distinct from
+the rejected 192 B, §32). `dde3-toolkit write <backup>.bin` (destructive —
+do it last, with a verified backup in hand) must show: program area
+0x10000..0x38000 → DIAGNOSE_ENDE → re-auth (second UPROG_EIN + SEED_KEY) →
+erase @0x38000 → calibration 0x38000..0x40000 → DIAGNOSE_ENDE; 879 ×
+224-byte writes, no `07 0F`. **If the ECU hangs at 0x10000 like the 192 B
+attempt, revert `write_full` to `WRITE_BLOCK` (64 B)** and re-verify with
+the old size.
 
 ### 4. Rewritten `read_dtcs()` — on-car confirmation
 `dde3-toolkit dtc --port …` → expect **"Gluehanlage"** (ORT 0x08) + ART
@@ -111,18 +125,18 @@ native Win10/11 machine.
 
 ## Open branches
 
-- `feature/full-read-from-0x8000` — item 1; on-car test in progress, merge
-  to main when it passes.
-- `feature/windows-10-11-build` — item 9; based on the full-read branch.
-  The `localtime_s` fix in `src/app.rs` is target-neutral and should ride
-  along to main either way.
+- `feature/full-write-224-blocks` — item 3: full write at 224-byte blocks
+  (calibration-write size) + the E2E fake-ECU test suite
+  (`tests/e2e_fake_ecu.rs`). Merge to main when the on-car write passes.
 
 ## Closed — do not re-attempt without new evidence
 
 - **192-byte block mode** (session 33): rejected on-car — the ECU OKAYed
   two 192-B write blocks, then hung. 64 B writes / 128 B reads (and 224 B
   for the calibration area, proven by the MPPS capture) are the only
-  verified sizes (wire-protocol §32–33).
+  verified sizes (wire-protocol §32–33). Note: the in-flight 224-B **full
+  write** (item 3, §37) is a deliberate new experiment — 224 B ≠ 192 B —
+  but it shares the same failure mode to watch for (hang at 0x10000).
 - **Per-zone `07 0F` write-end failsafe** (session 31): not implemented —
   the job decompilation doesn't determine the address field or the call
   timing. Rule: don't implement a command the decompilation doesn't fully

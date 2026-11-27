@@ -230,8 +230,21 @@ picker up).
 ## Testing
 
 ```sh
-cargo test        # protocol frames, parser, checksum, DTC, live decode, sim
+cargo test        # unit + E2E fake-ECU tests
 ```
+
+- **Unit tests**: protocol frames, parser, checksum, DTC, live decode, sim.
+- **E2E fake-ECU tests** (`tests/e2e_fake_ecu.rs`): full read, calibration
+  read, full write and calibration write — the real CLI binary driven
+  against the `respond` fake ECU over a socat pty bridge, with the
+  reconstructed flash image byte-compared against the source. They are
+  **not definitive** (fake ECU — only on-car runs prove what the real ECU
+  accepts) and they need:
+  - a **real 256 KB flash dump** at `captures/actual_flash.bin` (private —
+    never committed; put your own full 256 KB DDE3 dump there), and
+  - `socat` installed.
+
+  Without either, the tests skip and say so.
 
 ## Repository layout
 
