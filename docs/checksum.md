@@ -46,8 +46,8 @@ checksums were actually correct. Root cause had three layers:
    table: it renders `checksum::verify()` results (Block / Pos / Stored /
    Computed / Status / Stored-edit / Apply / Fix), with a proper
    "no block found" state for blank or foreign images. `sim.rs`'s checksum
-   readout and the CLI were updated to the same API. `bench.rs` write
-   path corrects all discovered blocks.
+   readout and the CLI were updated to the same API. The CLI write path
+   corrects all discovered blocks.
 
 New/changed tests (29 passing): LCG + both selftest regression vectors,
 marker-path full image (code + calibration discovered), padded 32 KB

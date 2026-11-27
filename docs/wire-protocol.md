@@ -218,7 +218,7 @@ ECU's flasher accepts them.
 
 ## 33. MPPS-style calibration write: 224-byte blocks + `07 0F` + DTC prep (2026-11-22)
 
-The calibration-area write (`write_calibration` / `bench --write-cal`) now
+The calibration-area write (`write_calibration` / `write-cal`) now
 mirrors **MPPS's** calibration write, tested with 100% on-car success
 (`captures/mpps capture/mppswrite.txt`; side-by-side in
 `docs/FINDINGS_mpps_vs_galletto_calibration.md`). This is **distinct from
@@ -260,7 +260,7 @@ matching MPPS's read session (`captures/mpps capture/mppsread.txt`).
 `begin_flash_session(dtc_prep: bool)`. The `07 0F` builder and the 224-byte
 block math are unit-tested; `sim::tests::mpps_style_cal_write_preamble`
 drives the full preamble through the fake ECU. End-to-end
-(`bench --write-cal` vs `respond` on a socat pty pair) writes 147 blocks and
+(`write-cal` vs `respond` on a socat pty pair) writes 147 blocks and
 the reconstructed 0x38000–0x40000 span matches the source image
 byte-for-byte. (That socat E2E carries **no monitor-tap echo**, so it never
 exercised the parser's echo path — which is how the §34 buffer bug slipped
@@ -297,7 +297,7 @@ as the echo, then the 4-byte reply, and asserts both are extracted intact. It
 
 **E2E proof.** A faithful K-line T-topology tap (two raw ptys; the bridge
 forwards each side's TX to the peer *and* taps it back to the sender's reader —
-no pty `ECHO`, so no feedback loop) + `respond` + `bench --write-cal` on an
+no pty `ECHO`, so no feedback loop) + `respond` + `write-cal` on an
 image with a `12 FC` trap in block 5's tail: **old code** fails with the exact
 `no echo of service 0x07` error; **fixed code** writes all 147 blocks and the
 dump matches byte-for-byte.
