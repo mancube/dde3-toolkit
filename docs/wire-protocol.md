@@ -305,8 +305,8 @@ dump matches byte-for-byte.
 ## 35. Real-car capture (2026-11-23): K-line sleep/wake + write pacing parity with MPPS
 
 First full real-car calibration write with the MPPS-style flow
-(`captures/dde3-20261123-122003.log`, analyzed by
-`tools/analyze_realcar_write.py`). Two findings, both now fixed in code.
+(`captures/dde3-20261123-122003.log`, analyzed with
+`dde3-toolkit log write`). Two findings, both now fixed in code.
 
 ### 35.1 The ECU's K-line module sleeps after ~20 s of line silence — and data frames don't wake it
 

@@ -15,6 +15,7 @@ mod capture;
 mod checksum;
 mod dtc;
 mod live;
+mod logana;
 mod patches;
 mod presets;
 mod protocol;
@@ -98,6 +99,10 @@ fn print_usage() {
     eprintln!("  baud [--rate 38400|125000] Switch the DS2 link up via service 0x91 (needs the baud patch)");
     eprintln!("                             (requires the 0x91 flash patch: patches/e46_baud<rate>.bin,");
     eprintln!("                             write it first; see patches/README.md)");
+    eprintln!("  log <sum|run|write> …      Analyze dde3-toolkit logs (Rust ports of the");
+    eprintln!("                             Python log tools): `sum` respond/capture request");
+    eprintln!("                             sequences, `run` a run log (--image/--pairs/--class),");
+    eprintln!("                             `write` a real-car write log (--mpps reference)");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --port <path>              Serial port (default /dev/ttyUSB1 FT232R sender;");
@@ -431,6 +436,7 @@ fn run() -> Result<()> {
             println!("DS2 fault memory cleared");
             Ok(())
         }
+        "log" => logana::run(&args[2..]).map_err(anyhow::Error::msg),
         "checksum" => {
             let image_path = args
                 .get(2)

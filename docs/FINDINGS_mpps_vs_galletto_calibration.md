@@ -15,7 +15,7 @@ toolkit need to change anything?
 | `captures/galletto capture with respond tool/fakewritegalleto.txt` | Galletto | full **write** |
 | `src/protocol.rs` | toolkit | `read_full`/`read_range`, `write_full`/`write_calibration` |
 
-Analyze with: `python3 tools/compare_captures.py <capture.txt>`.
+Analyze with: `dde3-toolkit log sum <capture.txt>`.
 
 Constants that anchor everything: `CAL_START=0x38000`, `CAL_LEN=0x8000`
 (→ calibration is exactly `0x38000..0x40000`), `READ_CHUNK=0x80` (128 B),

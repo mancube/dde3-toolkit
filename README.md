@@ -75,6 +75,16 @@ captures. All of that work is written up in [`docs/`](docs) — start with
   log dir defaults to `~/.local/share/dde3-toolkit/logs/` (persistent,
   survives reboots); set `$DDE3_LOG_DIR` or pass `--log-dir <path>` to
   move it
+- **Log analysis** — `log` analyzes the toolkit's own logs headlessly
+  (Rust ports of the former Python tools, byte-identical output):
+  `log sum <capture.txt>…` summarizes the request sequences of
+  respond/capture logs; `log run <log>` pairs TX/RX, validates the
+  envelope, summarizes per-command reply shapes/gaps and the
+  FLASH_LESEN sequence (optionally verified against `--image <bin>`);
+  `log write <log>` breaks a real-car write run into its note/error
+  timeline, per-class TX pacing, TX→reply latency, the flash-write phase,
+  and silence gaps — with an optional `--mpps <file>` reference capture
+  for pacing comparison
 - **9-tab GUI** — Overview, Read, Write, Checksum, Patches, Fault codes,
   Live, Logger, Log (egui)
 - **Passive capture** — `capture` taps the K-line read-only (frames named,
@@ -161,7 +171,8 @@ wire traffic on it.
 All subcommands also accept `--port`, `--baud <rate>` and
 `--data-delay <ms>` (per-byte pacing of control frames; flash data frames
 are unpaced). More single-purpose commands: `seed-key <Z>`, `uprog-ein`,
-`diagnose-ende`, `fault-clear`, `capture`, `checksum`, `patches`.
+`diagnose-ende`, `fault-clear`, `capture`, `checksum`, `patches`,
+`log <sum|run|write>`.
 With no arguments (or a leading flag) the binary launches the GUI.
 
 ### `respond` — the fake ECU
@@ -256,11 +267,13 @@ cargo test        # unit + E2E fake-ECU tests
 │   ├── respond.rs       # the `respond` fake-ECU server (--flash/--dump/--patched-baud)
 │   ├── capture.rs       # passive K-line capture (read-only tap)
 │   ├── patches.rs       # manifest-driven firmware patches
+│   ├── logana.rs        # the `log` subcommand (sum/run/write log analyzers)
 │   └── app.rs           # egui GUI (9 tabs)
 │   (each module's tests live in src/<name>/tests.rs)
 ├── patches/             # patch builders + manifests + prebuilt images
 ├── tools/               # Python: WinkFP VM, frame extraction, wire monitor,
-│                        #   run-log analyzers, table generators
+│                        #   log analyzers (now also Rust: `dde3-toolkit log`),
+│                        #   table generators
 ├── analysis/            # extracted frames + reference data from the .prg
 ├── docs/                # protocol findings, RE notes, session log
 ├── HANDOVER.md          # current status + the task at hand

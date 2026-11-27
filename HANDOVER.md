@@ -74,7 +74,7 @@ prefix premise is already proven by the real-car dump
 (`TX 12 04 00 16` → `RX 12 2E A0 …`, no "IDENT no reply" line) and data
 frames at ~327 ms/frame (MPPS parity; 3 ms/byte only around the bootstrap,
 0 around the data-frame loop — wire-protocol §35.5–35.6). Check with
-`tools/analyze_realcar_write.py`.
+`dde3-toolkit log write`.
 
 ### 3. Two-session full write at 224-byte blocks — on-car verification (NEW EXPERIMENT)
 `write_full` now uses the calibration-write block size in **both** regions
