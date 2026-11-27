@@ -3,8 +3,8 @@
 **2026-11-22.** Deep-dive on the real-car `UPROG_EIN` reply, traced through
 the ECU firmware decompilation (`~/Desktop/edc15m/research/out/disasm.txt`,
 C166) and the real-car capture (`captures/actual ecu UPROG_EIN response.txt`).
-Supersedes the brief note in `docs/SESSION_2026-11-19.md` (which is kept for
-the session context) and corrects one of its claims (see
+Supersedes the brief note in `docs/archive/SESSION_2026-11-19.md` (archived;
+kept for the session context) and corrects one of its claims (see
 ["Correction to the 2026-11-19 note"](#correction)).
 
 ## TL;DR
@@ -172,7 +172,7 @@ triple is car-specific and the rest is a stable flash window.
 
 ## Correction
 
-`docs/SESSION_2026-11-19.md` states: *"The 72 bytes are **not stored in
+`docs/archive/SESSION_2026-11-19.md` states: *"The 72 bytes are **not stored in
 flash** — not found anywhere in `actual_flash.bin`."* The decompilation
 refines this. The handler **does** copy 72 bytes from flash `0x3FC6A`
 (MCU `0x7C6A`), so the table's structure *is* in flash. The full 72-byte match

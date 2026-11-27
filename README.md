@@ -294,7 +294,7 @@ cargo test        # unit + E2E fake-ECU tests
 | MPPS vs Galletto calibration flows | [`docs/FINDINGS_mpps_vs_galletto_calibration.md`](docs/FINDINGS_mpps_vs_galletto_calibration.md) |
 | Firmware patches (baud, EWS delete) | [`docs/patches.md`](docs/patches.md), [`patches/README.md`](patches/README.md) |
 | Reverse-engineering notes (VM, jobs) | [`docs/reverse-engineering.md`](docs/reverse-engineering.md) |
-| Real-car capture analysis (2026-11-19) | [`docs/SESSION_2026-11-19.md`](docs/SESSION_2026-11-19.md) |
+| Real-car capture analysis (2026-11-19) | [`docs/archive/SESSION_2026-11-19.md`](docs/archive/SESSION_2026-11-19.md) (archived) |
 | Historical session log | [`docs/session-log.md`](docs/session-log.md) |
 
 ## Known limits
