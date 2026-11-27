@@ -915,7 +915,7 @@ impl App {
         let path = PathBuf::from(self.read_path.clone());
         // At a fast baud the wire is fast enough for back-to-back frames —
         // the 3 ms/byte pacing (a 9600 habit) would dominate the 9-byte
-        // request frames (same rule as bench and the live loop).
+        // request frames (same rule as the live loop).
         let fast = self.fast_baud_active.is_some();
         self.start(move |link, tx| {
             let mut guard = lock_or_recover(&link);

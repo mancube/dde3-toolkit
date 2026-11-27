@@ -77,8 +77,6 @@ captures. All of that work is written up in [`docs/`](docs) — start with
   move it
 - **9-tab GUI** — Overview, Read, Write, Checksum, Patches, Fault codes,
   Live, Logger, Log (egui)
-- **Headless bench** — `bench` subcommand for scripted identify /
-  read / write / live runs with timing output and a meaningful exit status
 - **Passive capture** — `capture` taps the K-line read-only (frames named,
   raw bytes kept verbatim; nothing is ever transmitted)
 - **Fake-ECU responder** — `respond` runs the full `SimEcu` state machine
@@ -124,7 +122,7 @@ scripts/release.sh 0.6
 # Fake ECU on a pty pair, then run the toolkit against it
 socat -d -d pty,raw,echo=0,link=/tmp/ecu-pty pty,raw,echo=0,link=/tmp/tool-pty &
 ./target/release/dde3-toolkit respond --port /tmp/ecu-pty --out fake_ecu.log &
-./target/release/dde3-toolkit bench --read --port /tmp/tool-pty --out /tmp/full.bin
+./target/release/dde3-toolkit read /tmp/full.bin --port /tmp/tool-pty
 ./target/release/dde3-toolkit --demo        # GUI with a fake ECU
 ```
 
@@ -163,9 +161,8 @@ wire traffic on it.
 All subcommands also accept `--port`, `--baud <rate>` and
 `--data-delay <ms>` (per-byte pacing of control frames; flash data frames
 are unpaced). More single-purpose commands: `seed-key <Z>`, `uprog-ein`,
-`diagnose-ende`, `fault-clear`, `capture`, `checksum`, `patches`,
-`bench`. With no arguments (or a leading flag) the binary launches the
-GUI.
+`diagnose-ende`, `fault-clear`, `capture`, `checksum`, `patches`.
+With no arguments (or a leading flag) the binary launches the GUI.
 
 ### `respond` — the fake ECU
 
@@ -189,7 +186,7 @@ replies are matched on the wire and logged as `ECHO`.
 
 # Behave like the patched real ECU (0x91 baud change): accept the 0x91,
 # switch the port to the patch's rate (125000 -> 124800) and ACK at the
-# new rate, so `baud --rate …` / `bench --fast-baud …` run end-to-end
+# new rate, so `baud --rate …` and the fast-baud read/write run end-to-end
 ./target/release/dde3-toolkit respond --out fake_ecu.log \
     --patched-baud 125000
 ```
@@ -258,7 +255,6 @@ cargo test        # unit + E2E fake-ECU tests
 │   ├── sim.rs           # ECU simulator (the `respond` fake-ECU state machine)
 │   ├── respond.rs       # the `respond` fake-ECU server (--flash/--dump/--patched-baud)
 │   ├── capture.rs       # passive K-line capture (read-only tap)
-│   ├── bench.rs         # headless bench runner
 │   ├── patches.rs       # manifest-driven firmware patches
 │   └── app.rs           # egui GUI (9 tabs)
 │   (each module's tests live in src/<name>/tests.rs)

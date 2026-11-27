@@ -11,7 +11,6 @@
 //! for headless/bench use.
 
 mod app;
-mod bench;
 mod capture;
 mod checksum;
 mod dtc;
@@ -80,21 +79,13 @@ fn print_usage() {
     eprintln!("                             (configure the fake ECU like the patched real ECU:");
     eprintln!("                             it accepts the 0x91 baud change and switches the link —");
     eprintln!("                             125000 runs at the S0BG divisor 124800 — so `baud` and");
-    eprintln!("                             `bench --fast-baud` fast-baud reads/writes can be tested)");
+    eprintln!("                             fast-baud reads/writes can be tested end-to-end)");
     eprintln!("                             (default port /dev/ttyUSB0; --dump writes the");
     eprintln!("                             reconstructed flash image the peer programmed —");
     eprintln!("                             the 192 KB 0x10000..0x40000 test write is padded");
     eprintln!("                             FF to a full 256 KB image; --flash serves a real");
     eprintln!("                             256 KB dump from the fake ECU: FLASH_LESEN + AIF");
     eprintln!("                             read return the file's bytes)");
-    eprintln!("  bench                      Headless run: identify + optional read/write,");
-    eprintln!("                             progress and timing on stderr, useful exit status");
-    eprintln!("    [--info|--read|--read-cal|--write|--write-cal|--live]");
-    eprintln!("    [--image <path>] [--out <path>] [--fast-baud 38400|125000] [--duration <s>]");
-    eprintln!("    [--fast-9600] (--live only: back-to-back polling + 1 ms/byte pacing;");
-    eprintln!("    default is the original 55 ms / 3 ms timing; --fast-baud needs the patch,");
-    eprintln!("    and at the fast rate TX pacing is 0 — back-to-back frames, the 3 ms/byte");
-    eprintln!("    WinKFP pacing is a 9600 habit that would erase the speedup)");
     eprintln!("  checksum <image.bin>       Verify and optionally correct flash checksums");
     eprintln!("  patches [list|show|apply|revert|verify|correct] [name]");
     eprintln!("                             Firmware patch manifests from ./patches (baud 0x91,");
@@ -172,16 +163,11 @@ fn run() -> Result<()> {
     let mut reply_delay_ms: u64 = 5;
     // Target DS2 rate for the `baud` command (the 0x91 patch). 38400 or 125000.
     let mut target_rate: u32 = 38_400;
-    // `bench --fast-baud <rate>`: switch up right after IDENT (needs the patch).
-    let mut fast_baud: Option<u32> = None;
-    // `bench --live --fast-9600`: the faster 9600 timing (back-to-back,
-    // 1 ms/byte) instead of the default WinKFP timing (55 ms gap, 3 ms/byte).
-    let mut fast9600: bool = false;
-    let mut bench_image: Option<String> = None;
-    let mut bench_out: Option<String> = None;
+    let mut image_opt: Option<String> = None;
+    let mut out_opt: Option<String> = None;
     // `respond --dump <file>`: at run end, write the reconstructed flash
     // image (everything the peer programmed) to this file.
-    let mut bench_dump: Option<String> = None;
+    let mut dump_opt: Option<String> = None;
     // `respond --flash <file>`: serve this real flash dump from the fake ECU.
     let mut respond_flash: Option<String> = None;
     // `respond --patched-baud <rate>`: configure the fake ECU like the
@@ -229,16 +215,6 @@ fn run() -> Result<()> {
                     .parse::<u32>()
                     .with_context(|| format!("invalid rate: {}", args[i]))?;
             }
-            "--fast-baud" => {
-                i += 1;
-                fast_baud = Some(
-                    args.get(i)
-                        .context("--fast-baud requires a value")?
-                        .parse::<u32>()
-                        .with_context(|| format!("invalid fast-baud rate: {}", args[i]))?,
-                );
-            }
-            "--fast-9600" => fast9600 = true,
             "--reply-delay" => {
                 i += 1;
                 reply_delay_ms = args
@@ -249,15 +225,15 @@ fn run() -> Result<()> {
             },
             "--image" => {
                 i += 1;
-                bench_image = Some(args.get(i).cloned().context("--image requires a value")?);
+                image_opt = Some(args.get(i).cloned().context("--image requires a value")?);
             }
             "--out" => {
                 i += 1;
-                bench_out = Some(args.get(i).cloned().context("--out requires a value")?);
+                out_opt = Some(args.get(i).cloned().context("--out requires a value")?);
             }
             "--dump" => {
                 i += 1;
-                bench_dump = Some(args.get(i).cloned().context("--dump requires a value")?);
+                dump_opt = Some(args.get(i).cloned().context("--dump requires a value")?);
             }
             "--flash" => {
                 i += 1;
@@ -298,7 +274,7 @@ fn run() -> Result<()> {
             let opts = capture::CaptureOptions {
                 port,
                 baud,
-                out: bench_out.clone().map(PathBuf::from),
+                out: out_opt.clone().map(PathBuf::from),
                 duration: duration.map(Duration::from_secs_f64),
             };
             capture::run(&opts)?;
@@ -317,11 +293,11 @@ fn run() -> Result<()> {
             let opts = respond::RespondOptions {
                 port,
                 baud,
-                out: bench_out.clone().map(PathBuf::from),
+                out: out_opt.clone().map(PathBuf::from),
                 duration: duration.map(Duration::from_secs_f64),
                 data_delay_ms,
                 reply_delay_ms,
-                dump: bench_dump.clone().map(PathBuf::from),
+                dump: dump_opt.clone().map(PathBuf::from),
                 flash: respond_flash.map(PathBuf::from),
                 baud_patch: respond_baud_patch,
             };
@@ -430,8 +406,8 @@ fn run() -> Result<()> {
             k.set_data_delay(data_delay_ms);
             let dtcs = match k.read_dtcs() {
                 Ok(dtcs) => dtcs,
-                // Same trace dump as `bench`: the wire log is the only evidence
-                // of what the ECU actually replied on a failed fault read.
+                // The wire log is the only evidence of what the ECU actually
+                // replied on a failed fault read.
                 Err(e) => {
                     for line in k.take_logs().iter().rev().take(120).rev() {
                         eprintln!("TRACE {line}");
@@ -454,32 +430,6 @@ fn run() -> Result<()> {
             k.clear_faults_ds2()?;
             println!("DS2 fault memory cleared");
             Ok(())
-        }
-        "bench" => {
-            let mut mode = bench::Mode::Info;
-            for a in &args[2..] {
-                match a.as_str() {
-                    "--read" => mode = bench::Mode::Read,
-                    "--read-cal" => mode = bench::Mode::ReadCal,
-                    "--write" => mode = bench::Mode::Write,
-                    "--write-cal" => mode = bench::Mode::WriteCal,
-                    "--live" => mode = bench::Mode::Live,
-                    "--info" => mode = bench::Mode::Info,
-                    _ => {}
-                }
-            }
-            let args = bench::BenchArgs {
-                port,
-                image: bench_image.map(PathBuf::from),
-                out: bench_out.map(PathBuf::from),
-                mode,
-                baud,
-                data_delay: data_delay_ms,
-                fast_baud,
-                duration,
-                fast9600,
-            };
-            bench::run(args)
         }
         "checksum" => {
             let image_path = args
@@ -521,7 +471,7 @@ fn run() -> Result<()> {
                 anyhow::bail!("checksums were bad and have been corrected in place");
             }
         }
-        "patches" => patches_cmd(&args, bench_image, bench_out),
+        "patches" => patches_cmd(&args, image_opt, out_opt),
         "uprog-ein" => {
             let mut k = Kline::open(&port, baud)?;
             k.set_data_delay(data_delay_ms);
@@ -682,7 +632,7 @@ fn patch_positionals(args: &[String]) -> Vec<String> {
     while i < args.len() {
         match args[i].as_str() {
             "--image" | "--out" | "--port" | "--baud" | "--data-delay" | "--duration"
-            | "--rate" | "--fast-baud" | "--patched-baud" => i += 2,
+            | "--rate" | "--patched-baud" => i += 2,
             s if s.starts_with("--") => i += 1,
             s => {
                 pos.push(s.to_string());

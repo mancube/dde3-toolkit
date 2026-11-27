@@ -43,9 +43,9 @@ Shipped and verified (detail in git history + `docs/`):
   car once (car started afterwards).
 - ✅ Fault read/clear, DTC tables, TDI V3.1 checksum + program chain,
   manifest-driven patches, 8-tab GUI, `respond` fake ECU (Galletto-parity,
-  `--flash`/`--dump`/`--patched-baud`), headless `bench`, live/logger with
-  presets + four Live view modes, signed (i16) ADF decode.
-- ✅ `cargo test` → 99 passing (95 unit + 4 fake-ECU E2E), clippy clean.
+  `--flash`/`--dump`/`--patched-baud`), live/logger with presets + four Live
+  view modes, signed (i16) ADF decode.
+- ✅ `cargo test` → 95 passing (91 unit + 4 fake-ECU E2E), clippy clean.
   Last release **v0.5.2** (linux + windows x86_64, `dist/`).
 - ⬜ Open: the on-car verifications below.
 
@@ -125,9 +125,9 @@ native Win10/11 machine.
 
 ## Open branches
 
-- `feature/full-write-224-blocks` — item 3: full write at 224-byte blocks
-  (calibration-write size) + the E2E fake-ECU test suite
-  (`tests/e2e_fake_ecu.rs`). Merge to main when the on-car write passes.
+None — `feature/full-write-224-blocks` (item 3 + the E2E fake-ECU test suite,
+`tests/e2e_fake_ecu.rs`) is merged to main; item 3's on-car verification
+stays open above.
 
 ## Closed — do not re-attempt without new evidence
 

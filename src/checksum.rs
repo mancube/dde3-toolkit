@@ -38,7 +38,7 @@ pub const CS_START: usize = 0xB80; // a checksum covers from block + CS_START
 pub const FULL_SIZE: usize = 0x40000; // a full 256 kB read
 const M16: u16 = 0xFFFF;
 
-/// Block geometry constants (shared with the GUI/bench).
+/// Block geometry constants (shared with the GUI).
 pub const IMAGE_SIZE: usize = FULL_SIZE; // a full 256 KB read
 pub const CAL_START: usize = 0x38000; // calibration: 0x38000-0x3FFFF
 pub const CAL_LEN: usize = 0x8000; // 32 KB

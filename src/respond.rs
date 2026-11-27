@@ -60,8 +60,8 @@ pub struct RespondOptions {
     /// (the `e46_baud<rate>.bin` images). `Some(38400 | 125000)` — a `0x91`
     /// then switches the port to the patch's actual rate (125000 → 124800,
     /// the S0BG divisor) and the ACK goes out at the NEW rate, so `baud`
-    /// and `bench --fast-baud` can be tested end-to-end. `None` = no patch
-    /// (the 0x91 stub ACK stays, nothing switches).
+    /// and the fast-baud read/write path can be tested end-to-end.
+    /// `None` = no patch (the 0x91 stub ACK stays, nothing switches).
     pub baud_patch: Option<u32>,
 }
 

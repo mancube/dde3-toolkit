@@ -43,7 +43,7 @@ Full docs + applier + patched image:
 configures the fake ECU like the patched real ECU — the `0x91` is accepted,
 the port switches to the patch's rate (125000 → 124800, S0BG divisor) and
 the ACK goes out at the **new** rate, so the tester side (`baud --rate …`,
-`bench --fast-baud …` read/write/live) runs the full flow end-to-end over a
+then `read`/`write --baud 124800`) runs the full flow end-to-end over a
 pty loopback or dual-adapter bench without a car. Verified: `baud` switch +
 IDENT at both rates, ~89 Hz live polling, 256 KB fast read byte-exact, fast
 write reconstructs (`--dump`) to the exact source span. See

@@ -107,7 +107,7 @@ To confirm the exact size you would need a boot-block image (a JTAG/BMS read of
 - **Normal diagnostics** (ident, AIF, DTC read/clear, seed/key, live data, AIF
   read): the hard ceiling is **128 bytes total** (`LEN ≤ 0x80`). Everything the
   toolkit sends in the normal session is well under that — no action needed.
-- **Calibration/flash write** (`write_calibration` / `bench --write-cal`): must
+- **Calibration/flash write** (`write_calibration` / `write-cal`): must
   send `UPROG_EIN` **first** (it does, via `begin_flash_session`). That routes
   the 233-byte blocks to the big boot-block buffer. **Keep it that way** — a
   >128-byte frame sent in the *normal* session would be dropped at `0x1EB34`.
