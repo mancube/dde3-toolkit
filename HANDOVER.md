@@ -30,7 +30,7 @@ chip, DDE 3.0 hardware name).
 | `docs/FINDINGS_*.md` | Earlier finding write-ups |
 | `docs/archive/` | Archived docs — history only: the fast-baud handoff, plus the 2026-11-09 (hardware bring-up) and 2026-11-19 (real-car run analysis) session records |
 
-## Current status (v0.5.2, 2026-11-27)
+## Current status (v0.5.3, 2026-11-27)
 
 Shipped and verified (detail in git history + `docs/`):
 
@@ -46,8 +46,8 @@ Shipped and verified (detail in git history + `docs/`):
   manifest-driven patches, 8-tab GUI, `respond` fake ECU (Galletto-parity,
   `--flash`/`--dump`/`--patched-baud`), live/logger with presets + four Live
   view modes, signed (i16) ADF decode.
-- ✅ `cargo test` → 95 passing (91 unit + 4 fake-ECU E2E), clippy clean.
-  Last release **v0.5.2** (linux + windows x86_64, `dist/`).
+- ✅ `cargo test` → 104 passing (100 unit + 4 fake-ECU E2E), clippy clean.
+  Last release **v0.5.3** (linux + windows x86_64, `dist/`).
 - ⬜ Open: the on-car verifications below.
 
 **E2E fake-ECU tests** (`tests/e2e_fake_ecu.rs`): full read, cal read,

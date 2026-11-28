@@ -28,7 +28,10 @@ captures. All of that work is written up in [`docs/`](docs) — start with
 - **Flash write** — two flows, both verified against real captures:
   - *full image*: Galletto's two-session flow — program area
     (0x10000–0x38000) → `DIAGNOSE_ENDE` → re-authenticate → calibration
-    area (0x38000–0x40000), 64-byte blocks, per-area erase;
+    area (0x38000–0x40000), 224-byte blocks in both regions (731×224 +
+    1×96 program, 146×224 + 1×64 cal = 879 frames, down from 3072×64 B),
+    per-area erase; on-car verification of the program-area 224 B size is
+    still pending (see Known limits);
   - *calibration only*: MPPS-style — DTC read+clear prep, a single
     `07 0F` write-end, then 224-byte blocks (146 × 224 + 1 × 64),
     unpaced (≈330 ms/frame, MPPS parity).
@@ -308,9 +311,12 @@ cargo test        # unit + E2E fake-ECU tests
 - The fast-baud (0x91) path is bench-verified against the fake ECU
   end-to-end; on-car use requires the baud patch and is not yet
   car-verified.
-- 64-byte (full write) / 224-byte (calibration) / 128-byte (read) are the
-  only verified block sizes — larger program-area blocks hung the ECU on
-  the car (see `docs/wire-protocol.md` §32/§33).
+- 224-byte (calibration write) / 128-byte (read) are the on-car-verified
+  block sizes. The full write now also uses 224-byte blocks in the program
+  area (wire-protocol §37) — a deliberate new experiment, distinct from the
+  rejected 192-B mode that hung the ECU (§32/§33). If the ECU hangs at
+  0x10000, `write_full` reverts to the 64-byte `WRITE_BLOCK` reference
+  size.
 
 ## Safety
 
